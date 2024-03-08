@@ -1,0 +1,7 @@
+[swim_testdata]
+git-tree-sha1 = "21cc8de5dc13a86cbb132eae6499849b9045ba1e"
+lazy=true
+
+    [[swim_testdata.download]]
+    url = "https://www.sintef.no/contentassets/6d4219e163474273a112cce78f44387a/swimdata.tar.gz"
+    sha256 = "1f5f52f022130c2ee24230c601be514769049877da1b84960d03e352d439ec52"
