@@ -15,7 +15,8 @@ function test_watercourses(grid, precipitation, filled_traps, infiltration)
 
     
     runoff_total, regs, outside, infil =
-        watercourses(tstruct, Vector{Bool}(filled_traps), precipitation, infiltration)
+        watercourses(tstruct, Vector{Bool}(filled_traps),
+                     precipitation=precipitation, infiltration=infiltration)
 
     total_precipitation = sum(precipitation)
 
