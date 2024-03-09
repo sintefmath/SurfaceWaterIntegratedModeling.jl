@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>Simple synthetic example · SWIM</title><meta name="title" content="Simple synthetic example · SWIM"/><meta property="og:title" content="Simple synthetic example · SWIM"/><meta property="twitter:title" content="Simple synthetic example · SWIM"/><meta name="description" content="Documentation for SWIM."/><meta property="og:description" content="Documentation for SWIM."/><meta property="twitter:description" content="Documentation for SWIM."/><script data-outdated-warner src="../assets/warner.js"></script><link href="https://cdnjs.cloudflare.com/ajax/libs/lato-font/3.0.0/css/lato-font.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/juliamono/0.050/juliamono.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/fontawesome.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/solid.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/brands.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.8/katex.min.css" rel="stylesheet" type="text/css"/><script>documenterBaseURL=".."</script><script src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.6/require.min.js" data-main="../assets/documenter.js"></script><script src="../search_index.js"></script><script src="../siteinfo.js"></script><script src="../../versions.js"></script><link class="docs-theme-link" rel="stylesheet" type="text/css" href="../assets/themes/documenter-dark.css" data-theme-name="documenter-dark" data-theme-primary-dark/><link class="docs-theme-link" rel="stylesheet" type="text/css" href="../assets/themes/documenter-light.css" data-theme-name="documenter-light" data-theme-primary/><script src="../assets/themeswap.js"></script></head><body><div id="documenter"><nav class="docs-sidebar"><a class="docs-logo" href="../"><img src="../assets/logo.png" alt="SWIM logo"/></a><div class="docs-package-name"><span class="docs-autofit"><a href="../">SWIM</a></span></div><button class="docs-search-query input is-rounded is-small is-clickable my-2 mx-auto py-1 px-2" id="documenter-search-query">Search docs (Ctrl + /)</button><ul class="docs-menu"><li><a class="tocitem" href="../">Introduction</a></li><li><a class="tocitem" href="../static/">Static analysis</a></li><li><a class="tocitem" href="../dynamic/">Dynamic analysis</a></li><li><a class="tocitem" href="../utils/">Utilities and visualization</a></li><li><span class="tocitem">Examples</span><ul><li><a class="tocitem" href="../urban/">Urban landscape</a></li><li class="is-active"><a class="tocitem" href>Simple synthetic example</a><ul class="internal"><li><a class="tocitem" href="#Importing-packages-and-loading-the-surface"><span>Importing packages and loading the surface</span></a></li><li><a class="tocitem" href="#Identifying-traps,-subtraps-and-spill-path"><span>Identifying traps, subtraps and spill path</span></a></li><li><a class="tocitem" href="#Examining-the-trap-structure"><span>Examining the trap structure</span></a></li><li><a class="tocitem" href="#Traps-and-trap-regions"><span>Traps and trap regions</span></a></li><li><a class="tocitem" href="#Spill-field"><span>Spill field</span></a></li><li><a class="tocitem" href="#Spillpoints"><span>Spillpoints</span></a></li><li><a class="tocitem" href="#Trap-volumes-and-subvolumes"><span>Trap volumes and subvolumes</span></a></li><li><a class="tocitem" href="#Hierarchy-of-subtraps-and-supertraps"><span>Hierarchy of subtraps and supertraps</span></a></li><li><a class="tocitem" href="#Tracking-developments-over-time"><span>Tracking developments over time</span></a></li><li><a class="tocitem" href="#Infiltration"><span>Infiltration</span></a></li><li><a class="tocitem" href="#Changing-weather"><span>Changing weather</span></a></li></ul></li><li><a class="tocitem" href="../flat_areas/">Handling flat areas</a></li></ul></li><li><a class="tocitem" href="../indexlist/">Index</a></li></ul><div class="docs-version-selector field has-addons"><div class="control"><span class="docs-label button is-static is-size-7">Version</span></div><div class="docs-selector control is-expanded"><div class="select is-fullwidth is-size-7"><select id="documenter-version-selector"></select></div></div></div></nav><div class="docs-main"><header class="docs-navbar"><a class="docs-sidebar-button docs-navbar-link fa-solid fa-bars is-hidden-desktop" id="documenter-sidebar-button" href="#"></a><nav class="breadcrumb"><ul class="is-hidden-mobile"><li><a class="is-disabled">Examples</a></li><li class="is-active"><a href>Simple synthetic example</a></li></ul><ul class="is-hidden-tablet"><li class="is-active"><a href>Simple synthetic example</a></li></ul></nav><div class="docs-right"><a class="docs-navbar-link" href="https://github.com/sintefmath/SurfaceWaterIntegratedModeling.jl" title="View the repository on GitHub"><span class="docs-icon fa-brands"></span><span class="docs-label is-hidden-touch">GitHub</span></a><a class="docs-navbar-link" href="https://github.com/sintefmath/SurfaceWaterIntegratedModeling.jl/blob/main/examples/synthetic.jl" title="Edit source on GitHub"><span class="docs-icon fa-solid"></span></a><a class="docs-settings-button docs-navbar-link fa-solid fa-gear" id="documenter-settings-button" href="#" title="Settings"></a><a class="docs-article-toggle-button fa-solid fa-chevron-up" id="documenter-article-toggle-button" href="javascript:;" title="Collapse all docstrings"></a></div></header><article class="content" id="documenter-page"><h1 id="Simple-synthetic-example"><a class="docs-heading-anchor" href="#Simple-synthetic-example">Simple synthetic example</a><a id="Simple-synthetic-example-1"></a><a class="docs-heading-anchor-permalink" href="#Simple-synthetic-example" title="Permalink"></a></h1><p>The purpose of this example is to introduce some key concepts of SWIM by demonstration on an extremely simple synthetic terrain grid.</p><p>The synthetic terrain contains three low-level traps (&#39;ponds&#39;, &#39;lakes&#39;), and one higher-level trap.  Its topological structure is shown in Fig. 1 below.</p><p>On this diagram we see that trap 1 and 2 are subtraps of trap 4, i.e. they are smaller traps contained within the footprint of trap 4.  When trap 4 is filled with water and spills over, the water will flow downwards into downstream trap 3.  When trap 3 is filled, the water will spill out of the surface domain.</p><p>The details of this will be made cleared below, as we demonstrate the concepts on the synthetic surface.</p><p><img src="../assets/diagram.png" alt="image"/> <em>Fig. 1: Topological structure of the traps in the synthetic surface</em></p><h2 id="Importing-packages-and-loading-the-surface"><a class="docs-heading-anchor" href="#Importing-packages-and-loading-the-surface">Importing packages and loading the surface</a><a id="Importing-packages-and-loading-the-surface-1"></a><a class="docs-heading-anchor-permalink" href="#Importing-packages-and-loading-the-surface" title="Permalink"></a></h2><pre><code class="language-julia hljs">using SurfaceWaterIntegratedModeling
+import CairoMakie, Images # for visualization and loading of textures
+import ColorSchemes
+import Graphs
+using Pkg.Artifacts</code></pre><p>The package with SWIM testdata is provided as a Julia artifact, which can be accessed using the function <code>datapath_testdata</code>.  We subsequently load and display the synthetic grid.</p><pre><code class="language-julia hljs">datapath = joinpath(datapath_testdata(), &quot;data&quot;, &quot;synthetic&quot;)
+grid = loadgrid(joinpath(datapath, &quot;synsurf.txt&quot;))
+
+# for ease of use, we create our own label of key colors found in the
+# colorsheme `:Paired_12` used below
+cmap = Dict(:blue =&gt; 2, :green =&gt; 4, :red =&gt; 6, :orange =&gt; 8,
+            :lilac =&gt; 10, :bright =&gt; 11)
+
+# We also define some view angles that will come in handy
+view1 = (CairoMakie.Vec(-83, 378, 197), CairoMakie.Vec(100, 114, -4.5), 0.68)
+view2 = (CairoMakie.Vec(90, 494, 8.6), CairoMakie.Vec(100, 114, -4.5), 0.68);
+
+# plot the grid
+sf, fig, sc = plotgrid(grid, texture=fill(cmap[:bright], size(grid)),
+                       colormap=ColorSchemes.:Paired_12,
+                       colorrange=(1, 12), wireframe=true)
+fig
+set_camerapos(fig, sc, view1...)</code></pre><img src="077b436a.png" alt="Example block output"/><p>Grid seen from above.  Trap 1 and 2 from Fig. 1 can be seen on the upper left side, wheras trap 3 is seen downstream on the lower right side.</p><pre><code class="language-julia hljs">set_camerapos(fig, sc, view2...)</code></pre><img src="83074483.png" alt="Example block output"/><p>Grid seen from the side.  Here we see how trap 1 and 2 (right) constitute subtraps, or pockets, within a larger trap 4.  As they gradually fill with water, two separate ponds for trap 1 and 2 will coalesce into a single pond for trap 4.  We refer to trap 1, 2 and 3 as &quot;lowest-level traps&quot;, i.e. traps that do not have subtraps.  Trap number 4 is not a lowest-level trap, since it has trap 1 and 2 as subtraps.</p><h2 id="Identifying-traps,-subtraps-and-spill-path"><a class="docs-heading-anchor" href="#Identifying-traps,-subtraps-and-spill-path">Identifying traps, subtraps and spill path</a><a id="Identifying-traps,-subtraps-and-spill-path-1"></a><a class="docs-heading-anchor-permalink" href="#Identifying-traps,-subtraps-and-spill-path" title="Permalink"></a></h2><p>The traps, spillregions (watersheds) and their topological structure is computed by the <a href="../static/#SurfaceWaterIntegratedModeling.spillanalysis-Tuple{Matrix{&lt;:Real}}"><code>spillanalysis</code></a> function.  The result is stored in a <a href="../static/#TrapStructure"><code>TrapStructure</code></a>.</p><pre><code class="language-julia hljs">tstruct = spillanalysis(grid);</code></pre><p>The <a href="../static/#SurfaceWaterIntegratedModeling.numtraps-Tuple{TrapStructure}"><code>numtraps</code></a> function show the number of traps identified:</p><pre><code class="language-julia hljs">numtraps(tstruct)</code></pre><pre class="documenter-example-output"><code class="nohighlight hljs ansi">4</code></pre><p>This number includes all traps, whether they are lowest-level or not.</p><h2 id="Examining-the-trap-structure"><a class="docs-heading-anchor" href="#Examining-the-trap-structure">Examining the trap structure</a><a id="Examining-the-trap-structure-1"></a><a class="docs-heading-anchor-permalink" href="#Examining-the-trap-structure" title="Permalink"></a></h2><p>The returned <code>TrapStructure</code> has the following fields:</p><pre><code class="language-julia hljs">[fieldnames(typeof(tstruct))...]</code></pre><pre class="documenter-example-output"><code class="nohighlight hljs ansi">12-element Vector{Symbol}:
+ :topography
+ :spillfield
+ :regions
+ :spillpoints
+ :trapvolumes
+ :subvolumes
+ :footprints
+ :lowest_subtraps_for
+ :supertraps_of
+ :agglomerations
+ :building_mask
+ :sinks</code></pre><p>We will go through and explain these fields below.</p><h2 id="Traps-and-trap-regions"><a class="docs-heading-anchor" href="#Traps-and-trap-regions">Traps and trap regions</a><a id="Traps-and-trap-regions-1"></a><a class="docs-heading-anchor-permalink" href="#Traps-and-trap-regions" title="Permalink"></a></h2><p>The <code>:footprints</code> field contains the footprint of all traps, i.e. all cells that are covered by each trap&#39;s extent.  In the below code, we assign different colors to each trap, and plot them on the grid.  Note that since the footprints of trap 1 and 2 are contained <em>inside</em> trap 4, we overwrite the footprint of trap 4 with the footprints of trap 1 and 2 in the code below so that they are all seen on the same figure.</p><pre><code class="language-julia hljs"># We generate a texture to drape the surface with, and color the cells within
+# trap footprints in different colors.
+tex = fill(cmap[:bright], size(grid))
+tex[tstruct.footprints[4]] .= cmap[:orange]
+tex[tstruct.footprints[1]] .= cmap[:red]
+tex[tstruct.footprints[2]] .= cmap[:green]
+tex[tstruct.footprints[3]] .= cmap[:blue]
+
+drape_surface(sf, tex);
+set_camerapos(fig, sc, view1...)</code></pre><img src="4d67a7e4.png" alt="Example block output"/><p>Trap 1 and 2 are shown in red and green respectively, trap 3 in blue and trap 4 in orange.</p><p>Each of these traps have an associated watershed, or spill region.  All water landing in a given watershed, will eventually reach and accumulate in the associated trap.  The <code>:regions</code> field gives the spill regions for the <em>lowest-level</em> traps.  (For a trap with subtraps, its spill region is the union of the spill regions of its subtraps).</p><p>The number of regions is therefore equal to the number of lowest-level traps. We can query this number with the <a href="../static/#SurfaceWaterIntegratedModeling.numregions-Tuple{TrapStructure}"><code>numregions</code></a> function:</p><pre><code class="language-julia hljs">numregions(tstruct)</code></pre><pre class="documenter-example-output"><code class="nohighlight hljs ansi">3</code></pre><p>As we can see, there are three spill regions in the grid, associated with lowest-level traps 1, 2 and 3.  We here visualize these alongside the traps</p><pre><code class="language-julia hljs">tex = fill(cmap[:bright], size(grid))
+# Indicate the spill regions
+tex[tstruct.regions .== 1] .= cmap[:red]-1
+tex[tstruct.regions .== 2] .= cmap[:green]-1
+tex[tstruct.regions .== 3] .= cmap[:blue]-1
+# Indicate the associated  traps
+tex[tstruct.footprints[1]] .= cmap[:red]
+tex[tstruct.footprints[2]] .= cmap[:green]
+tex[tstruct.footprints[3]] .= cmap[:blue]
+
+drape_surface(sf, tex);
+set_camerapos(fig, sc, view1...)</code></pre><img src="3515ef7a.png" alt="Example block output"/><p>The spill region of trap 4 is the union of the blue and green regions on this plot.  The beige-colored part of the surface does not spill to any trap; water landing in this region will flow out of the surface domain.</p><h2 id="Spill-field"><a class="docs-heading-anchor" href="#Spill-field">Spill field</a><a id="Spill-field-1"></a><a class="docs-heading-anchor-permalink" href="#Spill-field" title="Permalink"></a></h2><p>The <code>:spillfield</code> field expressed the local direction of flow over the surface.  For a given cell, the flow will be directed towards its neighbor cell along the steepest local slope.  There are four or eight such neighbor cells, depending on whether one count the cells connected across diagonals (specified by the <code>usediags</code> argument when calling <a href="../static/#SurfaceWaterIntegratedModeling.spillanalysis-Tuple{Matrix{&lt;:Real}}"><code>spillanalysis</code></a>). We can visualize the spillfield by draping it directly on the surface:</p><pre><code class="language-julia hljs">drape_surface(sf, tstruct.spillfield .*2)
+set_camerapos(fig, sc, view1...)</code></pre><img src="edcb4c97.png" alt="Example block output"/><p>The eight different colors on this plot indicate the eight different local flow directions.  The bright blue color, which makes up most of the grid&#39;s surface, correspond to a flow directed towards the lower edge of the grid.</p><h2 id="Spillpoints"><a class="docs-heading-anchor" href="#Spillpoints">Spillpoints</a><a id="Spillpoints-1"></a><a class="docs-heading-anchor-permalink" href="#Spillpoints" title="Permalink"></a></h2><p>A trap&#39;s <em>spillpoint</em> is the point at which it will overflow when filled up. Information about spillpoints is found in the <code>:spillpoints</code> field of the <code>TrapStructure</code>.  Let us inspect the content of the spillpoint of trap 1:</p><pre><code class="language-julia hljs">tstruct.spillpoints[1]</code></pre><pre class="documenter-example-output"><code class="nohighlight hljs ansi">Spillpoint(2, 19941, 19942, 9.202984432952984)</code></pre><pre><code class="language-julia hljs">[fieldnames(typeof(tstruct.spillpoints[1]))...]</code></pre><pre class="documenter-example-output"><code class="nohighlight hljs ansi">4-element Vector{Symbol}:
+ :downstream_region
+ :current_region_cell
+ :downstream_region_cell
+ :elevation</code></pre><p>The <code>:downstream_region</code> field gives the region that the spillpoint leads into (2 in this case, since trap 1 spills into trap 2).  The <code>:current_region_cell</code> and <code>downstream_region_cell</code> fields indicate the corresponding two cells adjacent to the spillpoint.  The <code>:elevation</code> field provides the grid terrain value at the spillpoint.</p><p>We now plot all the spillpoints along with the traps and spill regions below:</p><pre><code class="language-julia hljs">for sp in tstruct.spillpoints
+    tex[sp.current_region_cell] = cmap[:orange]
+    tex[sp.downstream_region_cell] = cmap[:lilac]
+end
+drape_surface(sf, tex);
+set_camerapos(fig, sc,
+              CairoMakie.Vec(49.3, 156.7, 90.7), # set observer position
+              CairoMakie.Vec(86.8, 100.7, -3.3), # set observer target point
+              0.95) # zoom level</code></pre><img src="873323e8.png" alt="Example block output"/><p>Note that trap 1 and 2 spill into <em>each other</em>.  This is always the case with subtraps.  Once both are filled, they will coalesce and water will start filling the rest of the supertrap (trap 4 in this case) until that trap&#39;s spillpoint is reached.</p><p>We can also visualize the &quot;river&quot; flowing from one spillpoint to the next, using the <a href="../utils/#SurfaceWaterIntegratedModeling.show_region_selection-Tuple{TrapStructure}"><code>show_region_selection</code></a> function, which we here apply to trap 3 and 4:</p><pre><code class="language-julia hljs">tex = show_region_selection(tstruct, selection=[3, 4],
+                            region_color=cmap[:green]-1, trap_color=cmap[:green],
+                            river_color=cmap[:red])
+drape_surface(sf, tex);
+set_camerapos(fig, sc, view1...)</code></pre><img src="dd57c18d.png" alt="Example block output"/><p>Here, we can see how trap 4 spills into trap 3, and trap 3 spills out of the domain.</p><h2 id="Trap-volumes-and-subvolumes"><a class="docs-heading-anchor" href="#Trap-volumes-and-subvolumes">Trap volumes and subvolumes</a><a id="Trap-volumes-and-subvolumes-1"></a><a class="docs-heading-anchor-permalink" href="#Trap-volumes-and-subvolumes" title="Permalink"></a></h2><p>The field <code>:trapvolumes</code> refers to the amount a water can hold when it is full:</p><pre><code class="language-julia hljs">tstruct.trapvolumes</code></pre><pre class="documenter-example-output"><code class="nohighlight hljs ansi">4-element Vector{Float64}:
+  152.12155399959005
+  683.4814301848555
+ 1479.6266723286358
+ 2511.348597305022</code></pre><p>We here see that the largest trap is 4, which is unsurprising as it subsumes trap 1 and 2.  The <code>:subvolumes</code> field refers to the amount of water a trap&#39;s subtraps can hold:</p><pre><code class="language-julia hljs">tstruct.subvolumes</code></pre><pre class="documenter-example-output"><code class="nohighlight hljs ansi">4-element Vector{Float64}:
+   0.0
+   0.0
+   0.0
+ 835.6029841844456</code></pre><p>Here, we see that the only trap with nonzero subvolumes is trap 4 (the other ones being lowest-level traps).</p><pre><code class="language-julia hljs"># Verify that the subvolume equals the sum of its subtrap volumes
+tstruct.subvolumes[4] - (tstruct.trapvolumes[1] + tstruct.trapvolumes[2])</code></pre><pre class="documenter-example-output"><code class="nohighlight hljs ansi">0.0</code></pre><pre><code class="language-julia hljs"># The volume of trap 4 that is *not* covered by its subtraps:
+tstruct.trapvolumes[4] - tstruct.subvolumes[4]</code></pre><pre class="documenter-example-output"><code class="nohighlight hljs ansi">1675.7456131205763</code></pre><h2 id="Hierarchy-of-subtraps-and-supertraps"><a class="docs-heading-anchor" href="#Hierarchy-of-subtraps-and-supertraps">Hierarchy of subtraps and supertraps</a><a id="Hierarchy-of-subtraps-and-supertraps-1"></a><a class="docs-heading-anchor-permalink" href="#Hierarchy-of-subtraps-and-supertraps" title="Permalink"></a></h2><p>The field <code>:lowest_subtraps_for</code> lists all the lowest-level subtraps that are contained within a trap (note that a trap always includes itself):</p><pre><code class="language-julia hljs">tstruct.lowest_subtraps_for</code></pre><pre class="documenter-example-output"><code class="nohighlight hljs ansi">4-element Vector{Vector{Int64}}:
+ [1]
+ [2]
+ [3]
+ [1, 2]</code></pre><p>The field <code>:supertraps_of</code> lists all the supertraps of each <em>lowest-level</em> trap.  In nested trap hierarchies, there may be many supertraps for a given lowest-level trap (also note that a trap always includes itself):</p><pre><code class="language-julia hljs">tstruct.supertraps_of</code></pre><pre class="documenter-example-output"><code class="nohighlight hljs ansi">3-element Vector{Vector{Int64}}:
+ [1, 4]
+ [2, 4]
+ [3]</code></pre><p>Trap 4 is not a lowest-level trap, and is therefore not included in the output here.</p><p>The subtrap/supertrap hierarchy constitutes a tree graph that is stored in the <code>:agglomerations</code> field and can be queried directly using the <code>Graphs</code> package:</p><pre><code class="language-julia hljs"># Subtraps of trap 4
+Graphs.inneighbors(tstruct.agglomerations, 4)</code></pre><pre class="documenter-example-output"><code class="nohighlight hljs ansi">2-element Vector{Int64}:
+ 1
+ 2</code></pre><pre><code class="language-julia hljs"># Immediate supertrap of trap 1
+Graphs.outneighbors(tstruct.agglomerations, 1)</code></pre><pre class="documenter-example-output"><code class="nohighlight hljs ansi">1-element Vector{Int64}:
+ 4</code></pre><h2 id="Tracking-developments-over-time"><a class="docs-heading-anchor" href="#Tracking-developments-over-time">Tracking developments over time</a><a id="Tracking-developments-over-time-1"></a><a class="docs-heading-anchor-permalink" href="#Tracking-developments-over-time" title="Permalink"></a></h2><p>The <a href="../dynamic/#SurfaceWaterIntegratedModeling.fill_sequence-Tuple{TrapStructure, Vector{WeatherEvent}}"><code>fill_sequence</code></a> function can be used to track developments over time. The result is a sequence of <code>SpillEvent</code>s, which can be used to rapidly determine the flow and accumulation state across the terrain at any given moment.</p><p>We first demonstrate <code>fill_sequence</code> without infiltration and with a constant rain rate.</p><pre><code class="language-julia hljs">weather = [WeatherEvent(0.0, 1.0)] # Rain with intensity 1.0 starting at time 0.0
+seq = fill_sequence(tstruct, weather);</code></pre><p>The element type of <code>seq</code> is <a href="../dynamic/#SurfaceWaterIntegratedModeling.SpillEvent"><code>SpillEvent</code></a>.  We will not discuss its internal structure here. With the exception of <code>:timestamp</code>, its fields should not be accessed directly, but though the use of the following &quot;accessor&quot; functions:</p><ul><li><a href="../dynamic/#SurfaceWaterIntegratedModeling.amount_at"><code>amount_at</code></a></li><li><a href="../dynamic/#SurfaceWaterIntegratedModeling.filled_at"><code>filled_at</code></a></li><li><a href="../dynamic/#SurfaceWaterIntegratedModeling.inflow_at"><code>inflow_at</code></a></li><li><a href="../dynamic/#SurfaceWaterIntegratedModeling.runoff_at"><code>runoff_at</code></a></li><li><a href="../dynamic/#SurfaceWaterIntegratedModeling.rainrate_at"><code>rainrate_at</code></a></li></ul><p>Refer to the documentation for more information on the <code>SpillEvent</code> and its accessor functions.</p><pre><code class="language-julia hljs">for i = 1:length(seq)
+    print(&quot;Time: &quot;, seq[i].timestamp, &quot;, trap fill states: &quot;, filled_at(seq, i), &#39;\n&#39;)
+end</code></pre><pre class="documenter-example-output"><code class="nohighlight hljs ansi">Time: 0.0, trap fill states: Bool[0, 0, 0, 0]
+Time: 0.11912416131526238, trap fill states: Bool[1, 0, 0, 0]
+Time: 0.1506676855723847, trap fill states: Bool[1, 1, 0, 0]
+Time: 0.3980701297628829, trap fill states: Bool[1, 1, 1, 0]
+Time: 0.452821600668053, trap fill states: Bool[1, 1, 1, 1]</code></pre><p>The printed info above shows the different points in time when a trap changes its state.  We see that trap 1 fills up at t=0.119, trap 2 at t=0.15, etc. (In this case, the traps happen to be filled in the same order as they are numbered, but this is not the general case).</p><p>For a given event, we can get information on the amount of water in each trap:</p><pre><code class="language-julia hljs">amount_at(seq, 3) ## query the third event in the sequence</code></pre><pre class="documenter-example-output"><code class="nohighlight hljs ansi">4-element Vector{FilledAmount}:
+ FilledAmount(152.12155399959005, 0.11912416131526238)
+ FilledAmount(683.4814301848555, 0.1506676855723847)
+ FilledAmount(0.0, 0.0)
+ FilledAmount(0.0, 0.1506676855723847)</code></pre><p>The amount for each trap is given as a tuple of values; the first giving an amount of water, and the second the point in time where this amount was last computed.  Note that in this case, the amounts in trap 1 and 3 were last computed at an earlier point in time than the current timestamp (0.15067), and these values are therefore not immediately useful.  A trap only has its amount updated when an event cause a change to the traps inflow rate (e.g. upstream traps that fill up, or weather changes).  In order to get all the updated amounts, we can use the current inflow rates and time since last update:</p><pre><code class="language-julia hljs">amounts = [e.amount for e ∈ amount_at(seq, 3)] ## amounts when last computed
+dt = seq[3].timestamp .- [e.time for e ∈ amount_at(seq, 3)] ## time since last update
+amounts += dt .* inflow_at(seq, 3) # add inflow since last update</code></pre><pre class="documenter-example-output"><code class="nohighlight hljs ansi">4-element Vector{Float64}:
+ 192.40263447593526
+ 683.4814301848555
+ 560.0317872725539
+   0.0</code></pre><p>The runoff across the terrain also depend on which events have occured.  We visualize the runoff at the last event (when all traps are filled):</p><pre><code class="language-julia hljs">tex = runoff_at(seq, 5)
+filled_trapcells = vcat(tstruct.footprints[:]...) ## footprint of all cells
+tex[filled_trapcells] .= 0;
+sf_flow, fig_flow, sc_flow = plotgrid(grid, texture=tex, colormap=:Blues);
+fig_flow
+set_camerapos(fig_flow, sc_flow, view1...)</code></pre><img src="522f6183.png" alt="Example block output"/><p>The flow is strongly concentrated along the streams exiting from each trap, drowning out any other detail.  To make more details visible, we can use a logarithmic plot:</p><pre><code class="language-julia hljs">tex = log10.(runoff_at(seq, 5))
+tex[filled_trapcells] .= 0;
+sf_flow_log, fig_flow_log,  sc_flow_log = plotgrid(grid, texture=tex, colormap=:Blues)
+fig_flow_log
+set_camerapos(fig_flow_log, sc_flow_log, view1...)</code></pre><img src="5ca586ff.png" alt="Example block output"/><p>Although the <code>SpillEvent</code>s in <code>seq</code> describe the points in time where one or more trap statuses change, we may also be interested in the amount of water and flow state at some arbitrary point in time.  For this, we can use the functions <a href="../utils/#SurfaceWaterIntegratedModeling.trap_states_at_timepoints-Tuple{TrapStructure, Vector{SpillEvent}, Vector{&lt;:Real}}"><code>trap_states_at_timepoints</code></a> and <a href="../utils/#SurfaceWaterIntegratedModeling.interpolate_timeseries-Tuple{TrapStructure, Vector{SpillEvent}, Vector{&lt;:Real}}"><code>interpolate_timeseries</code></a>.</p><p>Let us first specify some &quot;arbitrary&quot; points in time:</p><pre><code class="language-julia hljs">tpoints = [0.1, 0.3, 0.42]</code></pre><pre class="documenter-example-output"><code class="nohighlight hljs ansi">3-element Vector{Float64}:
+ 0.1
+ 0.3
+ 0.42</code></pre><p>We can now compute the water content in all traps at this timepoint as follows:</p><pre><code class="language-julia hljs">tstates = trap_states_at_timepoints(tstruct, seq, tpoints)
+water_content = [e[2] for e in tstates]
+for time_ix = 1:length(tpoints)
+    print(&quot;At time: &quot;, tpoints[time_ix], &quot;:\n&quot;)
+    for trap_ix = 1:4
+        content = water_content[time_ix][trap_ix]
+        subtraps = Graphs.inneighbors(tstruct.agglomerations, trap_ix)
+        for i in subtraps
+            # add in water from subtraps
+            content += water_content[time_ix][i]
+        end
+        print(&quot;   Trap: &quot;, trap_ix, &quot; contains: &quot;, content, &quot; units of water.\n&quot;)
+    end
+end</code></pre><pre class="documenter-example-output"><code class="nohighlight hljs ansi">Handling timepoint: 0.1
+Handling timepoint: 0.3
+Handling timepoint: 0.42
+At time: 0.1:
+   Trap: 1 contains: 127.7 units of water.
+   Trap: 2 contains: 426.90000000000003 units of water.
+   Trap: 3 contains: 371.70000000000005 units of water.
+   Trap: 4 contains: 554.6 units of water.
+At time: 0.3:
+   Trap: 1 contains: 152.12155399959005 units of water.
+   Trap: 2 contains: 683.4814301848555 units of water.
+   Trap: 3 contains: 1115.1 units of water.
+   Trap: 4 contains: 1663.8 units of water.
+At time: 0.42:
+   Trap: 1 contains: 152.12155399959005 units of water.
+   Trap: 2 contains: 683.4814301848555 units of water.
+   Trap: 3 contains: 1479.6266723286358 units of water.
+   Trap: 4 contains: 2329.3199999999997 units of water.</code></pre><p>Note here that the volumes returned by <code>trap_states_at_timepoints</code> excludes the water in subtraps, so these have to be added in the loop above.</p><p>We can also visualize the trap fill states using <code>interpolate_timeseries</code>.  We here generate textures where the filled parts of traps are shown in <em>blue</em>, the dry parts in <em>orange</em>, and active streams in <em>red</em>:</p><pre><code class="language-julia hljs">tex, = interpolate_timeseries(tstruct, seq, tpoints,
+                              filled_color=cmap[:blue],
+                              trap_color=cmap[:orange],
+                              river_color=cmap[:red])
+
+drape_surface(sf, tex[1])
+fig
+set_camerapos(fig, sc, view1...)</code></pre><img src="ac595f36.png" alt="Example block output"/><p>At time 0.1</p><pre><code class="language-julia hljs">drape_surface(sf, tex[2])
+set_camerapos(fig, sc, view1...)</code></pre><img src="e71c91ed.png" alt="Example block output"/><p>At time 0.3</p><pre><code class="language-julia hljs">drape_surface(sf, tex[3])
+set_camerapos(fig, sc, view1...)</code></pre><img src="af74efcf.png" alt="Example block output"/><p>At time 0.42</p><h2 id="Infiltration"><a class="docs-heading-anchor" href="#Infiltration">Infiltration</a><a id="Infiltration-1"></a><a class="docs-heading-anchor-permalink" href="#Infiltration" title="Permalink"></a></h2><p>The speed and degree to which traps get filled will strongly depend on the permeability of the surface. SWIM provides a simplified infiltration model with a fixed infiltration rate, which may be an acceptable approximation over limited timespans.  The way of doing this is to define an infiltration map, and pass it along to <code>fill_sequence</code>.  The steps are shown below:</p><p>First we define an infiltration map, prescribing an infiltration rate at every cell in the grid.  We here define an infiltration rate that is 0 (impermeable) at the upper part of the grid, and 2.0 at the lower part:</p><pre><code class="language-julia hljs">infil = fill(0.0, size(grid));
+infil[1:110, 1:end] .= 2.0;
+sf_infil, fig_infil, sc_infil = plotgrid(grid, texture=infil,
+                                         colormap=ColorSchemes.:rainbow,
+                                         colorrange=(0, 2))
+fig_infil
+set_camerapos(fig_infil, sc_infil, view1...)</code></pre><img src="d4f77662.png" alt="Example block output"/><p>In this figure, the purple part of the surface is impermeable, and the red part has an infiltration rate value of 2.0.</p><p>Note that the infiltration rate is here set to be higher than the precipitation rate given by <code>weather</code>.  As such, the only way the lower trap can fill up is by receiving runoff from the impermeable part of the grid.  This will significantly delay the moment when it gets filled.</p><pre><code class="language-julia hljs">seq2 = fill_sequence(tstruct, weather, infiltration=infil)
+
+for i = 1:length(seq2)
+    print(&quot;Time: &quot;, seq2[i].timestamp, &quot;, trap fill states: &quot;, filled_at(seq2, i), &#39;\n&#39;)
+end</code></pre><pre class="documenter-example-output"><code class="nohighlight hljs ansi">Time: 0.0, trap fill states: Bool[0, 0, 0, 0]
+Time: 0.11912416131526238, trap fill states: Bool[1, 0, 0, 0]
+Time: 0.1506676855723847, trap fill states: Bool[1, 1, 0, 0]
+Time: 0.452821600668053, trap fill states: Bool[1, 1, 0, 1]
+Time: 0.737445616582882, trap fill states: Bool[1, 1, 1, 1]</code></pre><p>We see that the order in which the traps fill up is now different than in the case without infiltration.  The time for trap 3 to fill up is significantly longer.</p><p>We inspect the trap states at the same timepoints as in the impermeable case above. In addition, we include an additional timepoint at t=0.60.</p><pre><code class="language-julia hljs">tpoints2 = [0.1, 0.3, 0.42, 0.60]
+tex, = interpolate_timeseries(tstruct, seq2, tpoints2,
+                              filled_color=cmap[:blue],
+                              trap_color=cmap[:orange],
+                              river_color=cmap[:red])
+drape_surface(sf, tex[1])
+fig
+set_camerapos(fig, sc, view1...)</code></pre><img src="1888040f.png" alt="Example block output"/><p>At time 0.1</p><pre><code class="language-julia hljs">drape_surface(sf, tex[2])
+set_camerapos(fig, sc, view1...)</code></pre><img src="5f4f0f8a.png" alt="Example block output"/><p>At time 0.3</p><pre><code class="language-julia hljs">drape_surface(sf, tex[3])
+set_camerapos(fig, sc, view1...)</code></pre><img src="19878ded.png" alt="Example block output"/><p>At time 0.42</p><pre><code class="language-julia hljs">drape_surface(sf, tex[4])
+set_camerapos(fig, sc, view1...)</code></pre><img src="3832a569.png" alt="Example block output"/><p>At time 0.60</p><p>Here, we can see that trap 3 does not start to fill up before trap 4 starts spilling over.</p><p>To better understand what is going on, we can inspect the flow pattern at the time of the last event:</p><pre><code class="language-julia hljs">runoff = runoff_at(seq2);</code></pre><p>The <code>runoff</code> field is defined such that positive values represent overland flow intensity, whereas negative values represent remaining infiltration. First, we are interested in the part of the terrain that remains dry, i.e. local infiltration exceeds the combined value of precipitation and inflow from upstream:</p><pre><code class="language-julia hljs">dry_terrain = Float64.(runoff .&lt; 0.0)
+dry_terrain[filled_trapcells] .= false ## submerged terrain should be considered wet
+                                       # regardless of inflow and infiltration rates
+drape_surface(sf_infil, dry_terrain)
+fig_infil
+set_camerapos(fig_infil, sc_infil, view1...)</code></pre><img src="27f3a34e.png" alt="Example block output"/><p>From this figure, where dry terrain is shown in green, the following observations can be noted:</p><ul><li>The terrain surrounding trap 3 is dry, and its only inflow comes from the stream spilling out from trap 4.</li><li>Large part of the terrain is wet even where infiltration rates exceed precipitation rate, due to upstream runoff.</li></ul><p>We can use a log plot to visualise the flow pattern on the wet part of the surface:</p><pre><code class="language-julia hljs">tex_flow = log10.(max.(runoff, eps()))
+tex_flow[runoff .&lt; 0.0] .= minimum(tex_flow[:])
+tex_flow[filled_trapcells] .= maximum(tex_flow[:])
+drape_surface(sf_flow_log, tex_flow)
+fig_flow_log
+set_camerapos(fig_flow_log, sc_flow_log, view1...)</code></pre><img src="bb20a5c0.png" alt="Example block output"/><p>One interesting thing to note from this plot is how overland flow builds up across the impermeable part of the surface, and then gradually attenuates as the flow reaches the permeable region.</p><h2 id="Changing-weather"><a class="docs-heading-anchor" href="#Changing-weather">Changing weather</a><a id="Changing-weather-1"></a><a class="docs-heading-anchor-permalink" href="#Changing-weather" title="Permalink"></a></h2><p>It is possible to model a changing weather by sending multiple weather events to the <code>fill_sequence</code> function.  As a demonstration, we extend our weather vector with another event, stating that the rain rate drops to zero at time 0.8.</p><pre><code class="language-julia hljs">weather = [WeatherEvent(0.0, 1.0),
+           WeatherEvent(0.8, 0.0)]
+seq3 = fill_sequence(tstruct, weather, infiltration=infil);</code></pre><p>In the time before the weather change, the sequence is similar to the previous one we inspected above.  We add new timepoints at t=0.8 (when rain ceases), and t=2.1 (well after rain has stopped).</p><pre><code class="language-julia hljs">tpoints3 = [0.3, 0.60, 0.8, 2.1]
+tex, = interpolate_timeseries(tstruct, seq3, tpoints3,
+                              filled_color=cmap[:blue],
+                              trap_color=cmap[:orange],
+                              river_color=cmap[:red])
+fig
+drape_surface(sf, tex[1])
+set_camerapos(fig, sc, view1...)</code></pre><img src="5f4f0f8a-001.png" alt="Example block output"/><p>At time 0.3.  This is identical to the previous case above.</p><pre><code class="language-julia hljs">drape_surface(sf, tex[2])
+set_camerapos(fig, sc, view1...)</code></pre><img src="3832a569-001.png" alt="Example block output"/><p>At time 0.6.  This is also identical to the previous case above.</p><pre><code class="language-julia hljs">drape_surface(sf, tex[3])
+set_camerapos(fig, sc, view1...)</code></pre><img src="2d6203db.png" alt="Example block output"/><p>At time 0.8.  This is when rain stops.</p><pre><code class="language-julia hljs">drape_surface(sf, tex[4])
+set_camerapos(fig, sc, view1...)</code></pre><img src="35e94027.png" alt="Example block output"/><p>At time 2.1. We note that the water level in trap 4 on the impermeable part of the terrain remains unchanged, whereas the water level in trap 3, on the permeable part of the domain, has dropped significantly.</p><hr/><p><em>This page was generated using <a href="https://github.com/fredrikekre/Literate.jl">Literate.jl</a>.</em></p></article><nav class="docs-footer"><a class="docs-footer-prevpage" href="../urban/">« Urban landscape</a><a class="docs-footer-nextpage" href="../flat_areas/">Handling flat areas »</a><div class="flexbox-break"></div><p class="footer-message">Powered by <a href="https://github.com/JuliaDocs/Documenter.jl">Documenter.jl</a> and the <a href="https://julialang.org/">Julia Programming Language</a>.</p></nav></div><div class="modal" id="documenter-settings"><div class="modal-background"></div><div class="modal-card"><header class="modal-card-head"><p class="modal-card-title">Settings</p><button class="delete"></button></header><section class="modal-card-body"><p><label class="label">Theme</label><div class="select"><select id="documenter-themepicker"><option value="auto">Automatic (OS)</option><option value="documenter-light">documenter-light</option><option value="documenter-dark">documenter-dark</option></select></div></p><hr/><p>This document was generated with <a href="https://github.com/JuliaDocs/Documenter.jl">Documenter.jl</a> version 1.3.0 on <span class="colophon-date" title="Saturday 9 March 2024 22:17">Saturday 9 March 2024</span>. Using Julia version 1.10.2.</p></section><footer class="modal-card-foot"></footer></div></div></div></body></html>
