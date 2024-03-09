@@ -280,7 +280,7 @@ amounts += dt .* inflow_at(seq, 3) # add inflow since last update
 
 tex = runoff_at(seq, 5)
 filled_trapcells = vcat(tstruct.footprints[:]...) ## footprint of all cells
-tex[filled_trapcells] .= 0;
+tex[filled_trapcells] .= extrema(tex)[2] # maximum value
 sf_flow, fig_flow, sc_flow = plotgrid(grid, texture=tex, colormap=:Blues);
 fig_flow
 set_camerapos(fig_flow, sc_flow, view1...)
@@ -289,7 +289,7 @@ set_camerapos(fig_flow, sc_flow, view1...)
 # drowning out any other detail.  To make more details visible, we can use
 # a logarithmic plot:
 tex = log10.(runoff_at(seq, 5))
-tex[filled_trapcells] .= 0;
+tex[filled_trapcells] .= extrema(tex)[2] # maximum value
 sf_flow_log, fig_flow_log,  sc_flow_log = plotgrid(grid, texture=tex, colormap=:Blues)
 fig_flow_log
 set_camerapos(fig_flow_log, sc_flow_log, view1...)
