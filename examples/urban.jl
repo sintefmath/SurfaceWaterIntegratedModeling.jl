@@ -8,7 +8,7 @@
 # ## Loading the necessary packages
 using SurfaceWaterIntegratedModeling
 import GLMakie, Images # for visualization and loading of textures
-import ColorSchemes, PerceptualColourMaps
+import ColorSchemes
 using Pkg.Artifacts
 import ArchGDAL # for loading of topographical grids from files in geotiff format
 
@@ -221,7 +221,7 @@ runoff, = watercourses(tstruct_sinks, filled_traps,
 ## Plot runoff as a texture on the terrain, using a predefined colormap:
 sf_flow, fig_flow, sc_flow =
     plotgrid(grid_dtm, texture=runoff,
-             colormap=ColorSchemes.ColorScheme(PerceptualColourMaps.cmap("L12")))
+             colormap=:Blues)
 fig_flow
 set_camerapos(fig_flow, sc_flow, view1...)
 # 
