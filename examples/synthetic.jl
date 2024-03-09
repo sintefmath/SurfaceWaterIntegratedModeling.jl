@@ -24,7 +24,6 @@ import GLMakie, Images # for visualization and loading of textures
 import ColorSchemes
 import Graphs
 using Pkg.Artifacts
-using DisplayAs # for image generation in documentation
 
 # The package with SWIM testdata is provided as a Julia artifact, which can be
 # accessed using the function `datapath_testdata`.  We subsequently load and
@@ -37,19 +36,21 @@ grid = loadgrid(joinpath(datapath, "synsurf.txt"))
 cmap = Dict(:blue => 2, :green => 4, :red => 6, :orange => 8,
             :lilac => 10, :bright => 11)
 
+## We also define some view angles that will come in handy
+view1 = (GLMakie.Vec(-83, 378, 197), GLMakie.Vec(100, 114, -4.5), 0.68)
+view2 = (GLMakie.Vec(90, 494, 8.6), GLMakie.Vec(100, 114, -4.5), 0.68);
+
 ## plot the grid
-sf, fig, ax = plotgrid(grid, texture=fill(cmap[:bright], (1,1)),
+sf, fig, sc = plotgrid(grid, texture=fill(cmap[:bright], size(grid)),
                        colormap=ColorSchemes.:Paired_12,
                        colorrange=(1, 12), wireframe=true)
+fig
+set_camerapos(fig, sc, view1...)
 
-cam = GLMakie.cameracontrols(ax)
-GLMakie.update_cam!(ax.scene, cam, 3pi/4, pi/7, 300)
-DisplayAs.PNG(ax.scene)
 # Grid seen from above.  Trap 1 and 2 from Fig. 1 can be seen on the upper left
 # side, wheras trap 3 is seen downstream on the lower right side.
+set_camerapos(fig, sc, view2...)
 
-GLMakie.update_cam!(ax.scene, cam, pi/2, 0, 250)
-DisplayAs.PNG(ax.scene)
 # Grid seen from the side.  Here we see how trap 1 and 2 (right) constitute
 # subtraps, or pockets, within a larger trap 4.  As they gradually fill with
 # water, two separate ponds for trap 1 and 2 will coalesce into a single pond
@@ -94,8 +95,7 @@ tex[tstruct.footprints[2]] .= cmap[:green]
 tex[tstruct.footprints[3]] .= cmap[:blue]
 
 drape_surface(sf, tex);
-GLMakie.update_cam!(ax.scene, cam, 3pi/4, pi/4, 300)
-DisplayAs.PNG(ax.scene)
+set_camerapos(fig, sc, view1...)
 
 # Trap 1 and 2 are shown in red and green respectively, trap 3 in blue and trap
 # 4 in orange.
@@ -124,8 +124,7 @@ tex[tstruct.footprints[2]] .= cmap[:green]
 tex[tstruct.footprints[3]] .= cmap[:blue]
 
 drape_surface(sf, tex);
-GLMakie.update_cam!(ax.scene, cam, 3pi/4, pi/4, 300)
-DisplayAs.PNG(ax.scene)
+set_camerapos(fig, sc, view1...)
 
 # The spill region of trap 4 is the union of the blue and green regions on this
 # plot.  The beige-colored part of the surface does not spill to any trap; water
@@ -141,8 +140,7 @@ DisplayAs.PNG(ax.scene)
 # We can visualize the spillfield by draping it directly on the surface:
 
 drape_surface(sf, tstruct.spillfield .*2)
-GLMakie.update_cam!(ax.scene, cam, 3pi/4, pi/4, 300)
-DisplayAs.PNG(ax.scene)
+set_camerapos(fig, sc, view1...)
 
 # The eight different colors on this plot indicate the eight different local
 # flow directions.  The bright blue color, which makes up most of the grid's
@@ -169,10 +167,10 @@ for sp in tstruct.spillpoints
     tex[sp.downstream_region_cell] = cmap[:lilac]
 end
 drape_surface(sf, tex);
-cam_eyepos = GLMakie.Vec(49.3, 156.7, 90.7) # set observer position
-cam_lookat = GLMakie.Vec(86.8, 100.7, -3.3) # set observer target point
-GLMakie.update_cam!(ax.scene, cam_eyepos, cam_lookat, GLMakie.Vec3f0(0,0,1))
-DisplayAs.PNG(ax.scene)
+set_camerapos(fig, sc,
+              GLMakie.Vec(49.3, 156.7, 90.7), # set observer position
+              GLMakie.Vec(86.8, 100.7, -3.3), # set observer target point
+              0.95) # zoom level
 
 # Note that trap 1 and 2 spill into *each other*.  This is always the case with
 # subtraps.  Once both are filled, they will coalesce and water will start
@@ -185,8 +183,7 @@ tex = show_region_selection(tstruct, selection=[3, 4],
                             region_color=cmap[:green]-1, trap_color=cmap[:green],
                             river_color=cmap[:red])
 drape_surface(sf, tex);
-GLMakie.update_cam!(ax.scene, cam, 3pi/4, pi/4, 300)
-DisplayAs.PNG(ax.scene)
+set_camerapos(fig, sc, view1...)
 
 # Here, we can see how trap 4 spills into trap 3, and trap 3 spills out of the
 # domain.
@@ -284,21 +281,18 @@ amounts += dt .* inflow_at(seq, 3) # add inflow since last update
 tex = runoff_at(seq, 5)
 filled_trapcells = vcat(tstruct.footprints[:]...) ## footprint of all cells
 tex[filled_trapcells] .= 0;
-sf_flow, fig_flow, ax_flow = plotgrid(grid, texture=tex, colormap=:Blues);
-
-cam_flow = GLMakie.cameracontrols(ax_flow)
-GLMakie.update_cam!(ax_flow.scene, cam_flow, 3pi/4, pi/7, 300)
-DisplayAs.PNG(ax_flow.scene)
+sf_flow, fig_flow, sc_flow = plotgrid(grid, texture=tex, colormap=:Blues);
+fig_flow
+set_camerapos(fig_flow, sc_flow, view1...)
 
 # The flow is strongly concentrated along the streams exiting from each trap,
 # drowning out any other detail.  To make more details visible, we can use
 # a logarithmic plot:
 tex = log10.(runoff_at(seq, 5))
 tex[filled_trapcells] .= 0;
-sf_flow_log, _, ax_flow_log = plotgrid(grid, texture=tex, colormap=:Blues)
-cam_flow_log = GLMakie.cameracontrols(ax_flow_log)
-GLMakie.update_cam!(ax_flow_log.scene, cam_flow_log, 3pi/4, pi/7, 300)
-DisplayAs.PNG(ax_flow_log.scene)
+sf_flow_log, fig_flow_log,  sc_flow_log = plotgrid(grid, texture=tex, colormap=:Blues)
+fig_flow_log
+set_camerapos(fig_flow_log, sc_flow_log, view1...)
 
 # Although the `SpillEvent`s in `seq` describe the points in time where one or
 # more trap statuses change, we may also be interested in the amount of water
@@ -337,16 +331,16 @@ tex, = interpolate_timeseries(tstruct, seq, tpoints,
                               river_color=cmap[:red])
 
 drape_surface(sf, tex[1])
-GLMakie.update_cam!(ax.scene, cam, 3pi/4, pi/4, 300)
-DisplayAs.PNG(ax.scene)
+fig
+set_camerapos(fig, sc, view1...)
 # At time 0.1
 
 drape_surface(sf, tex[2])
-DisplayAs.PNG(ax.scene)
+set_camerapos(fig, sc, view1...)
 # At time 0.3
 
 drape_surface(sf, tex[3])
-DisplayAs.PNG(ax.scene)
+set_camerapos(fig, sc, view1...)
 # At time 0.42
 
 # ## Infiltration
@@ -363,13 +357,12 @@ DisplayAs.PNG(ax.scene)
 
 infil = fill(0.0, size(grid));
 infil[1:110, 1:end] .= 2.0;
-sf_infil, fig_infil, ax_infil = plotgrid(grid, texture=infil,
+sf_infil, fig_infil, sc_infil = plotgrid(grid, texture=infil,
                                          colormap=ColorSchemes.:rainbow,
                                          colorrange=(0, 2))
-cam_infil = GLMakie.cameracontrols(ax_infil)
+fig_infil
+set_camerapos(fig_infil, sc_infil, view1...)
 
-GLMakie.update_cam!(ax_infil.scene, cam_infil, 3pi/4, pi/7, 300)
-DisplayAs.PNG(ax_infil.scene)
 #
 # In this figure, the purple part of the surface is impermeable, and the red
 # part has an infiltration rate value of 2.0.
@@ -395,19 +388,20 @@ tex, = interpolate_timeseries(tstruct, seq2, tpoints2,
                               trap_color=cmap[:orange],
                               river_color=cmap[:red])
 drape_surface(sf, tex[1])
-DisplayAs.PNG(ax.scene)
+fig
+set_camerapos(fig, sc, view1...)
 # At time 0.1
 
 drape_surface(sf, tex[2])
-DisplayAs.PNG(ax.scene)
+set_camerapos(fig, sc, view1...)
 # At time 0.3
 
 drape_surface(sf, tex[3])
-DisplayAs.PNG(ax.scene)
+set_camerapos(fig, sc, view1...)
 # At time 0.42
 
 drape_surface(sf, tex[4])
-DisplayAs.PNG(ax.scene)
+set_camerapos(fig, sc, view1...)
 # At time 0.60
 #
 # Here, we can see that trap 3 does not start to fill up before
@@ -426,7 +420,9 @@ dry_terrain = Float64.(runoff .< 0.0)
 dry_terrain[filled_trapcells] .= false ## submerged terrain should be considered wet
                                        ## regardless of inflow and infiltration rates
 drape_surface(sf_infil, dry_terrain)
-DisplayAs.PNG(ax_infil.scene)
+fig_infil
+set_camerapos(fig_infil, sc_infil, view1...)
+
 # From this figure, where dry terrain is shown in green, the following
 # observations can be noted:
 # - The terrain surrounding trap 3 is dry, and its only inflow comes from the stream
@@ -439,11 +435,12 @@ tex_flow = log10.(max.(runoff, eps()))
 tex_flow[runoff .< 0.0] .= minimum(tex_flow[:])
 tex_flow[filled_trapcells] .= maximum(tex_flow[:])
 drape_surface(sf_flow_log, tex_flow)
-DisplayAs.PNG(ax_flow_log.scene)
+fig_flow_log
+set_camerapos(fig_flow_log, sc_flow_log, view1...)
+
 # One interesting thing to note from this plot is how overland flow builds up
 # across the impermeable part of the surface, and then gradually attenuates as
 # the flow reaches the permeable region.
-
 
 # ## Changing weather
 #
@@ -462,24 +459,22 @@ tex, = interpolate_timeseries(tstruct, seq3, tpoints3,
                               filled_color=cmap[:blue],
                               trap_color=cmap[:orange],
                               river_color=cmap[:red])
-
+fig
 drape_surface(sf, tex[1])
-DisplayAs.PNG(ax.scene)
+set_camerapos(fig, sc, view1...)
 # At time 0.3.  This is identical to the previous case above.
 
 drape_surface(sf, tex[2])
-DisplayAs.PNG(ax.scene)
+set_camerapos(fig, sc, view1...)
 # At time 0.6.  This is also identical to the previous case above.
 drape_surface(sf, tex[3])
-DisplayAs.PNG(ax.scene)
+set_camerapos(fig, sc, view1...)
 # At time 0.8.  This is when rain stops.
 
 drape_surface(sf, tex[4])
-DisplayAs.PNG(ax.scene)
+set_camerapos(fig, sc, view1...)
 # At time 2.1. We note that the water level in trap 4 on the impermeable part of
 # the terrain remains unchanged, whereas the water level in trap 3, on the
 # permeable part of the domain, has dropped significantly.
 
-# This last example concludes the demonstration.  We close all graphical windows.
-GLMakie.closeall()
 

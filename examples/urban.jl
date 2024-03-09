@@ -10,7 +10,6 @@ using SurfaceWaterIntegratedModeling
 import GLMakie, Images # for visualization and loading of textures
 import ColorSchemes, PerceptualColourMaps
 using Pkg.Artifacts
-using DisplayAs # for image generation in documentation
 import ArchGDAL # for loading of topographical grids from files in geotiff format
 
 # ## Prepare data
@@ -19,7 +18,7 @@ import ArchGDAL # for loading of topographical grids from files in geotiff forma
 # accessed using the function `datapath_testdata`.  We subsequently load a
 # digital surface model (including buildings and vegetation) and a digtial
 # terrain model (without buildings or vegetation) of the area of study
-# [^1]-. The data is converted into simple Julia arrays with height values
+# [^1]. The data is converted into simple Julia arrays with height values
 # stored as Float64.
 kuba_datapath = joinpath(datapath_testdata(), "data", "kuba")
 geoarray_dsm = ArchGDAL.readraster(joinpath(kuba_datapath, "dom1", "data", "dom1.tif"))
@@ -57,19 +56,24 @@ size(sink_mask)
 # We can visualize the model surfaces with the textures to see how the area looks.
 # Here, we show the terrain model with the map texture and the surface model with the
 # aerial photo texture.
-sfmap, figmap, axmap = plotgrid(grid_dtm, texture=mapimg)
-sfpho, figpho, axpho = plotgrid(grid_dsm, texture=photoimg)
+sfmap, figmap, scmap = plotgrid(grid_dtm, texture=mapimg)
+sfpho, figpho, scpho = plotgrid(grid_dsm, texture=photoimg)
 
-# The `plotgrid` function opens an interactive 3D window.  This can be manipulated by
-# the used thorugh the keyboard and mouse, but we can also change the viewpoint
-# programmatically.  Here is a snapshot for the terrain model:
-cam = GLMakie.cameracontrols(axmap)
-GLMakie.update_cam!(axmap.scene, cam, pi/4, pi/6, 1000)
-DisplayAs.PNG(axmap.scene)
+# The `plotgrid` function creates a 3D scene.  If GLMakie is used, the scene is
+# displayed in a graphical window can be manipulated by the used thorugh the
+# keyboard and mouse.  The viewpoint of the scene can also be changed
+# programatically using [`set_camerapos`](@ref).
+# We predefine a couple of viewpoints on the form (camera position, target, zoomlevel):
+view1 = (GLMakie.Vec(1223, 587, 1056), GLMakie.Vec(391, 327, 13.8), 0.66)
+view2 = (GLMakie.Vec(1223, 587, 1056), GLMakie.Vec(391, 327, 13.8), 0.30)
+
+# Here is a snapshot for the terrain model:
+figmap
+set_camerapos(figmap, scmap, view1...)
 
 # And a snapshot of the surface model:
-GLMakie.update_cam!(axpho.scene, cam, pi/4, pi/6, 1000)
-DisplayAs.PNG(axpho.scene)
+figpho
+set_camerapos(figpho, scpho, view1...)
 
 # Here is a visualization of the different masks loaded:
 fig = GLMakie.Figure()
@@ -82,7 +86,7 @@ for i = 1:5
     fig_axes[end].title = masktitles[i]
 end
 fig_yres = Int(ceil(size(building_mask, 2) / 3))
-resize!(fig, fig_yres * 3, fig_yres * 2)
+GLMakie.resize!(fig.scene, fig_yres * 3, fig_yres * 2)
 fig
 
 # ## Prepare and run the static analysis
@@ -166,28 +170,26 @@ overlay_sinks[river_mask .> Images.Gray{Images.N0f8}(0.0)] .= blue_color;
 # Without sinks, large parts of the terrain, including most backyards, will be inundated.
 # This also include a large part of the road running parallel to the river, as can be
 # seen in the close-up view below.
-sf_nosink, fig_nosinks, ax_nosinks = plotgrid(grid_dtm, texture=overlay_nosinks)
+sf_nosink, fig_nosinks, sc_nosinks = plotgrid(grid_dtm, texture=overlay_nosinks)
 
-cam = GLMakie.cameracontrols(ax_nosinks)
-GLMakie.update_cam!(ax_nosinks.scene, cam, pi/4, pi/6, 1000)
-DisplayAs.PNG(ax_nosinks.scene)
+fig_nosinks
+set_camerapos(fig_nosinks, sc_nosinks, view1...)
 
 # Close-up view:
-GLMakie.update_cam!(ax_nosinks.scene, cam, pi/4, pi/6, 200)
-DisplayAs.PNG(ax_nosinks.scene)
+set_camerapos(fig_nosinks, sc_nosinks, view2...)
 
 # #### With sinks:
 # 
 # With manholes and other sinks, the submerged part of the terrain is much less,
 # and the road is not flooded.  In this analysis, infiltration has not yet been
 # considered.  Many backyards are still under water.
-sf_sinks, fig_sinks, ax_sinks = plotgrid(grid_dtm, texture=overlay_sinks);
-GLMakie.update_cam!(ax_sinks.scene, cam, pi/4, pi/6, 1000)
-DisplayAs.PNG(ax_sinks.scene)
+sf_sinks, fig_sinks, sc_sinks = plotgrid(grid_dtm, texture=overlay_sinks);
+
+fig_sinks
+set_camerapos(fig_sinks, sc_sinks, view1...)
 
 # Close-up view:
-GLMakie.update_cam!(ax_sinks.scene, cam, pi/4, pi/6, 200)
-DisplayAs.PNG(ax_sinks.scene)
+set_camerapos(fig_sinks, sc_sinks, view2...)
 
 # ## Visualize flow intensity
 #
@@ -217,34 +219,33 @@ runoff, = watercourses(tstruct_sinks, filled_traps,
 # The result can be visualized using [`plotgrid`](@ref):
 
 ## Plot runoff as a texture on the terrain, using a predefined colormap:
-sf_flow, fig_flow, ax_flow =
+sf_flow, fig_flow, sc_flow =
     plotgrid(grid_dtm, texture=runoff,
              colormap=ColorSchemes.ColorScheme(PerceptualColourMaps.cmap("L12")))
-cam = GLMakie.cameracontrols(ax_flow)
-GLMakie.update_cam!(ax_flow.scene, cam, pi/4, pi/6, 1000)
-DisplayAs.PNG(ax_flow.scene)
+fig_flow
+set_camerapos(fig_flow, sc_flow, view1...)
 # 
 
 ## Close-up view:
-GLMakie.update_cam!(ax_flow.scene, cam, pi/3, pi/6, 200)
-DisplayAs.PNG(ax_flow.scene)
+set_camerapos(fig_flow, sc_flow, view2...)
 
 # Only a few spots are colored non-white in the above plots.  This is because
 # the flow across the terrain is highly concentrated in a few locations with
 # strong intermittent streams, where the flow values are much higher than
 # elsewhere.   If we want to highlight also the smaller flow patterns, a
 # logarithmic scale can be useful:
-sf_flow_log, fig_flow_log, ax_flow_log =
+sf_flow_log, fig_flow_log, sc_flow_log =
     plotgrid(grid_dtm, texture=log10.(runoff),
              colormap=ColorSchemes.ColorScheme(PerceptualColourMaps.cmap("L12")))
-cam = GLMakie.cameracontrols(ax_flow_log)
-GLMakie.update_cam!(ax_flow_log.scene, cam, pi/4, pi/6, 1000)
-DisplayAs.PNG(ax_flow_log.scene)
+
+fig_flow_log
+set_camerapos(fig_flow_log, sc_flow_log, view1...)
+
 #
 
 # Close-up view:
-GLMakie.update_cam!(ax_flow_log.scene, cam, pi/3, pi/6, 200)
-DisplayAs.PNG(ax_flow_log.scene)
+set_camerapos(fig_flow_log, sc_flow_log, view2...)
+
 # On these logarithmic plots, differences between strong and weak flows 
 # are attenuated, and it is easier to see how the water flows.
 
@@ -283,11 +284,14 @@ upstream_texture[sink_locs] .= black_color
 upstream_texture[pt_ix_upscaled] .= red_color
 
 ## Plot the grid
-sf_upstr_log, fig_upstr_log, ax_upstr_log = plotgrid(grid_dtm, texture=upstream_texture)
-cam_eyepos = GLMakie.Vec(-17, 202, 178) # set observer position
-cam_lookat = GLMakie.Vec(472, 113, -255) # set observer target point
-GLMakie.update_cam!(ax_upstr_log.scene, cam_eyepos, cam_lookat, GLMakie.Vec3f0(0,0,1))
-DisplayAs.PNG(ax_upstr_log.scene)
+sf_upstr_log, fig_upstr_log, sc_upstr_log = plotgrid(grid_dtm, texture=upstream_texture)
+
+fig_upstr_log
+set_camerapos(fig_upstr_log, sc_upstr_log,
+              GLMakie.Vec(-17, 202, 178), # observer position
+              GLMakie.Vec(472, 113, -255), # observer target
+              0.8)
+
 #
 # The point `pt` can be seen in red on the lower left part of this image, and all
 # the black gricells indicate the position of sinks.  The upstream area of `pt` is
@@ -375,8 +379,8 @@ series1, = interpolate_timeseries(tstruct_sinks, seq1, timepoints, verbose=false
 series2, = interpolate_timeseries(tstruct_sinks, seq2, timepoints, verbose=false)
 
 ## The following code block plots the 3D grid and then 
-surface1, f1, ax1 = plotgrid(grid_dtm, texture = animated_overlay_1)
-surface2, f2, ax2 = plotgrid(grid_dtm, texture = animated_overlay_2)
+surface1, f1, sc1 = plotgrid(grid_dtm, texture = animated_overlay_1)
+surface2, f2, sc2 = plotgrid(grid_dtm, texture = animated_overlay_2)
 
 for i = 1:length(timepoints)
     s1, s2 = doublesize(series1[i]), doublesize(series2[i])
@@ -404,14 +408,14 @@ end
 # Although the animation above can not be shown directly in the online
 # documentation, we can show the end states.  To better see the differences, we
 # use closeup views:
-cam = GLMakie.cameracontrols(ax1)
-GLMakie.update_cam!(ax1.scene, cam, pi/4, pi/6, 300)
-DisplayAs.PNG(ax1.scene)
+f1
+set_camerapos(f1, sc1, view2...)
+
 # Terrain state at end of animated period, assuming no infiltration.
 #
-cam = GLMakie.cameracontrols(ax2)
-GLMakie.update_cam!(ax2.scene, cam, pi/4, pi/6, 300)
-DisplayAs.PNG(ax2.scene)
+f2
+set_camerapos(f2, sc2, view2...)
+
 # Terrain state at end of animated period, including the effect of infiltration.
 
 # # Conclusion
@@ -424,8 +428,6 @@ DisplayAs.PNG(ax2.scene)
 #   upstream areas.
 # - Infiltration and simulating temporal developments.
 #
-# Finally, we conclude the script by closing all windows:
-GLMakie.closeall()
 
 # [^1]:
 #     The data used in this example was originally obtained from

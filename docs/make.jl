@@ -5,9 +5,14 @@ push!(LOAD_PATH, "../src/")
 push!(LOAD_PATH, "../examples/")
 
 # Prepare example scripts
-Literate.markdown("../examples/urban.jl", "src/"; execute=false)
-Literate.markdown("../examples/flat_areas.jl", "src/"; execute=false)
-Literate.markdown("../examples/synthetic.jl", "src/"; execute=false)
+function set_to_cairo(content)
+    content = replace(content, "GLMakie" => "CairoMakie")
+    return content
+end
+
+Literate.markdown("../examples/urban.jl", "src/"; execute=false, preprocess = set_to_cairo)
+Literate.markdown("../examples/flat_areas.jl", "src/"; execute=false, preprocess = set_to_cairo)
+Literate.markdown("../examples/synthetic.jl", "src/"; execute=false, preprocess = set_to_cairo)
 
 # Build documentation
 makedocs(

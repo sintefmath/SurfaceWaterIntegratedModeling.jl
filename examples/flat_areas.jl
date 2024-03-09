@@ -2,14 +2,13 @@
 
 # This is a simple demonstration of how large flat surfaces (like large water
 # bodies) can be recognized, and straightened or excluded from analysis if
-# desired.
+# desired [^1].
 
 # ## Imporing packages and loading the surface.
 using SurfaceWaterIntegratedModeling
 import GLMakie, Images # for visualization and loading of textures
 import ColorSchemes
 using Pkg.Artifacts
-using DisplayAs # for image generation in documentation
 
 # The package with SWIM testdata is provided as a Julia artifact, which can be
 # accessed using the function `datapath_testdata`.  We subsequently load and
@@ -22,17 +21,17 @@ grid = loadgrid(joinpath(datapath, "bay.txt"));
 cmap = Dict(:blue => 2, :green => 4, :red => 6, :orange => 8,
             :lilac => 10, :bright => 11);
 
+## Also define a preset viewpoint
+view1 = (GLMakie.Vec(1059, 783, 622), GLMakie.Vec(280, 311, 58), 0.68);
+
 # The terrain used for demonstration is a varied surface that includes hills,
 # a mountainside, a road and a significant part consisting of ocean.
 tex = fill(cmap[:green], size(grid))
-sf, fig, ax = plotgrid(grid, texture= tex,
+sf, fig, sc = plotgrid(grid, texture = tex, 
                        colormap=ColorSchemes.:Paired_12,
                        colorrange=(1,12))
-cam = GLMakie.cameracontrols(ax)
-cam_lookat = GLMakie.Vec(285, 317, 23.9) # set observer target point
-cam_eyepos = GLMakie.Vec(767, 613, 414) # set observer position
-GLMakie.update_cam!(ax.scene, cam_eyepos, cam_lookat, GLMakie.Vec3f0(0, 0, 1))
-DisplayAs.PNG(ax.scene)
+fig
+set_camerapos(fig, sc, view1...)
 
 # ## Identifying flat areas and running spill analysis
 # 
@@ -46,7 +45,8 @@ isflat = identify_flat_areas(grid, rel_tol, max_cluster_size)
 
 tex[isflat] .= cmap[:blue]
 drape_surface(sf, tex)
-DisplayAs.PNG(ax.scene)
+set_camerapos(fig, sc, view1...)
+
 
 # We can see that the ocean part was correctly identified as flat, but so were
 # many parts that ought not be included.  We can increase the cluster size limit
@@ -57,7 +57,8 @@ isflat = identify_flat_areas(grid, rel_tol, max_cluster_size)
 tex[isflat] .= cmap[:blue]
 tex[.!isflat] .= cmap[:green]
 drape_surface(sf, tex)
-DisplayAs.PNG(ax.scene)
+set_camerapos(fig, sc, view1...)
+
 # With this value for the threshold, only the ocean remains identified as flat.
 #
 # For the surface used in this example, the surface is actually flat.  However,
@@ -95,7 +96,7 @@ tex[tex.==0] .= cmap[:green]-1;
 tex[isflat] .= cmap[:blue];
 
 drape_surface(sf, tex)
-DisplayAs.PNG(ax.scene)
+set_camerapos(fig, sc, view1...)
 
 # ## Adding more sinks
 # 
@@ -122,8 +123,9 @@ tex[tex.==0] .= cmap[:green]-1
 tex[isflat] .= cmap[:blue]
 
 drape_surface(sf, tex)
-DisplayAs.PNG(ax.scene)
+set_camerapos(fig, sc, view1...)
 #
-
-# This concludes this simple demo, and we close all graphical windows
-GLMakie.closeall()
+# [^1]:
+#     The data used in this example was originally obtained from
+#     [Kartverket](https://kartverket.no/) (the Norwegian Mapping Authority) under the
+#     [Creative Commons Attribution 4.0 International (CC BY 4.0)](https://creativecommons.org/licenses/by/4.0/) license.

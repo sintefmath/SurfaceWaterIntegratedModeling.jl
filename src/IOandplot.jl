@@ -1,10 +1,10 @@
-import GLMakie
+import Makie
 import DelimitedFiles
 import Base: size, min, max
-using GeometryBasics: Point3f, Vec2f, decompose, QuadFace, Tesselation, Rect, Mesh
+using GeometryBasics: Point3f0, Vec2f0, decompose, QuadFace, Tesselation, Rect, Mesh
 using Colors, ColorSchemes
 
-export loadgrid, savegrid, plotgrid, drape_surface
+export loadgrid, savegrid, plotgrid, drape_surface, set_camerapos
 
 # ----------------------------------------------------------------------------
 """
@@ -41,12 +41,12 @@ end
     plotgrid(grid, texture=nothing, colormap=:lightrainbow, wireframe=false, 
              downsamplefac=1, heightfac=1, colorrange=nothing)
 
-Plot a texture-mapped 2½D surface of a given grid, using GLMakie.
+Plot a texture-mapped 2½D surface of a given grid, using Makie.
 
 The function returns three values in the following order: 
 - the surface object
 - the figure
-- the axis
+- the scene
 
 # Arguments
 - `grid::AbstractArray{<:Real, 2}`: 2D array representing the grid
@@ -100,25 +100,29 @@ function plotgrid(grid::AbstractArray{<:Real, 2};
     res = size(z);
     x = LinRange(0, size(grid, 1), res[1]);
     y = LinRange(0, size(grid, 2), res[2]);
-    points = [Point3f(x[i], y[j], heightfac * z[i,j]) for i in 1:res[1], j in 1:res[2]];
+    points = [Point3f0(x[i], y[j], heightfac * z[i,j]) for i in 1:res[1], j in 1:res[2]];
 
     # define faces
-    faces = decompose(QuadFace{GLMakie.GLIndex}, Tesselation(Rect(0, 0, 1, 1), res));
+    faces = decompose(QuadFace{Makie.GLIndex}, Tesselation(Rect(0, 0, 1, 1), res));
 
     # define parameterization
     uv = map(points) do p
         tup = ((p[1], p[2])) ./ size(grid);
-        return Vec2f(tup);
+        return Vec2f0(tup);
     end;
 
     # define normals
     normals = vec(_computenormals(x[2] - x[1], y[2] - y[1], z));
 
     # create mesh
-    glmesh = Mesh(GLMakie.meta(vec(points); uv=GLMakie.Buffer(vec(uv)), normals), faces);
+    #glmesh = Mesh(Makie.meta(vec(points); uv=Makie.Buffer(vec(uv)), normals), faces);
+    glmesh = Mesh(Makie.meta(vec(points); uv=vec(uv), normals), faces);
 
+    # GLMakie handles texture coordinates differently
+    textransform = _get_tex_transform(texture)
+    
     if typeof(colormap) == ColorScheme
-        colormap = GLMakie.cgrad(colormap, length(colormap), categorical=true)
+        colormap = Makie.cgrad(colormap, length(colormap), categorical=true)
     end
 
     # plot mesh
@@ -129,17 +133,41 @@ function plotgrid(grid::AbstractArray{<:Real, 2};
     end
 
     fig, ax, plt =
-        GLMakie.mesh(glmesh,
-                     color=reverse(transpose(texture), dims=1), colormap=colormap,
-                     interpolate=false, colorrange=colorrange)
+        Makie.mesh(glmesh,
+                   color=textransform(texture), colormap=colormap,
+                   interpolate=false, colorrange=colorrange)
 
-    display(GLMakie.Screen(), fig)
+    if _using_cairo()
+        # get rid of transparent background
+        fig.attributes[:backgroundcolor]=(:white, 1)
+        ax.scene.attributes[:backgroundcolor]=(:white, 1)
+    end
     
     if wireframe
-        GLMakie.wireframe!(ax, glmesh, color=(:black, 0.1),
+        Makie.wireframe!(ax, glmesh, color=(:black, 0.1),
                            linewidth=1, transparency=true);      
     end
-    return plt, fig, ax
+    return plt, fig, ax.scene
+end
+
+# ----------------------------------------------------------------------------
+function _using_cairo()
+    string(typeof(Makie.current_backend[])) == "CairoMakie.CairoBackend"
+end
+
+# ----------------------------------------------------------------------------
+function _using_glmakie()
+    string(typeof(Makie.current_backend[])) == "GLMakie.GLBackend"
+end
+
+# ----------------------------------------------------------------------------
+function _get_tex_transform(tex)
+    if _using_cairo() && eltype(tex) <: Real
+        x -> x
+    else
+        x -> reverse(transpose(x), dims=1)
+    end
+    #_using_glmakie() ? x -> reverse(transpose(x), dims=1) : x -> x
 end
 
 # ----------------------------------------------------------------------------
@@ -155,7 +183,7 @@ function _computenormals(dx, dy, z)
     ny = (djz[:, 1:end-1] + djz[:, 2:end]) / (2dy);
     
     # compute normals and normalize them
-    normals = GLMakie.normalize.([Point3f(nx[i, j], ny[i,j], 1) for i in 1:size(z, 1), j in 1:size(z,2)]);
+    normals = Makie.normalize.([Point3f0(nx[i, j], ny[i,j], 1) for i in 1:size(z, 1), j in 1:size(z,2)]);
     return normals;
 end
 
@@ -171,5 +199,34 @@ documentation for specifics).
 See also [`plotgrid`](@ref).
 """
 function drape_surface(surf, tex)
-    surf.attributes.color = reverse(transpose(tex), dims=1)
+    surf.attributes.color = _get_tex_transform(tex)(tex)
+end
+
+# ----------------------------------------------------------------------------
+"""
+   set_camerapos(figure, scene, cpos, ctarget, czoom)
+
+Set the camera position, target and zoom level for a given scene.
+
+This function is provided as a workaround to smooth over different
+idiosyncracies in camera handling for the Makie backends GLMakie and 
+CairoMakie.
+"""
+function set_camerapos(fig, scene, cpos, ctarget, czoom)
+    cam = Makie.cameracontrols(scene)
+    upvec = Makie.Vec3f0(0.0, 0.0, 1.0)
+    if _using_glmakie()
+        cam.zoom_mult[] = czoom
+    elseif _using_cairo()
+        cam.fov[] = 45.0 * czoom
+    else
+        error("Unimplemented for backend:" * string(typeof(Makie.current_backend[])))
+    end        
+    Makie.update_cam!(scene, cpos, ctarget, upvec)
+
+    scene.center[] = false
+
+    if _using_cairo()
+        return fig
+    end
 end

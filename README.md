@@ -1,3 +1,6 @@
+[![Dev](https://img.shields.io/badge/docs-dev-blue.svg)](https://sintefmath.github.io/SurfaceWaterIntegratedModeling.jl/dev/)
+[![Build Status](https://github.com/sintefmath/Jutul.jl/actions/workflows/CI.yml/badge.svg?branch=main)](https://github.com/sintefmath/SurfaceWaterIntegratedModeling.jl/actions/workflows/CI.yml?query=branch%3Amain)
+
 # SWIM - Surface Water Integrated Modeling
 
 SWIM is an open-source software package for static modeling and prediction of
