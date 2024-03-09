@@ -11,8 +11,8 @@ function set_to_cairo(content)
 end
 
 Literate.markdown("examples/urban.jl", "src/"; execute=false, preprocess = set_to_cairo)
-Literate.markdown("../examples/flat_areas.jl", "src/"; execute=false, preprocess = set_to_cairo)
-Literate.markdown("../examples/synthetic.jl", "src/"; execute=false, preprocess = set_to_cairo)
+Literate.markdown("examples/flat_areas.jl", "src/"; execute=false, preprocess = set_to_cairo)
+Literate.markdown("examples/synthetic.jl", "src/"; execute=false, preprocess = set_to_cairo)
 
 # Build documentation
 makedocs(
