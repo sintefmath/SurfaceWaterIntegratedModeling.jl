@@ -24,10 +24,10 @@ makedocs(
     draft=false,
     pages = [
         "Introduction" => "index.md",
+        "Examples" => ["urban.md", "synthetic.md", "flat_areas.md"],
         "Static analysis" => "static.md",
         "Dynamic analysis" => "dynamic.md",
         "Utilities and visualization" => "utils.md",
-        "Examples" => ["urban.md", "synthetic.md", "flat_areas.md"],
         "Index" => "indexlist.md"
     ]
 )
