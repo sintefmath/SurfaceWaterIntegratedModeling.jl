@@ -31,3 +31,8 @@ makedocs(
         "Index" => "indexlist.md"
     ]
 )
+
+deploydocs(;
+    repo="github.com/sintefmath/SurfaceWaterIntegratedModeling.jl",
+    devbranch="main",
+)
