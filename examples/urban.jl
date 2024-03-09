@@ -235,8 +235,7 @@ set_camerapos(fig_flow, sc_flow, view2...)
 # elsewhere.   If we want to highlight also the smaller flow patterns, a
 # logarithmic scale can be useful:
 sf_flow_log, fig_flow_log, sc_flow_log =
-    plotgrid(grid_dtm, texture=log10.(runoff),
-             colormap=ColorSchemes.ColorScheme(PerceptualColourMaps.cmap("L12")))
+    plotgrid(grid_dtm, texture=log10.(runoff), colormap=:Blues)
 
 fig_flow_log
 set_camerapos(fig_flow_log, sc_flow_log, view1...)
