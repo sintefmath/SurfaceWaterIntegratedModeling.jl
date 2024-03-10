@@ -51,17 +51,16 @@ further development. Current functionality includes:
 
 ## Learn more
 
-The best way to get introduced to SWIM is probably to have a look at the
-provided examples in the documentation. The
-[Urban landscape](https://sintefmath.github.io/SurfaceWaterIntegratedModeling.jl/dev/urban/)
-example provides an introduction to key SWIM functionality applied to a real
-dataset of a district in central Oslo.  The
-[Simple synthetic example](https://sintefmath.github.io/SurfaceWaterIntegratedModeling.jl/dev/synthetic/)
-uses an extremely simplified surface to explain and demonstrate some key
-concepts.  The
-[Handling flat areas](https://sintefmath.github.io/SurfaceWaterIntegratedModeling.jl/dev/flat_areas/)
-example is a small example to show how large, flat water bodies can be
-identified and kept separate from the analysis.
+The best way to get introduced to SWIM is to have a look at the provided
+examples:
+- The [Urban landscape](https://sintefmath.github.io/SurfaceWaterIntegratedModeling.jl/dev/urban/)
+  example provides an introduction to key SWIM functionality applied to a real
+  dataset of a district in central Oslo.
+- The [Simple synthetic example](https://sintefmath.github.io/SurfaceWaterIntegratedModeling.jl/dev/synthetic/)
+  uses an extremely simplified surface to explain and demonstrate some key concepts.
+- The [Handling flat areas](https://sintefmath.github.io/SurfaceWaterIntegratedModeling.jl/dev/flat_areas/)
+  example is a small example to show how large, flat water bodies can be
+  identified and kept separate from the analysis.
 
 ## License information
 
