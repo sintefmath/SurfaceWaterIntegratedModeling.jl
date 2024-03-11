@@ -62,6 +62,28 @@ examples:
   example is a small example to show how large, flat water bodies can be
   identified and kept separate from the analysis.
 
+## Note on running the examples
+The scripts found in the `example` directory have their own `Project.toml`
+file. This environment should be activated before trying to run the
+examples. Here is a step-by-step guide to how you can make the exampls run:
+1) In your terminal, go to the `example` directory and start up Julia.
+2) Go to the package mode by typing `]` and activate the current directory by
+  running `activate .`
+3) Still in the package mode, run: `dev ..`
+4) Now you should be able to run the examples. 
+
+Note:
+- It is recommended that you run the exmaples block-by-block in an IDE, rather
+  than having them run through in one go by `include`ing them, in order to
+  properly see all generated figures before they are updated/changed.
+- Regarding step (3) in the list above: The SWIM package is not currently
+  registered in the Julia General Registry, and as a consequence, it does not
+  automatically download and install when needed. To tell julia to use the
+  locally downloaded repo, this line will point to the right place.
+
+For inquiries, you can get in touch with the contact person listed at
+https://www.sintef.no/en/software/swim/.
+
 ## License information
 
 Copyright (c) 2024 SINTEF Digital
