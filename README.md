@@ -4,7 +4,7 @@
 # SWIM - Surface Water Integrated Modeling
 
 SWIM is an open-source software package for static modeling and prediction of
-surface water and urban flooding based on analysis of topography/terrain. It is
+surface water and urban flooding based on analysis of terrain topography. It is
 developed and maintained by the [Applied Computational
 Science](https://www.sintef.no/en/digital/departments-new/department-of-mathematics-and-cybernetics/research-group-applied-computational-science/)
 research group at [SINTEF Digital](https://www.sintef.no/en/digital/).
@@ -21,7 +21,7 @@ to model flooding in urban areas. Spill-point analyses are highly
 computationally efficient compared to tools based on numerical simulation. This
 makes it easy to work interactively and test out various scenarios and
 measures. SWIM offers some unique functionality, such as simplified infiltration
-models (both permeable and impermeable surfaecs) and the calculation of time
+models (both permeable and impermeable surfaces) and the calculation of time
 series that models how water accumulates or drains over time, without having to
 resort to computationally intensive numerical time-stepping approaches.
 

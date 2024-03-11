@@ -7,6 +7,7 @@ push!(LOAD_PATH, "../examples/")
 # Prepare example scripts
 function set_to_cairo(content)
     content = replace(content, "GLMakie" => "CairoMakie")
+    content = replace(content, "`CairoMakie`" => "GLMakie") 
     return content
 end
 

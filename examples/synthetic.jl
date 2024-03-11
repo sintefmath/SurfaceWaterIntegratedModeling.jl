@@ -412,7 +412,7 @@ set_camerapos(fig, sc, view1...)
 runoff = runoff_at(seq2);
 
 # The `runoff` field is defined such that positive values represent overland
-# flow intensity, whereas negative values represent remaining infiltration.
+# flow intensity, whereas negative values represent remaining infiltration capacity.
 # First, we are interested in the part of the terrain that remains dry, i.e.
 # local infiltration exceeds the combined value of precipitation and inflow from
 # upstream:

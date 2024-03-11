@@ -30,7 +30,7 @@ typeof(grid_dtm), size(grid_dtm)
 
 # In addition to the elevation data, we also load a set of textures and masks that can
 # be used to visualize the model, as well as indicate the locations of buildings,
-# permeable areas, rivers and sinks (here manholes).
+# permeable areas, rivers and sinks (e.g. manholes).
 mapimg = Images.load(joinpath(kuba_datapath, "textures", "kuba.png"))
 photoimg = Images.load(joinpath(kuba_datapath, "textures", "kuba_photo.png"))
 
@@ -41,8 +41,8 @@ permeable_mask = Images.load(joinpath(kuba_datapath, "textures", "permeable_mask
 sink_mask = Images.load(joinpath(kuba_datapath, "textures", "sink_mask.png"))
 typeof(sink_mask), size(sink_mask)
 
-# The textures are not all of the same resolution.  We resize them so that they are all
-# of the same resolution; twice the topographical grid resolution in both directions.
+# The textures are not all of the same resolution.  We resize them all to equal
+# resolution; twice the topographical grid resolution in both directions.
 mapimg = Images.imresize(mapimg, size(grid_dtm) .* 2)
 photoimg = Images.imresize(photoimg, size(mapimg))
 
@@ -59,13 +59,13 @@ size(sink_mask)
 sfmap, figmap, scmap = plotgrid(grid_dtm, texture=mapimg)
 sfpho, figpho, scpho = plotgrid(grid_dsm, texture=photoimg)
 
-# The `plotgrid` function creates a 3D scene.  If GLMakie is used, the scene is
-# displayed in a graphical window can be manipulated by the used thorugh the
+# The `plotgrid` function creates a 3D scene.  If `GLMakie` is used, the scene is
+# displayed in a graphical window that can be navigated using the
 # keyboard and mouse.  The viewpoint of the scene can also be changed
 # programatically using [`set_camerapos`](@ref).
 # We predefine a couple of viewpoints on the form (camera position, target, zoomlevel):
 view1 = (GLMakie.Vec(1223, 587, 1056), GLMakie.Vec(391, 327, 13.8), 0.66)
-view2 = (GLMakie.Vec(1223, 587, 1056), GLMakie.Vec(391, 327, 13.8), 0.30)
+view2 = (GLMakie.Vec(1223, 587, 1056), GLMakie.Vec(391, 327, 13.8), 0.30);
 
 # Here is a snapshot for the terrain model:
 figmap
@@ -95,8 +95,7 @@ fig
 # following information:
 # - The flow pattern of water on the terrain, i.e. how water moves from one
 #   grid-cell to the next, assuming infinitesimal, gravity-driven flow.
-# - Identify accumulation regions (lakes), and two related tree-like
-# - hierarchies:
+# - Identify accumulation regions (lakes), and two related tree-like hierarchies:
 #   - How separate lakes merge as they grow (subtraps -> supertraps)
 #   - How lakes, once full, pour into lakes further downstream (upstream traps
 #     -> downstream traps)
@@ -180,9 +179,10 @@ set_camerapos(fig_nosinks, sc_nosinks, view2...)
 
 # #### With sinks:
 # 
-# With manholes and other sinks, the submerged part of the terrain is much less,
-# and the road is not flooded.  In this analysis, infiltration has not yet been
-# considered.  Many backyards are still under water.
+# With manholes and other sinks, the submerged part of the terrain is
+# significantly reduced, and the road is not flooded.  In this analysis,
+# infiltration has not yet been considered.  Many backyards are still under
+# water.
 sf_sinks, fig_sinks, sc_sinks = plotgrid(grid_dtm, texture=overlay_sinks);
 
 fig_sinks
@@ -298,9 +298,6 @@ set_camerapos(fig_upstr_log, sc_upstr_log,
 # associated sinks.  All the water that falls on the blue are will pass through the
 # point `pt`.
 
-# On these logarithmic plots, differences between strong and weak flows 
-# are attenuated, and it is easier to see how the water flows.
-
 # ## Infiltration and temporal development
 #
 # A purely static analysis cannot properly capture the temporal aspect of
@@ -316,7 +313,7 @@ set_camerapos(fig_upstr_log, sc_upstr_log,
 #
 # Below, we demonstrate the sequence computation on the terrain twice: first without
 # considering infiltration, then by considering certain parts of terrain permeable with
-# a certain drainage rate.
+# a specified drainage rate.
 
 # We first define a vector of `WeatherEvent`s.  These events indicate points in
 # time when the weather changes.  For example, using two events, we can

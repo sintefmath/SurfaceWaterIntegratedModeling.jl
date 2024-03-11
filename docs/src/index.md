@@ -2,7 +2,7 @@
 
 SWIM (Surface Water Integrated Modeling) is an open-source software package for
 static modeling and prediction of surface water and urban flooding based on
-analysis of topography/terrain. It is developed and maintained by the
+analysis of terrain topography. It is developed and maintained by the
 [Applied Computational Science](https://www.sintef.no/en/digital/departments-new/department-of-mathematics-and-cybernetics/research-group-applied-computational-science/)
 research group at [SINTEF Digital](https://www.sintef.no/en/digital/).
 
