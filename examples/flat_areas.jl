@@ -25,7 +25,7 @@ cmap = Dict(:blue => 2, :green => 4, :red => 6, :orange => 8,
 view1 = (GLMakie.Vec(1059, 783, 622), GLMakie.Vec(280, 311, 58), 0.68);
 
 # The terrain used for demonstration is a varied surface that includes hills,
-# a mountainside, a road and a significant part consisting of ocean.
+# a mountainside, a road, and ocean areas.
 tex = fill(cmap[:green], size(grid))
 sf, fig, sc = plotgrid(grid, texture = tex, 
                        colormap=ColorSchemes.:Paired_12,
@@ -35,9 +35,9 @@ set_camerapos(fig, sc, view1...)
 
 # ## Identifying flat areas and running spill analysis
 # 
-# While the ocean part is clearly visible on the surface, it has not been
-# clearly identified.  For this purpose, the [`identify_flat_areas`](@ref)
-# function can be used:
+# While the ocean part is clearly visible on the surface, its cells in the
+# terrain grid have not been identified.  For this purpose, the
+# [`identify_flat_areas`](@ref) function can be used:
 
 rel_tol = 1e-3 # relative tolerance for an angle between two cells to be considered zero
 max_cluster_size = 1 # threshold for excluding too small areas
@@ -61,20 +61,21 @@ set_camerapos(fig, sc, view1...)
 
 # With this value for the threshold, only the ocean remains identified as flat.
 #
-# For the surface used in this example, the surface is actually flat.  However,
-# it is sometimes the case that even regions that should be conceptually flat
-# contains small irregularities that may cause noisy output from the spill
-# analysis.  One way to handle this, is to use the [`flatten_grid!`](@ref)
-# function, which ensures that flat parts are exactly that.  Even if not 
-# strictly necessary for our sample terrain, we demonstrate the use below:
+# For the surface used in this example, the ocean surface is already exactly
+# flat.  However, it is sometimes the case with terrain input data that 
+# conceptually flat regions still contains small irregularities that
+# may cause noisy output from the spill analysis.  One way to handle this, is to
+# use the [`flatten_grid!`](@ref) function, which ensures that flat parts are
+# exactly that.  Even if not strictly necessary for our sample terrain, we
+# demonstrate the use below:
 flatten_grid!(grid, isflat, :min)
 
 # Another way to exclude flat areas from the analysis is to declare them as
 # "sinks".  For oceans, this makes conceptual sense, since they can be
 # considered traps with "infinite" capacity.  For other large flat areas,
 # e.g. parking lots, this approach does not work so well, and `flatten_grid!`
-# should be used.  For our terrain, though, declaring the flat areas as sinks
-# should be fine.  We pass along `isflat` as the sink map in our call to
+# should be used.  For our terrain, declaring the flat areas as sinks should be
+# fine.  We pass along `isflat` as the sink map in our call to
 # [`spillanalysis`](@ref) below:
 tstruct = spillanalysis(grid, sinks=isflat)
 
@@ -89,7 +90,7 @@ tex = show_region_selection(tstruct,
                             river_color=cmap[:blue]-1,
                             trap_color=cmap[:blue]);
 
-# terrain that spills directly to the ocean, or out of the domain is
+# Terrain that spills directly to the ocean, or out of the domain is
 # assigned a light green color, to distinguish it from terrain that spills to
 # identified traps, while the ocean is set to blue:
 tex[tex.==0] .= cmap[:green]-1;
