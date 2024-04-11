@@ -114,9 +114,11 @@ end
 function _compute_supertraps_of(lowest_regions)
     # produce a vector with one entry per lowest-level trap, giving the indices
     # of itself and all the supertraps that contain it
-    
-    num_lowlevel_regions = maximum(vcat(lowest_regions...))
 
+    if isempty(lowest_regions)
+        return Vector{Vector{Int64}}()
+    end
+    num_lowlevel_regions = maximum(vcat(lowest_regions...))
     result = [Vector{Int64}() for _ in 1:num_lowlevel_regions]
 
     for i in 1:length(lowest_regions)

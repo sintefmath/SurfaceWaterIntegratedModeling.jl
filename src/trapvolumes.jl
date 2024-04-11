@@ -33,6 +33,9 @@ function trapvolumes(grid::Matrix{<:Real},
     num_lowlevel_regions = maximum(spillregions)
     num_all_regions = length(lowest_regions)
     @assert(length(spillpoints) == num_all_regions)
+    if num_all_regions == 0
+        return Vector{Int64}()
+    end
 
     # for each lowest-level spill region, determine all supertraps by inverting
     # 'lowest_regions'

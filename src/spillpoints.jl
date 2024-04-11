@@ -109,14 +109,12 @@ function _process_domain(grid::Matrix{<:Real}, spillregions::Matrix{Int},
     # Note: we do not care about the number of distinct spillregions, only the
     # number of distinct _positive_ spillregions, since negative spill regions
     # are spilling out of the domain anyway.
-    result = fill(Spillpoint(), maximum(spillregions))
+    result = fill(Spillpoint(), max(maximum(spillregions), 0))
     
     LI = LinearIndices(spillregions)
-
     IFirst = CartesianIndex(domain.xrange[1], domain.yrange[1])
     ILast = CartesianIndex(min(domain.xrange[end]+1, size(grid, 1)),
                            min(domain.yrange[end]+1, size(grid, 2)))
-    
     boundaries = [Vector{Tuple{Int, Int}}() for i in 1:maximum(spillregions)]
 
     function _update_spillpointlist!(pos, shift)
@@ -150,11 +148,9 @@ function _process_domain(grid::Matrix{<:Real}, spillregions::Matrix{Int},
     
     # look for spillpoints along main axes and (optionally) diagonals
     shifts = [CartesianIndex(1, 0), CartesianIndex(0, 1)]
-
     if usediags
         append!(shifts, [CartesianIndex(1,1), CartesianIndex(1, -1)])
     end
-    
     for shift in shifts
 
         startix = IFirst - min(shift, CartesianIndex(0, 0))
