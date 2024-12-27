@@ -140,7 +140,7 @@ function plotgrid(grid::AbstractArray{<:Real, 2};
     if _using_cairo()
         # get rid of transparent background
         fig.attributes[:backgroundcolor]=(:white, 1)
-        ax.scene.attributes[:backgroundcolor]=(:white, 1)
+        #ax.scene.attributes[:backgroundcolor]=(:white, 1)
     end
     
     if wireframe
