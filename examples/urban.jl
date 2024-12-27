@@ -68,12 +68,10 @@ view1 = (GLMakie.Vec(1223, 587, 1056), GLMakie.Vec(391, 327, 13.8), 0.66);
 view2 = (GLMakie.Vec(1223, 587, 1056), GLMakie.Vec(391, 327, 13.8), 0.30);
 
 # Here is a snapshot for the terrain model:
-figmap
-set_camerapos(figmap, scmap, view1...)
+set_camerapos(scmap, view1...)
 
 # And a snapshot of the surface model:
-figpho
-set_camerapos(figpho, scpho, view1...)
+set_camerapos(scpho, view1...)
 
 # Here is a visualization of the different masks loaded:
 fig = GLMakie.Figure()
@@ -171,11 +169,10 @@ overlay_sinks[river_mask .> Images.Gray{Images.N0f8}(0.0)] .= blue_color;
 # seen in the close-up view below.
 sf_nosink, fig_nosinks, sc_nosinks = plotgrid(grid_dtm, texture=overlay_nosinks)
 
-fig_nosinks
-set_camerapos(fig_nosinks, sc_nosinks, view1...)
+set_camerapos(sc_nosinks, view1...)
 
 # Close-up view:
-set_camerapos(fig_nosinks, sc_nosinks, view2...)
+set_camerapos(sc_nosinks, view2...)
 
 # #### With sinks:
 # 
@@ -185,11 +182,10 @@ set_camerapos(fig_nosinks, sc_nosinks, view2...)
 # water.
 sf_sinks, fig_sinks, sc_sinks = plotgrid(grid_dtm, texture=overlay_sinks);
 
-fig_sinks
-set_camerapos(fig_sinks, sc_sinks, view1...)
+set_camerapos(sc_sinks, view1...)
 
 # Close-up view:
-set_camerapos(fig_sinks, sc_sinks, view2...)
+set_camerapos(sc_sinks, view2...)
 
 # ## Visualize flow intensity
 #
@@ -222,12 +218,11 @@ runoff, = watercourses(tstruct_sinks, filled_traps,
 sf_flow, fig_flow, sc_flow =
     plotgrid(grid_dtm, texture=runoff,
              colormap=:Blues)
-fig_flow
-set_camerapos(fig_flow, sc_flow, view1...)
-# 
+
+set_camerapos(sc_flow, view1...)
 
 ## Close-up view:
-set_camerapos(fig_flow, sc_flow, view2...)
+set_camerapos(sc_flow, view2...)
 
 # Only a few spots are colored non-white in the above plots.  This is because
 # the flow across the terrain is highly concentrated in a few locations with
@@ -237,13 +232,10 @@ set_camerapos(fig_flow, sc_flow, view2...)
 sf_flow_log, fig_flow_log, sc_flow_log =
     plotgrid(grid_dtm, texture=log10.(runoff), colormap=:Blues)
 
-fig_flow_log
-set_camerapos(fig_flow_log, sc_flow_log, view1...)
-
-#
+set_camerapos(sc_flow_log, view1...)
 
 # Close-up view:
-set_camerapos(fig_flow_log, sc_flow_log, view2...)
+set_camerapos(sc_flow_log, view2...)
 
 # On these logarithmic plots, differences between strong and weak flows 
 # are attenuated, and it is easier to see how the water flows.
@@ -285,8 +277,7 @@ upstream_texture[pt_ix_upscaled] .= red_color
 ## Plot the grid
 sf_upstr_log, fig_upstr_log, sc_upstr_log = plotgrid(grid_dtm, texture=upstream_texture)
 
-fig_upstr_log
-set_camerapos(fig_upstr_log, sc_upstr_log,
+set_camerapos(sc_upstr_log,
               GLMakie.Vec(-17, 202, 178), # observer position
               GLMakie.Vec(472, 113, -255), # observer target
               0.8)
@@ -407,13 +398,11 @@ end
 # Although the animation above can not be shown directly in the online
 # documentation, we can show the end states.  To better see the differences, we
 # use closeup views:
-f1
-set_camerapos(f1, sc1, view2...)
+set_camerapos(sc1, view2...)
 
 # Terrain state at end of animated period, assuming no infiltration.
 #
-f2
-set_camerapos(f2, sc2, view2...)
+set_camerapos(sc2, view2...)
 
 # Terrain state at end of animated period, including the effect of infiltration.
 

@@ -11,6 +11,7 @@ Literate = "98b081ad-f1c9-55d3-8b20-4c87d4299306"
 SurfaceWaterIntegratedModeling = "71e2a337-b4d4-4738-9f2b-3c37e1d3d462"
 
 [compat]
+CairoMakie = "0.12.18"
 ArchGDAL = "0.10.2"
 ColorSchemes = "3.24"
 GeometryBasics = "0.4.11"

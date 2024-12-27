@@ -164,11 +164,11 @@ end
 
 # ----------------------------------------------------------------------------
 function _get_tex_transform(tex)
-    if _using_cairo() && eltype(tex) <: Real
-        x -> x
-    else
-        x -> reverse(transpose(x), dims=1)
-    end
+    # if _using_cairo() && eltype(tex) <: Real
+    #     x -> x
+    # else
+    x -> reverse(transpose(x), dims=1)
+    #end
     #_using_glmakie() ? x -> reverse(transpose(x), dims=1) : x -> x
 end
 
@@ -206,7 +206,7 @@ end
 
 # ----------------------------------------------------------------------------
 """
-   set_camerapos(figure, scene, cpos, ctarget, czoom)
+   set_camerapos(scene, cpos, ctarget, czoom)
 
 Set the camera position, target and zoom level for a given scene.
 
@@ -214,7 +214,7 @@ This function is provided as a workaround to smooth over different
 idiosyncracies in camera handling for the Makie backends GLMakie and 
 CairoMakie.
 """
-function set_camerapos(fig, scene, cpos, ctarget, czoom)
+function set_camerapos(scene, cpos, ctarget, czoom)
     cam = Makie.cameracontrols(scene)
     upvec = Makie.Vec3f0(0.0, 0.0, 1.0)
     # if _using_glmakie()
@@ -227,7 +227,7 @@ function set_camerapos(fig, scene, cpos, ctarget, czoom)
     Makie.update_cam!(scene, cpos, ctarget, upvec)
 
     #scene.center[] = false
-    if _using_cairo()
-        return fig
-    end
+    #if _using_cairo()
+    return scene
+    #end
 end

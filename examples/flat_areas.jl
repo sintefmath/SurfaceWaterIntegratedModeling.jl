@@ -30,8 +30,7 @@ tex = fill(cmap[:green], size(grid))
 sf, fig, sc = plotgrid(grid, texture = tex, 
                        colormap=ColorSchemes.:Paired_12,
                        colorrange=(1,12))
-fig
-set_camerapos(fig, sc, view1...)
+set_camerapos(sc, view1...)
 
 # ## Identifying flat areas and running spill analysis
 # 
@@ -45,7 +44,7 @@ isflat = identify_flat_areas(grid, rel_tol, max_cluster_size)
 
 tex[isflat] .= cmap[:blue]
 drape_surface(sf, tex)
-set_camerapos(fig, sc, view1...)
+set_camerapos(sc, view1...)
 
 
 # We can see that the ocean part was correctly identified as flat, but so were
@@ -57,7 +56,7 @@ isflat = identify_flat_areas(grid, rel_tol, max_cluster_size)
 tex[isflat] .= cmap[:blue]
 tex[.!isflat] .= cmap[:green]
 drape_surface(sf, tex)
-set_camerapos(fig, sc, view1...)
+set_camerapos(sc, view1...)
 
 # With this value for the threshold, only the ocean remains identified as flat.
 #
@@ -97,7 +96,7 @@ tex[tex.==0] .= cmap[:green]-1;
 tex[isflat] .= cmap[:blue];
 
 drape_surface(sf, tex)
-set_camerapos(fig, sc, view1...)
+set_camerapos(sc, view1...)
 
 # ## Adding more sinks
 # 
@@ -124,7 +123,7 @@ tex[tex.==0] .= cmap[:green]-1
 tex[isflat] .= cmap[:blue]
 
 drape_surface(sf, tex)
-set_camerapos(fig, sc, view1...)
+set_camerapos(sc, view1...)
 #
 # [^1]:
 #     The data used in this example was originally obtained from
