@@ -18,6 +18,19 @@ OffsetArrays = "6fe1bfb0-de20-5000-8ca7-80f57d26f881"
 Roots = "f2b01f46-fcfa-551c-844a-d8ac1e96c665"
 SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
 
+[compat]
+ColorSchemes = "3.24"
+Colors = "0.12.10"
+DifferentialEquations = "7.13"
+GeometryBasics = "0.4.10"
+GraphPlot = "0.5.2"
+Graphs = "1.9"
+Interpolations = "0.15.1"
+Makie = "0.20.8"
+OffsetArrays = "1.13"
+Roots = "2.1.2"
+DelimitedFiles = "1.9.1"
+SparseArrays = "1.10.0"
 
 [extras]
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
