@@ -64,7 +64,7 @@ sfpho, figpho, scpho = plotgrid(grid_dsm, texture=photoimg)
 # keyboard and mouse.  The viewpoint of the scene can also be changed
 # programatically using [`set_camerapos`](@ref).
 # We predefine a couple of viewpoints on the form (camera position, target, zoomlevel):
-view1 = (GLMakie.Vec(1223, 587, 1056), GLMakie.Vec(391, 327, 13.8), 0.66)
+view1 = (GLMakie.Vec(1223, 587, 1056), GLMakie.Vec(391, 327, 13.8), 0.66);
 view2 = (GLMakie.Vec(1223, 587, 1056), GLMakie.Vec(391, 327, 13.8), 0.30);
 
 # Here is a snapshot for the terrain model:
@@ -378,6 +378,9 @@ series2, = interpolate_timeseries(tstruct_sinks, seq2, timepoints, verbose=false
 surface1, f1, sc1 = plotgrid(grid_dtm, texture = animated_overlay_1)
 surface2, f2, sc2 = plotgrid(grid_dtm, texture = animated_overlay_2)
 
+# When using `GLMakie`, the surfaces can be displayed in separate windows as follows:
+# `display(GLMakie.Screen(), f1)`
+# `display(GLMakie.Screen(), f2)`
 for i = 1:length(timepoints)
     s1, s2 = doublesize(series1[i]), doublesize(series2[i])
     

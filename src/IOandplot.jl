@@ -152,12 +152,14 @@ end
 
 # ----------------------------------------------------------------------------
 function _using_cairo()
-    string(typeof(Makie.current_backend[])) == "CairoMakie.CairoBackend"
+    string(Makie.current_backend()) == "CairoMakie"
+    #string(typeof(Makie.current_backend[])) == "CairoMakie.CairoBackend"
 end
 
 # ----------------------------------------------------------------------------
 function _using_glmakie()
-    string(typeof(Makie.current_backend[])) == "GLMakie.GLBackend"
+    string(Makie.current_backend()) == "GLMakie"
+    #string(typeof(Makie.current_backend[])) == "GLMakie.GLBackend"
 end
 
 # ----------------------------------------------------------------------------
@@ -215,17 +217,16 @@ CairoMakie.
 function set_camerapos(fig, scene, cpos, ctarget, czoom)
     cam = Makie.cameracontrols(scene)
     upvec = Makie.Vec3f0(0.0, 0.0, 1.0)
-    if _using_glmakie()
-        cam.zoom_mult[] = czoom
-    elseif _using_cairo()
-        cam.fov[] = 45.0 * czoom
-    else
-        error("Unimplemented for backend:" * string(typeof(Makie.current_backend[])))
-    end        
+    # if _using_glmakie()
+    #     cam.zoom_mult[] = czoom
+    # elseif _using_cairo()
+    cam.fov[] = 45.0 * czoom
+    # else
+    #     error("Unimplemented for backend:" * string(typeof(Makie.current_backend[])))
+    # end        
     Makie.update_cam!(scene, cpos, ctarget, upvec)
 
-    scene.center[] = false
-
+    #scene.center[] = false
     if _using_cairo()
         return fig
     end
