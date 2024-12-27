@@ -1,7 +1,7 @@
 name = "SurfaceWaterIntegratedModeling"
 uuid = "71e2a337-b4d4-4738-9f2b-3c37e1d3d462"
 authors = ["Odd Andersen <odd.andersen@sintef.no>"]
-version = "1.0.0"
+version = "1.0.1"
 
 [deps]
 ArchGDAL = "c9ce4bd3-c3d5-55b8-8973-c0e20141b8c3"
