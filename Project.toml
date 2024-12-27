@@ -1,7 +1,7 @@
 name = "SurfaceWaterIntegratedModeling"
 uuid = "71e2a337-b4d4-4738-9f2b-3c37e1d3d462"
 authors = ["Odd Andersen <odd.andersen@sintef.no>"]
-version = "0.1.0"
+version = "1.0.0"
 
 [deps]
 ColorSchemes = "35d6a980-a343-548e-a6ea-1d62b119f2f4"
