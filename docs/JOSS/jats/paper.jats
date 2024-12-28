@@ -1,0 +1,229 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<!DOCTYPE article PUBLIC "-//NLM//DTD JATS (Z39.96) Journal Publishing DTD v1.2 20190208//EN"
+                  "JATS-publishing1.dtd">
+<article xmlns:mml="http://www.w3.org/1998/Math/MathML" xmlns:xlink="http://www.w3.org/1999/xlink" dtd-version="1.2" article-type="other">
+<front>
+<journal-meta>
+<journal-id></journal-id>
+<journal-title-group>
+<journal-title>Journal of Open Source Software</journal-title>
+<abbrev-journal-title>JOSS</abbrev-journal-title>
+</journal-title-group>
+<issn publication-format="electronic">2475-9066</issn>
+<publisher>
+<publisher-name>Open Journals</publisher-name>
+</publisher>
+</journal-meta>
+<article-meta>
+<article-id pub-id-type="publisher-id">0</article-id>
+<article-id pub-id-type="doi">N/A</article-id>
+<title-group>
+<article-title>Topography-based surface water modeling in Julia, with
+infiltration and temporal developments</article-title>
+</title-group>
+<contrib-group>
+<contrib contrib-type="author">
+<contrib-id contrib-id-type="orcid">https://orcid.org/0000-0002-2245-9512</contrib-id>
+<name>
+<surname>Andersen</surname>
+<given-names>Odd A.</given-names>
+</name>
+<xref ref-type="aff" rid="aff-1"/>
+</contrib>
+<aff id="aff-1">
+<institution-wrap>
+<institution>SINTEF Digital, Dept. of Mathematics and Cybernetics,
+Norway</institution>
+</institution-wrap>
+</aff>
+</contrib-group>
+<volume>¿VOL?</volume>
+<issue>¿ISSUE?</issue>
+<fpage>¿PAGE?</fpage>
+<permissions>
+<copyright-statement>Authors of papers retain copyright and release the
+work under a Creative Commons Attribution 4.0 International License (CC
+BY 4.0)</copyright-statement>
+<copyright-year>1970</copyright-year>
+<copyright-holder>The article authors</copyright-holder>
+<license license-type="open-access" xlink:href="https://creativecommons.org/licenses/by/4.0/">
+<license-p>Authors of papers retain copyright and release the work under
+a Creative Commons Attribution 4.0 International License (CC BY
+4.0)</license-p>
+</license>
+</permissions>
+<kwd-group kwd-group-type="author">
+<kwd>stormwater</kwd>
+<kwd>topographical analysis</kwd>
+<kwd>flash flooding</kwd>
+<kwd>Julia</kwd>
+<kwd>infiltration</kwd>
+</kwd-group>
+</article-meta>
+</front>
+<body>
+<sec id="summary">
+  <title>Summary</title>
+  <p>Describe high-level functionality and purpose of the software, for
+  a diverse, <italic>non-specialist</italic> audience.</p>
+  <p>Similar to an abstract.</p>
+</sec>
+<sec id="statement-of-need">
+  <title>Statement of need</title>
+  <p>Clearly illustrates the research purpose of the software and places
+  it in the context of related work.</p>
+  <list list-type="bullet">
+    <list-item>
+      <p>flooding, both in the sense of urban flash floods and
+      large-area flooding is becoming increasingly common due to climate
+      change.</p>
+    </list-item>
+    <list-item>
+      <p>Planning in a way that mitigates against flooding requires
+      holistic thinking, as it cannot be done efficiently at the site
+      level. Easy to use tools that can do analysis on a wide
+      geographical scale is important to facilitate collaboration
+      between stakeholders.</p>
+    </list-item>
+    <list-item>
+      <p>open source alternative</p>
+    </list-item>
+    <list-item>
+      <p>topography-based modeling is typically static, and doesn’t take
+      infiltration or temporal developments into account. On the other
+      hand, PDE-based modeling is very computationally heavy. We here
+      propose a solution that is based on topography (and remains
+      computaionally lightweight), while having a certain ability to
+      model temporal developments.</p>
+    </list-item>
+    <list-item>
+      <p>A model of infiltration is important when analysing/designing
+      countermeasures</p>
+    </list-item>
+  </list>
+</sec>
+<sec id="functionality">
+  <title>Functionality</title>
+  <list list-type="bullet">
+    <list-item>
+      <p>Static analysis including delineating hierarchies of traps
+      (lakes) and intermittent rivers, identify watersheds, estimate
+      flow intensities</p>
+    </list-item>
+    <list-item>
+      <p>Terrain characteristics and infrastructure (buildings, sinks,
+      rivers/waterbodies)</p>
+    </list-item>
+    <list-item>
+      <p>Infiltration</p>
+    </list-item>
+    <list-item>
+      <p>Time-series (infiltration, weather evolution)</p>
+    </list-item>
+  </list>
+  <p>All input data is based on raster grids (topography, stencils,
+  weather)</p>
+</sec>
+<sec id="principle-of-topography-based-analysis">
+  <title>Principle of topography-based analysis</title>
+  <sec id="spill-regions-and-flow-graph">
+    <title>Spill regions and flow graph</title>
+    <p>While the input data is based on raster grids, these are
+    converted internally to directed graphs, which are the basis for
+    analysis.</p>
+    <p>Grid cells become nodes, and directed edges are identified using
+    the 4-point or 8-point stencil (reference).</p>
+    <fig>
+      <caption><p>Upnode<styled-content id="figU003Aupnode"></styled-content></p></caption>
+      <graphic mimetype="image" mime-subtype="png" xlink:href="spill_graph_inlet.png" />
+    </fig>
+    <p>Properties that can be deduced from graph analysis: - connected
+    components represent watersheds - the root of each tree represents
+    either the bottom of a trap, or the domain boundary - flow paths are
+    traced by following the graph - flow intensities at a given node can
+    be computed by integrating upstream nodes, multiplied with
+    precipitation intensities above these node This is the upnode.</p>
+  </sec>
+  <sec id="topological-structure-of-lakes-and-rivers">
+    <title>Topological structure of lakes and rivers</title>
+    <fig>
+      <caption><p>Trap
+      structure<styled-content id="figU003Atrap_structure"></styled-content></p></caption>
+      <graphic mimetype="image" mime-subtype="png" xlink:href="trap_structure.png" />
+    </fig>
+    <p>This is a trap structure.</p>
+    <fig>
+      <caption><p>Matrix<styled-content id="figU003Asynthetic_matrix"></styled-content></p></caption>
+      <graphic mimetype="image" mime-subtype="png" xlink:href="synthetic_matrix.png" />
+    </fig>
+  </sec>
+</sec>
+<sec id="example">
+  <title>Example</title>
+  <fig>
+    <caption><p>Vulkan area, central
+    Oslo.<styled-content id="figU003Avulkan_model"></styled-content></p></caption>
+    <graphic mimetype="image" mime-subtype="png" xlink:href="vulkan_model_and_stencils.png" />
+  </fig>
+  <p>This can be referenced using
+  <xref alt="[fig:vulkan_model]" rid="figU003Avulkan_model">[fig:vulkan_model]</xref>.</p>
+  <fig>
+    <caption><p>Vulkan analysis
+    <styled-content id="figU003Avulkan_analysis"></styled-content></p></caption>
+    <graphic mimetype="image" mime-subtype="png" xlink:href="vulkan_analysis.png" />
+  </fig>
+</sec>
+<sec id="acknowledgments">
+  <title>Acknowledgments</title>
+  <list list-type="bullet">
+    <list-item>
+      <p>Kartverket Pearson et al.
+      (<xref alt="2017" rid="ref-PearsonU003A2017" ref-type="bibr">2017</xref>)
+      test</p>
+    </list-item>
+  </list>
+  <p>Mention (if applicable) a representative set of past or ongoing
+  research projects using the software and recent scholarly publications
+  enabled by it. - SWIM/SWAMP - SurbArea</p>
+  <list list-type="bullet">
+    <list-item>
+      <p>Bok om hydrological modeling</p>
+    </list-item>
+    <list-item>
+      <p>Some paper explaining the 4 and 8 stencils</p>
+    </list-item>
+    <list-item>
+      <p>The NVE hydrological tool</p>
+    </list-item>
+    <list-item>
+      <p>SWMM</p>
+    </list-item>
+    <list-item>
+      <p>MikeSHE</p>
+    </list-item>
+    <list-item>
+      <p>Scalgo</p>
+    </list-item>
+  </list>
+  <p>List of key references</p>
+</sec>
+</body>
+<back>
+<ref-list>
+  <title></title>
+  <ref id="ref-PearsonU003A2017">
+    <element-citation publication-type="article-journal">
+      <person-group person-group-type="author">
+        <name><surname>Pearson</surname><given-names>S.</given-names></name>
+        <name><surname>Price-Whelan</surname><given-names>A. M.</given-names></name>
+        <name><surname>Johnston</surname><given-names>K. V.</given-names></name>
+      </person-group>
+      <article-title>Gaps in Globular Cluster Streams: Pal 5 and the Galactic Bar</article-title>
+      <source>ArXiv e-prints</source>
+      <year iso-8601-date="2017-03">2017</year><month>03</month>
+      <uri>http://adsabs.harvard.edu/abs/2017arXiv170304627P</uri>
+    </element-citation>
+  </ref>
+</ref-list>
+</back>
+</article>
