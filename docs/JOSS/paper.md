@@ -177,7 +177,7 @@ been filled is shown in \autoref{fig:vulkan_analysis}. Here, all traps and the
 intermittent streams connecting them are shown on the left plot.  The right plot
 shows a cutout where the logarithm of flow intensity has been visualized.
 
-![Vulcan area end state in a modeled precipitation scenario. \label{fig:vulkan_analysis}](vulkan_analysis.png){width=100%}
+![Vulkan area end state in a modeled precipitation scenario. \label{fig:vulkan_analysis}](vulkan_analysis.png){width=100%}
 
 For additional and more in-depth examples, the reader is encouraged to have a
 look at the [online documentation](https://sintefmath.github.io/SurfaceWaterIntegratedModeling.jl/dev/).
