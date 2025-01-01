@@ -146,7 +146,7 @@ respective watersheds.  The spill points can be seen as small black dots on the
 rightmost figure.  The lower row illustrates the process of traps filling up,
 coalescing and spilling over.\label{fig:synthetic_matrix}](synthetic_matrix.png){width=100%}
 
-## Infiltration and time series
+## Infiltration and temporal evolution
 
 The routing of water across the terrain at any given time depends on the current
 state of each trap (whether it is still filling up or spilling over), current
