@@ -54,3 +54,10 @@ to explain and demonstrate some key concepts.  The [Handling flat areas](@ref)
 example is a small example to show how large, flat water bodies can be
 identified and kept separate from the analysis.
 
+## Installation
+The package is registered in the Julia package registry, and can be intalled
+using:
+```
+julia> using Pkg
+(@1.11) pkg> add SurfaceWaterIntegratedModeling
+```
