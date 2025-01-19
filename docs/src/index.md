@@ -55,7 +55,7 @@ example is a small example to show how large, flat water bodies can be
 identified and kept separate from the analysis.
 
 ## Installation
-The package is registered in the Julia package registry, and can be intalled
+The package is registered in the Julia package registry, and can be installed
 using:
 ```
 julia> using Pkg
