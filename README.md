@@ -62,6 +62,14 @@ examples:
   example is a small example to show how large, flat water bodies can be
   identified and kept separate from the analysis.
 
+## Installation
+The package is registered in the Julia package registry, and can be installed
+using:
+```
+julia> using Pkg
+(@1.11) pkg> add SurfaceWaterIntegratedModeling
+```
+
 ## Note on running the examples
 The scripts found in the `example` directory have their own `Project.toml`
 file. This environment should be activated before trying to run the
