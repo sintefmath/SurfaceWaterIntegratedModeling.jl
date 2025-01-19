@@ -4,7 +4,6 @@ authors = ["Odd Andersen <odd.andersen@sintef.no>"]
 version = "1.0.1"
 
 [deps]
-ArchGDAL = "c9ce4bd3-c3d5-55b8-8973-c0e20141b8c3"
 ColorSchemes = "35d6a980-a343-548e-a6ea-1d62b119f2f4"
 Colors = "5ae59095-9a9b-59fe-a467-6f913c188581"
 DelimitedFiles = "8bb1440f-4735-579b-a4ab-409b98df4dab"
@@ -22,7 +21,6 @@ Roots = "f2b01f46-fcfa-551c-844a-d8ac1e96c665"
 SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
 
 [compat]
-ArchGDAL = "0.10.2"
 ColorSchemes = "3.24"
 Colors = "0.12.10"
 DifferentialEquations = "7.13"
