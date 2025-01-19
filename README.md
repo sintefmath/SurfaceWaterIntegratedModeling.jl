@@ -65,7 +65,7 @@ examples:
 ## Note on running the examples
 The scripts found in the `example` directory have their own `Project.toml`
 file. This environment should be activated before trying to run the
-examples. Here is a step-by-step guide to how you can make the exampls run:
+examples. Here is a step-by-step guide to how you can make the examples run:
 1) In your terminal, go to the `example` directory and start up Julia.
 2) Go to the package mode by typing `]` and activate the current directory by
   running `activate .`
