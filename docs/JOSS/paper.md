@@ -32,14 +32,12 @@ mitigation, and environmental planning.
 
 The algorithms are based on the assumption of infinitesimal flow and the
 identification of _spill points_.  Spill-point analyses are highly
-computationally efficient compared to tools based on numerical
-simulation. Spill-point analyses are highly computationally efficient compared
-to tools based on numerical simulation, making it easy to work interactively and
-test out various scenarios and measures. SWIM offers unique functionality, such
-as simplified infiltration models for both permeable and impermeable surfaces,
-as well as the calculation of time series that model how water accumulates or
-drains over time without resorting to computationally intensive numerical
-time-stepping approaches.
+computationally efficient compared to tools based on numerical simulation,
+making it easy to work interactively and test out various scenarios and
+measures. SWIM offers unique functionality, such as simplified infiltration
+models for both permeable and impermeable surfaces, as well as the calculation
+of time series that model how water accumulates or drains over time without
+resorting to computationally intensive numerical time-stepping approaches.
 
 # Statement of need
 
@@ -51,9 +49,9 @@ as is the need for adequate digital tools.
 
 Limitation on and lack of data often makes modeling and prediction of stormwater
 flow related to intensive rainfall challenging [@Skaugen:2020]. Mathematical
-approaches to evaluate uncertainties [@Beven:2003], [@Zhang:2019] typically rely
+approaches to evaluate uncertainties [@Beven:2003; @Zhang:2019] typically rely
 on the ability to run large numbers of simulations and scenarios.  However, use
-of complex hydrological simulators [@Langevin:2017], [@MIKESHE] are
+of complex hydrological simulators [@Langevin:2017; @MIKESHE] are
 computationally very expensive and may render the analysis intractable for many
 applications and potential users.
 
@@ -61,7 +59,7 @@ In urban areas with extensive impervious surfaces, topography is typically the
 primary driver of stormwater flow patterns and local accumulation of surface
 water.  GIS-based models operate on a simplified premise where surface flow is
 solely determined by topography, and can provide an attractive modeling
-alternative [@Skaugen:2014], [@ARCGIS], [@SCALGO].  Such models are generally
+alternative [@Skaugen:2014; @ARCGIS; @SCALGO].  Such models are generally
 easy to set up and run, and require considerably fewer computational resources
 than complex hydrological simulators do.  However, drawbacks include:
 
@@ -157,7 +155,7 @@ weather scenario, specified infiltration rates and an initial status (typically
 empty) for each trap, it is possible to construct a sequence of events that
 identifies the moment in time when each trap fills up, and how this influences
 the subsequent routing of water. This allows the user to determine the surface
-water flow and and extact water content of each trap at any given moment, how
+water flow and and extract water content of each trap at any given moment, how
 long it takes for each trap to fill up, where water currently is accumulating,
 and more.
 
