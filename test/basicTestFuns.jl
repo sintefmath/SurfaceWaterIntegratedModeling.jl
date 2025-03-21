@@ -237,7 +237,7 @@ function test_sequencing(grid, use_infiltration, seqlength, maxtime; mask=nothin
     seq = fill_sequence(tstruct, weather_events, infiltration=infiltration, verbose=false)
 
     length(seq) == seqlength || return false
-    seq[end].timestamp ≈ maxtime || return false
+    ≈(seq[end].timestamp, maxtime, atol=1e-6) || return false
 
     return true
 end

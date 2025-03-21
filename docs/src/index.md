@@ -18,7 +18,7 @@ to model flooding in urban areas. Spill-point analyses are highly
 computationally efficient compared to tools based on numerical simulation. This
 makes it easy to work interactively and test out various scenarios and
 measures. SWIM offers some unique functionality, such as simplified infiltration
-models (both permeable and impermeable surfaecs) and the calculation of time
+models (both permeable and impermeable surfaces) and the calculation of time
 series that models how water accumulates or drains over time, without having to
 resort to computationally intensive numerical time-stepping approaches.
 
@@ -61,3 +61,7 @@ using:
 julia> using Pkg
 (@1.11) pkg> add SurfaceWaterIntegratedModeling
 ```
+To run the tests, you should check out the package and navigate to its
+directory, enter package manager mode by using `]`, activate the environment
+using `activate .`, and then run the tests by typing `test` (still in package
+manager mode).
