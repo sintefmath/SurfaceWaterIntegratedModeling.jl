@@ -61,3 +61,7 @@ using:
 julia> using Pkg
 (@1.11) pkg> add SurfaceWaterIntegratedModeling
 ```
+To run the tests, you should check out the package and navigate to its
+directory, enter package manager mode by using `]`, activate the environment
+using `activate .`, and then run the tests by typing `test` (still in package
+manager mode).

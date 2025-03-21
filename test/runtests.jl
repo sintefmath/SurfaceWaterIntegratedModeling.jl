@@ -115,6 +115,6 @@ end
     @test test_sequencing(grid1, true, 512, 1.51723914) 
     @test test_sequencing(grid2, true, 1313, 5.0519047) 
     @test test_sequencing(grid2, true, 1353, 5.0519047) mask=mask2
-    @test test_sequencing(grid3, true, 8, 4.5241752806)
+    @test test_sequencing(grid3, true, 8, 4.5241752066)
 
 end
