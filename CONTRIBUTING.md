@@ -7,7 +7,7 @@ Thank you for considering contributing to this project! Here are some guidelines
 1. Fork the repository on GitHub.
 2. Clone your fork to your local machine:
    ```sh
-   git clone git@github.com:your-username/SurfaceWaterIntegratedModeling.jl.git
+   git clone git@github.com:sintefmath/SurfaceWaterIntegratedModeling.jl.git
 3. Navigate to the project directory:
    cd SurfaceWaterIntegratedModeling.jl
 4. Install the required dependencies:
