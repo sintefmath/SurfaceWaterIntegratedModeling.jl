@@ -82,7 +82,7 @@ to ensure it is installed. On the other hand, if you rather want to use the
 currently checked out code, run `dev ..` (while still in package mode).
 4) Exit package mode.  Now you should be able to run the examples. 
 
-Note: It is recommended that you run the exmaples block-by-block in an IDE,
+Note: It is recommended that you run the examples block-by-block in an IDE,
   rather than having them run through in one go by `include`ing them, in order
   to properly see all generated figures before they are updated/changed.
 

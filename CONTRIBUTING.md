@@ -14,6 +14,12 @@ Thank you for considering contributing to this project! Here are some guidelines
    using Pkg
    Pkg.instantiate()
 
+## Reporting problems
+   Please use the [issue tracker](https://github.com/sintefmath/SurfaceWaterIntegratedModeling.jl/issues)
+   to report problems or other issues.  When reporting, please be as specific as
+   possible about the issue at hand, so that it can be identified and
+   reproduced.  This may also include version number, specific git commit, etc.
+
 ## Making Changes
 
 1. Create a new branch for your feature or bugfix:
@@ -35,3 +41,4 @@ Thank you for considering contributing to this project! Here are some guidelines
 2. Provide a clear description of your changes and any relevant information.
 
 Thank you for your contributions!
+
