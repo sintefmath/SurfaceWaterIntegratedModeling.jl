@@ -1,7 +1,7 @@
 import Makie
 import DelimitedFiles
 import Base: size, min, max
-using GeometryBasics: Point3f, Vec2f, decompose, QuadFace, Tesselation, Rect, Mesh
+using GeometryBasics: Point3f, Vec2f, decompose, QuadFace, Tessellation, Rect, Mesh
 using Colors, ColorSchemes
 
 export loadgrid, savegrid, plotgrid, drape_surface, set_camerapos
