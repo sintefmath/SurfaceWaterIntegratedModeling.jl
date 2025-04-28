@@ -100,7 +100,7 @@ The flow graph describes how water flows over the terrain from one node (grid
 cell) to the next.  To create this graph from a digital elevation model (DEM),
 SWIM uses a deterministic eight-node (D8) single-flow direction (SFD) algorithm
 [@Wilson:2008] which generates a tree-structured, generally disconnected flow
-graph \autoref{fig:upnode}. Using the D8 algorithm, flow from a given node is
+graph shown in \autoref{fig:upnode}. Using the D8 algorithm, flow from a given node is
 always directed towards its steepest downhill neighbor, if any.
 
 ![Spill graph generated from a small terrain grid.  Inlet: selecting the
