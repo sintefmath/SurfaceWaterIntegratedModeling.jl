@@ -74,7 +74,7 @@ extension and generalization of the methodology.
 
 # Functionality
 
-SWIM is implemented in Julia, with computational performance as a key
+SWIM is implemented in Julia [@julia], with computational performance as a key
 goal. Input data consists solely of raster data (2D matrices), for
 topography, terrain features, infrastructure and weather data. Functionality
 includes:
