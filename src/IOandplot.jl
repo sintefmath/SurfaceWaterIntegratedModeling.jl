@@ -1,7 +1,7 @@
 import Makie
 import DelimitedFiles
 import Base: size, min, max
-using GeometryBasics: Point3f, Vec2f, decompose, QuadFace, Tessellation, Rect, Mesh
+using GeometryBasics: Point3f, Vec2f, decompose, QuadFace, Tesselation, Rect, Mesh
 using Colors, ColorSchemes
 
 export loadgrid, savegrid, plotgrid, drape_surface, set_camerapos
@@ -108,7 +108,7 @@ function plotgrid(grid::AbstractArray{<:Real, 2};
     # define parameterization
     uv = map(points) do p
         tup = ((p[1], p[2])) ./ size(grid);
-        return Vec2f0(tup);
+        return Vec2f(tup);
     end;
 
     # define normals
