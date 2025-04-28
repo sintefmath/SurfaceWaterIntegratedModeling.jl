@@ -89,6 +89,10 @@ Note: It is recommended that you run the examples block-by-block in an IDE,
 For inquiries, you can get in touch with the contact person listed at
 https://www.sintef.no/en/software/swim/.
 
+## Contributing
+Please refer to `CONTRIBUTING.md` for instructions on how to report problems or
+suggest changes.
+
 ## License information
 
 Copyright (c) 2024 SINTEF Digital
