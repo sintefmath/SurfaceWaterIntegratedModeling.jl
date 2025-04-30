@@ -168,7 +168,7 @@ stencils which serves as additional input to the analysis, all provided as
 raster grids with the same resolution.
 
 ![Vulkan area, central Oslo.  The four stencils on the right represent
-infrastructure, water bodies (rive), permeable surfaces and point sinks. \label{fig:vulkan_model}](vulkan_model_and_stencils.png){width=100%}
+infrastructure, water bodies (rivers), permeable surfaces and point sinks. \label{fig:vulkan_model}](vulkan_model_and_stencils.png){width=100%}
 
 The end state of a scenario with constant precipitation until all traps have
 been filled is shown in \autoref{fig:vulkan_analysis}. Here, all traps and the
