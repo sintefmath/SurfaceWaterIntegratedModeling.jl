@@ -1,0 +1,29 @@
+cff-version: "1.2.0"
+authors:
+- family-names: Andersen
+  given-names: Odd A.
+  orcid: "https://orcid.org/0000-0002-2245-9512"
+doi: 10.5281/zenodo.15306692
+message: If you use this software, please cite our article in the
+  Journal of Open Source Software.
+preferred-citation:
+  authors:
+  - family-names: Andersen
+    given-names: Odd A.
+    orcid: "https://orcid.org/0000-0002-2245-9512"
+  date-published: 2025-05-01
+  doi: 10.21105/joss.07785
+  issn: 2475-9066
+  issue: 109
+  journal: Journal of Open Source Software
+  publisher:
+    name: Open Journals
+  start: 7785
+  title: Topography-based surface water modeling in Julia, with support
+    for infiltration and temporal developments
+  type: article
+  url: "https://joss.theoj.org/papers/10.21105/joss.07785"
+  volume: 10
+title: Topography-based surface water modeling in Julia, with support
+  for infiltration and temporal developments
+  

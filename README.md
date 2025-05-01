@@ -1,5 +1,6 @@
 [![Dev](https://img.shields.io/badge/docs-dev-blue.svg)](https://sintefmath.github.io/SurfaceWaterIntegratedModeling.jl/dev/)
 [![Build Status](https://github.com/sintefmath/Jutul.jl/actions/workflows/CI.yml/badge.svg?branch=main)](https://github.com/sintefmath/SurfaceWaterIntegratedModeling.jl/actions/workflows/CI.yml?query=branch%3Amain)
+[![DOI](https://joss.theoj.org/papers/10.21105/joss.07785/status.svg)](https://doi.org/10.21105/joss.07785)
 
 # SWIM - Surface Water Integrated Modeling
 
