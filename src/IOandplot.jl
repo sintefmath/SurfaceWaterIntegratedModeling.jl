@@ -1,7 +1,7 @@
 import Makie
 import DelimitedFiles
 import Base: size, min, max
-using GeometryBasics: Point3f0, Vec2f0, decompose, QuadFace, Tesselation, Rect, Mesh
+using GeometryBasics: Point3f, Vec2f, decompose, QuadFace, Tesselation, Rect, Mesh
 using Colors, ColorSchemes
 
 export loadgrid, savegrid, plotgrid, drape_surface, set_camerapos
@@ -100,7 +100,7 @@ function plotgrid(grid::AbstractArray{<:Real, 2};
     res = size(z);
     x = LinRange(0, size(grid, 1), res[1]);
     y = LinRange(0, size(grid, 2), res[2]);
-    points = [Point3f0(x[i], y[j], heightfac * z[i,j]) for i in 1:res[1], j in 1:res[2]];
+    points = [Point3f(x[i], y[j], heightfac * z[i,j]) for i in 1:res[1], j in 1:res[2]];
 
     # define faces
     faces = decompose(QuadFace{Makie.GLIndex}, Tesselation(Rect(0, 0, 1, 1), res));
@@ -108,7 +108,7 @@ function plotgrid(grid::AbstractArray{<:Real, 2};
     # define parameterization
     uv = map(points) do p
         tup = ((p[1], p[2])) ./ size(grid);
-        return Vec2f0(tup);
+        return Vec2f(tup);
     end;
 
     # define normals
@@ -185,7 +185,7 @@ function _computenormals(dx, dy, z)
     ny = (djz[:, 1:end-1] + djz[:, 2:end]) / (2dy);
     
     # compute normals and normalize them
-    normals = Makie.normalize.([Point3f0(nx[i, j], ny[i,j], 1) for i in 1:size(z, 1), j in 1:size(z,2)]);
+    normals = Makie.normalize.([Point3f(nx[i, j], ny[i,j], 1) for i in 1:size(z, 1), j in 1:size(z,2)]);
     return normals;
 end
 
@@ -216,7 +216,7 @@ CairoMakie.
 """
 function set_camerapos(scene, cpos, ctarget, czoom)
     cam = Makie.cameracontrols(scene)
-    upvec = Makie.Vec3f0(0.0, 0.0, 1.0)
+    upvec = Makie.Vec3f(0.0, 0.0, 1.0)
     # if _using_glmakie()
     #     cam.zoom_mult[] = czoom
     # elseif _using_cairo()

@@ -1,5 +1,6 @@
 [![Dev](https://img.shields.io/badge/docs-dev-blue.svg)](https://sintefmath.github.io/SurfaceWaterIntegratedModeling.jl/dev/)
 [![Build Status](https://github.com/sintefmath/Jutul.jl/actions/workflows/CI.yml/badge.svg?branch=main)](https://github.com/sintefmath/SurfaceWaterIntegratedModeling.jl/actions/workflows/CI.yml?query=branch%3Amain)
+[![DOI](https://joss.theoj.org/papers/10.21105/joss.07785/status.svg)](https://doi.org/10.21105/joss.07785)
 
 # SWIM - Surface Water Integrated Modeling
 
@@ -82,12 +83,16 @@ to ensure it is installed. On the other hand, if you rather want to use the
 currently checked out code, run `dev ..` (while still in package mode).
 4) Exit package mode.  Now you should be able to run the examples. 
 
-Note: It is recommended that you run the exmaples block-by-block in an IDE,
+Note: It is recommended that you run the examples block-by-block in an IDE,
   rather than having them run through in one go by `include`ing them, in order
   to properly see all generated figures before they are updated/changed.
 
 For inquiries, you can get in touch with the contact person listed at
 https://www.sintef.no/en/software/swim/.
+
+## Contributing
+Please refer to `CONTRIBUTING.md` for instructions on how to report problems or
+suggest changes.
 
 ## License information
 
