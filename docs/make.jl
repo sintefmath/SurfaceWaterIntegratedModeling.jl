@@ -18,7 +18,7 @@ Literate.markdown("examples/synthetic.jl", "docs/src/"; execute=false, preproces
 # Build documentation
 makedocs(
     modules = [SurfaceWaterIntegratedModeling], 
-    sitename = "SWIM",
+    sitename = "Surface Water Integrated Modeling",
     format = Documenter.HTML(
         prettyurls = get(ENV, "CI", nothing) == "true"
     ),
