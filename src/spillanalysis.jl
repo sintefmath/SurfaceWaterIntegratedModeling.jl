@@ -25,7 +25,7 @@ documentation for details.
 - `sinks::Union{Vector{Tuple{Int, Int}}, Matrix{Bool}, Nothing}`:
       vector containing (i, j) grid coordinates of any point sinks in the grid, if any.
       Can also be a Matrix{Bool} of same size as `grid`, indicating the sink locations.
-- `lengths::Union{Tuple{<:Real}, Nothing}`: 
+- `lengths::Union{Tuple{<:Real, <:Real}, Nothing}`: 
       tuple expressing the length and width of the grid (used to compute aspect ratios)
 - `domain::Union{Domain2D, Nothing}`: 
       restrict computation to the specified domain of the grid.  @@ Note that this is not
@@ -42,7 +42,7 @@ function spillanalysis(grid::Matrix{<:Real};
                   usediags::Bool=true,
                   building_mask::Union{Matrix{<:Bool}, BitMatrix, Nothing}=nothing,
                   sinks::Union{Vector{Tuple{Int, Int}}, Matrix{Bool}, Nothing}=nothing,
-                  lengths::Union{Tuple{<:Real}, Nothing}=nothing,
+                  lengths::Union{Tuple{<:Real, <:Real}, Nothing}=nothing,
                   domain::Union{Domain2D, Nothing}=nothing,
                   merge_outregions::Bool=false, 
                   verbose::Bool=false)
