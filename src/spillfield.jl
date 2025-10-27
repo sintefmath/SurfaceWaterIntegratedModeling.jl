@@ -44,7 +44,7 @@ returned as a second argument.
       (see list above).
 - `sinks::Union{Vector{Tuple{Int, Int}}, Nothing}`: 
       vector containing (i, j) grid coordinates of any point sinks in the grid, if any
-- `lengths::Union{Tuple{<:Real}, Nothing}`: 
+- `lengths::Union{Tuple{<:Real, <:Real}, Nothing}`: 
       tuple expressing the length and width of the grid (used to compute aspect ratios)
 - `domain::Union{Domain2D, Nothing}`: restrict computation to the specified domain
                                       of the grid
@@ -59,7 +59,7 @@ function spillfield(grid::Matrix{<:Real};
                     usediags::Bool=true,
                     building_mask::Union{Matrix{<:Bool}, BitMatrix, Nothing}=nothing,
                     sinks::Union{Vector{Tuple{Int, Int}}, Nothing}=nothing,
-                    lengths::Union{Tuple{<:Real}, Nothing}=nothing,
+                    lengths::Union{Tuple{<:Real, <:Real}, Nothing}=nothing,
                     domain::Union{Domain2D, Nothing}=nothing,
                     tiling::Union{Tuple{Int, Int}, Nothing}=nothing)
 
@@ -125,7 +125,7 @@ the topography grid has presumably changed).
                        and `slope`
 - `usediags::Bool=true`: if true, also consider slopes along diagonals
 
-- `lengths::Union{Tuple{<:Real}, Nothing}`: 
+- `lengths::Union{Tuple{<:Real, <:Real}, Nothing}`: 
       tuple expressing the length and width of the grid (used to compute aspect ratios)
 - `building_mask::Union{Matrix{Bool}, Nothing}`: 
       a grid of logicals, specifying which cells are masked by buildings (true), 
@@ -264,7 +264,7 @@ function vconcat_spillfields(dir1::Matrix{Int8}, # upper grid spillfield info
                              slope2::Matrix{<:Real},
                              grid2::Matrix{<:Real}; # lower grid spillfield info
                              usediags::Bool=true,
-                             lengths::Union{Tuple{<:Real}, Nothing}=nothing)
+                             lengths::Union{Tuple{<:Real, <:Real}, Nothing}=nothing)
                                  
     # Check that grids are of compatible sizes
     @assert(size(dir1) == size(slope1) == size(grid1));
@@ -336,7 +336,7 @@ function hconcat_spillfields(dir1::Matrix{Int8}, # upper grid spillfield info
                              slope2::Matrix{<:Real},
                              grid2::Matrix{<:Real}; # lower grid spillfield info
                              usediags::Bool=true,
-                             lengths::Union{Tuple{<:Real}, Nothing}=nothing)
+                             lengths::Union{Tuple{<:Real, <:Real}, Nothing}=nothing)
                                  
     # Check that grids are of compatible sizes
     @assert(size(dir1) == size(slope1) == size(grid1));
