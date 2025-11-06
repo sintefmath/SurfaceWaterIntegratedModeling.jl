@@ -116,7 +116,8 @@ function plotgrid(grid::AbstractArray{<:Real, 2};
 
     # create mesh
     #glmesh = Mesh(Makie.meta(vec(points); uv=Makie.Buffer(vec(uv)), normals), faces);
-    glmesh = Mesh(Makie.meta(vec(points); uv=vec(uv), normals), faces);
+    #glmesh = Mesh(Makie.meta(vec(points); uv=vec(uv), normals), faces);
+    glmesh = Mesh(vec(points), faces; uv=vec(uv), normal=normals);
 
     # GLMakie handles texture coordinates differently
     textransform = _get_tex_transform(texture)
