@@ -11,7 +11,7 @@ export spillfield, update_spillfield!, vconcat_spillfields, hconcat_spillfields
 # ----------------------------------------------------------------------------
 """
     spillfield(grid, usediags=true, lengths=nothing, domain=nothing, 
-               tiling=nothing, building_mask=nothing)
+               tiling=nothing, building_mask=nothing, barriers=nothing)
 
 Compute the spillfield of a raster terrain, represented by `grid`.  
 
@@ -42,7 +42,7 @@ returned as a second argument.
       a grid of logicals, specifying which cells are masked by buildings (true), 
       and thus inactive. These cells will be assigned a spill field value of -2
       (see list above).
-- `sinks::Union{Vector{Tuple{Int, Int}}, Nothing}`: 
+- `sinks::Vector{CartesianIndex{2}}`: 
       vector containing (i, j) grid coordinates of any point sinks in the grid, if any
 - `lengths::Union{Tuple{<:Real}, Nothing}`: 
       tuple expressing the length and width of the grid (used to compute aspect ratios)
@@ -58,7 +58,9 @@ See also [`update_spillfield!`](@ref).
 function spillfield(grid::Matrix{<:Real};
                     usediags::Bool=true,
                     building_mask::Union{Matrix{<:Bool}, BitMatrix, Nothing}=nothing,
-                    sinks::Union{Vector{Tuple{Int, Int}}, Nothing}=nothing,
+                    sinks::Vector{CartesianIndex{2}}=Vector{CartesianIndex{2}}(),
+                    blocked_edges::Dict{CartesianIndex{2}, Vector{CartesianIndex{2}}}=
+                        Dict{CartesianIndex{2}, Vector{CartesianIndex{2}}}(),
                     lengths::Union{Tuple{<:Real}, Nothing}=nothing,
                     domain::Union{Domain2D, Nothing}=nothing,
                     tiling::Union{Tuple{Int, Int}, Nothing}=nothing)
@@ -100,6 +102,9 @@ function spillfield(grid::Matrix{<:Real};
 
     # fill in any buildings
     _fill_in_buildings_and_sinks!(dir, slope, building_mask, sinks)
+
+    # impose barriers (only matters if `blocked_edges` is non-empty)
+    _impose_barriers!(dir, slope, grid, lengths, blocked_edges)
     
     return dir, slope
 end
@@ -141,6 +146,8 @@ function update_spillfield!(dir::Matrix{Int8}, slope::Array{<:Real}, # output
                             grid::Matrix{<:Real}, domain::Domain2D;
                             building_mask=nothing, sinks=nothing,
                             usediags::Bool=true, lengths=nothing)
+    # @@ TODO: needs to be updated after changes to spillfield interface
+    
     # expand domain by one gridcell in all direction, since the gridcell closest
     # to the modified area may also have changed spill direction (which depends
     # on the immediate neighbors)
@@ -175,8 +182,8 @@ function _fill_in_buildings_and_sinks!(dir, slope, building_mask, sinks)
     # fill in any sinks
     if sinks != nothing
         for pos in sinks
-            dir[pos...] = -3; # flag this cell as a sink
-            slope[pos...] = NaN
+            dir[pos] = -3; # flag this cell as a sink
+            slope[pos] = NaN
         end
     end
 end
@@ -196,7 +203,9 @@ function _spillfield!(dir::Matrix{Int8}, slope::Array{<:Real}, # output args
                      grid::Matrix{<:Real}; # input arg
                      usediags::Bool=true,
                      lengths=nothing,
-                     domain=nothing)
+                      domain=nothing)
+    # @@ TODO: Needs to be updated after changes to spillfield interface
+    
     if domain == nothing
        domain = Domain2D(1:size(grid,1), 1:size(grid, 2)); 
     end
@@ -265,7 +274,8 @@ function vconcat_spillfields(dir1::Matrix{Int8}, # upper grid spillfield info
                              grid2::Matrix{<:Real}; # lower grid spillfield info
                              usediags::Bool=true,
                              lengths::Union{Tuple{<:Real}, Nothing}=nothing)
-                                 
+
+    # @@ TODO: Needs to be updated after changes to spillfield interface                             
     # Check that grids are of compatible sizes
     @assert(size(dir1) == size(slope1) == size(grid1));
     @assert(size(dir2) == size(slope2) == size(grid2));
@@ -337,7 +347,9 @@ function hconcat_spillfields(dir1::Matrix{Int8}, # upper grid spillfield info
                              grid2::Matrix{<:Real}; # lower grid spillfield info
                              usediags::Bool=true,
                              lengths::Union{Tuple{<:Real}, Nothing}=nothing)
-                                 
+
+    # @@ TODO: Needs to be updated after changes to spillfield interface
+    
     # Check that grids are of compatible sizes
     @assert(size(dir1) == size(slope1) == size(grid1));
     @assert(size(dir2) == size(slope2) == size(grid2));
@@ -441,6 +453,7 @@ end
 # c = min(a, a-shift[k]) and d = max(b, b - shift[k]).
 function _diffgrid(grid, delta, shift, dom)
 
+
     domsize = size(dom);
     gsize = size(grid);
     deltainv = 1.0/delta;
@@ -530,3 +543,78 @@ function _setsamesize!(targetgrid, modelgrid)
     end
 end        
 
+# ----------------------------------------------------------------------------
+# Impose barriers in the spillfield by redirecting flow around them.
+function _impose_barriers!(dir, slope, grid, lengths, blocked_edges)
+
+    # translate the dict `blocked_edges` to a similar dict where the values are
+    # given in terms of direction indices (0 to 7), rather than CartesianIndex
+
+    direction_between_indices(aix::CartesianIndex{2}, bix::CartesianIndex{2}) =
+        (bix[1] - aix[1] == -1 && bix[2] - aix[2] == 0  ) ? 0 : # (i-1, j)
+        (bix[1] - aix[1] == 1  && bix[2] - aix[2] == 0  ) ? 1 : # (i+1, j)
+        (bix[1] - aix[1] == 0  && bix[2] - aix[2] == -1 ) ? 2 : # (i, j-1)
+        (bix[1] - aix[1] == 0  && bix[2] - aix[2] == 1  ) ? 3 : # (i, j+1)
+        (bix[1] - aix[1] == -1 && bix[2] - aix[2] == -1 ) ? 4 : # (i-1, j-1)
+        (bix[1] - aix[1] == 1  && bix[2] - aix[2] == 1  ) ? 5 : # (i+1, j+1)
+        (bix[1] - aix[1] == 1  && bix[2] - aix[2] == -1 ) ? 6 : # (i+1, j-1)
+        (bix[1] - aix[1] == -1 && bix[2] - aix[2] == 1  ) ? 7 : # (i-1, j+1)
+        error("Invalid neighboring indices: $aix and $bix")
+
+    for (k, v) in blocked_edges
+        dirset = Set(map(bix -> direction_between_indices(k, bix), v))
+        if dir[k] in dirset
+            _recompute_local_flow!(dir, slope, grid, lengths, k, dirset)
+        end
+    end 
+end
+
+# ----------------------------------------------------------------------------
+# Recompute the local flow direction at gridcell 'k', avoiding any directions
+# in the set 'blocked_dirs'.
+function _recompute_local_flow!(dir, slope, grid, lengths,
+                                cell_ix::CartesianIndex{2}, blocked_dirs::Set{Int})
+
+    dx, dy = (lengths == nothing) ? (1.0, 1.0) : lengths ./ size(grid)
+    dxy = sqrt(dx^2 + dy^2)
+        
+    xlen, ylen = size(dir)
+
+    # possible directions and their (i, j) offsets
+    directions = Dict(
+        0 => (-1, 0),
+        1 => (1, 0),
+        2 => (0, -1),
+        3 => (0, 1),
+        4 => (-1, -1),
+        5 => (1, 1),
+        6 => (1, -1),
+        7 => (-1, 1)
+    )
+
+    best_dir = -1
+    best_slope = Inf
+
+    # find the lowest local slope among the allowed directions
+    for (d, offset) in directions
+        if !(d in blocked_dirs)
+            neigh_ix = CartesianIndex(clamp(cell_ix[1] + offset[1], 1, xlen),
+                                      clamp(cell_ix[2] + offset[2], 1, ylen))
+
+            if dir[neigh_ix] == -2
+                continue  # neighbor is a building; skip
+            end
+            
+            delta = d > 3 ? dxy : (d > 1 ? dy : dx)
+            local_slope = (grid[cell_ix] - grid[neigh_ix]) / delta
+
+            if 0.0 <= local_slope < best_slope
+                best_slope = local_slope
+                best_dir = d
+            end
+        end
+    end
+
+    dir[cell_ix] = best_dir # if none found, will be -1 (trap)
+    slope[cell_ix] = best_slope # if none found, will be Inf
+end

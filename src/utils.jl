@@ -4,7 +4,7 @@ import Roots
 export flatten_grid!, identify_flat_areas, toplevel_traps,
     show_region_selection, all_subtraps_of, interpolate_timeseries,
     trap_states_at_timepoints, compute_spillfield_graph, all_upstream_regions,
-    upstream_area
+    upstream_area, polyline_grid_intersections, edgeset2dict, reconstruct_spillfield
 
 # ----------------------------------------------------------------------------
 """
@@ -521,7 +521,8 @@ function show_region_selection(tstruct::TrapStructure{<:Real};
     regions      = tstruct.regions
     grid         = tstruct.topography
     spillpoints  = tstruct.spillpoints
-    spillfield   = tstruct.spillfield
+    #spillfield   = tstruct.spillfield
+    flowgraph    = tstruct.flowgraph
     regmap       = tstruct.lowest_subtraps_for
    
     if selection == nothing
@@ -533,14 +534,16 @@ function show_region_selection(tstruct::TrapStructure{<:Real};
     
     # trace rivers
     if river_color != 0
-        CI = CartesianIndices(size(grid))
+        #CI = CartesianIndices(size(grid))
         for reg in selection
             if spillpoints[reg].downstream_region_cell > 0
-                rix = CI[spillpoints[reg].downstream_region_cell]; # river startpoint
+                #rix = CI[spillpoints[reg].downstream_region_cell]; # river startpoint
+                rix = spillpoints[reg].downstream_region_cell; # river startpoint, linear ix
                 finished = false
                 while !finished
                     result[rix] = river_color
-                    rix, finished = _downstream_cell(spillfield, rix)
+                    #rix, finished = _downstream_cell(spillfield, rix)
+                    rix, finished = _downstream_cell(flowgraph, rix)                    
                 end
             end
         end
@@ -586,7 +589,17 @@ function show_region_selection(tstruct::TrapStructure{<:Real};
 end
 
 # ----------------------------------------------------------------------------
-@inline function _downstream_cell(spillfield::Matrix{Int8}, cix::CartesianIndex)
+@inline function _downstream_cell(flowgraph::Graphs.SimpleDiGraph, lix::Int)
+    outneighs = Graphs.outneighbors(flowgraph, lix)
+    if isempty(outneighs)
+        return lix, true
+    else
+        return outneighs[1], false
+    end
+end
+
+# ----------------------------------------------------------------------------
+@inline function _downstream_cell(spillfield::Matrix{Int8}, cix::CartesianIndex{2})
 
     dir = spillfield[cix]
     if dir < 0
@@ -666,7 +679,8 @@ function upstream_area(tstruct::TrapStructure{<:Real},
         
         # @@ This computation is wasteful and should be restructured later, as
         # we are only interested in a single region.
-        sgraph = compute_spillfield_graph(tstruct.spillfield)
+        # sgraph = compute_spillfield_graph(tstruct.spillfield)
+        sgraph = tstruct.flowgraph
 
         # upstream cells in region
         ucells = findall(Graphs.dfs_parents(sgraph, point, dir=:in) .> 0) 
@@ -729,6 +743,58 @@ function all_upstream_regions(tstruct::TrapStructure{<:Real},
 end
 
 # ----------------------------------------------------------------------------
+function _compute_direction(ix1::CartesianIndex{2}, ix2::CartesianIndex{2}, undef_val)
+    dix = ix2 - ix1
+
+    dir = dix == CartesianIndex(-1, 0)  ? 0 :
+          dix == CartesianIndex(1, 0)   ? 1 :
+          dix == CartesianIndex(0, -1)  ? 2 :
+          dix == CartesianIndex(0, 1)   ? 3 :
+          dix == CartesianIndex(-1, -1) ? 4 :
+          dix == CartesianIndex(1, 1)   ? 5 :
+          dix == CartesianIndex(1, -1)  ? 6 :
+          dix == CartesianIndex(-1, 1)  ? 7 :
+          undef_val
+end
+# ----------------------------------------------------------------------------
+function reconstruct_spillfield(tstruct::TrapStructure{<:Real})
+    xmax, ymax = size(tstruct.topography)
+    undef_val = -4
+    spillfield = fill(Int8(undef_val), xmax, ymax)
+
+    # fill in regular flow directions (0..7) and trap cells (-1)
+    LI = LinearIndices(size(spillfield))
+    CI = CartesianIndices(size(spillfield))
+
+    for cix in CartesianIndices(size(spillfield))
+        outneigh = Graphs.outneighbors(tstruct.flowgraph, LI[cix])
+        if length(outneigh) == 0
+            spillfield[cix] = -1
+        else
+            @assert length(outneigh) == 1 # for now, only single downstream cell supported
+            spillfield[cix] = _compute_direction(cix, CI[outneigh[1]], undef_val)
+        end
+        
+    end
+        
+    # fill in sinks (-3)
+    for sink in tstruct.sinks
+        spillfield[sink] = -3
+    end
+
+    # fill in buildings or clipped-away areas (-2)
+    if tstruct.building_mask != nothing
+        for I in CartesianIndices(tstruct.building_mask)
+            if tstruct.building_mask[I]
+                spillfield[I] = -2
+            end
+        end
+    end
+
+    return spillfield
+end
+
+# ----------------------------------------------------------------------------
 """
     compute_spillfield_graph(spillfield::Matrix{Int8})
 
@@ -758,3 +824,269 @@ function compute_spillfield_graph(spillfield::Matrix{Int8})
     return g
 end
 
+# ----------------------------------------------------------------------------
+"""
+Take a polyline and subdivide lines into segments starting and ending precisely
+on grid nodes, thus creating an equivalent polyline with potentially more segments.
+No segments on the resulting polyline should run through grid nodes except at start
+and end points.
+"""
+function _subdivide_polyline(pl::Vector{Tuple{Int, Int}})
+    @assert length(pl) >= 2
+    result = [pl[1]]
+    for i in 1:length(pl)-1
+        Dx = pl[i+1][1] - pl[i][1]
+        Dy = pl[i+1][2] - pl[i][2]
+        subdiv = gcd(abs(Dx), abs(Dy))
+        Dx_step = Dx ÷ subdiv
+        Dy_step = Dy ÷ subdiv
+        for j in 1:subdiv
+            newpt = (pl[i][1] + j*Dx_step, pl[i][2] + j*Dy_step)
+            push!(result, newpt)
+        end
+    end
+    return result
+end
+
+# ----------------------------------------------------------------------------
+function polyline_grid_intersections(pl::Vector{Tuple{Int, Int}}; usediags=true)
+    @assert length(pl) >= 2
+    result = Set{Tuple{CartesianIndex{2}, CartesianIndex{2}}}()
+    subpl = _subdivide_polyline(pl)
+
+    # intesections excluding segment endpoints
+    for i in 1:length(subpl)-1
+        seg_edges = _grid_segment_interior_intersections(subpl[i], subpl[i+1], usediags)
+        union!(result, seg_edges)
+    end
+
+    # intersections at segment endpoints, excluding start of first and end of last
+    isects = Set{Tuple{CartesianIndex{2}, CartesianIndex{2}}}()
+    for i in 2:length(subpl)-1
+        isects = _intersections_at_node(subpl[i-1], subpl[i], subpl[i+1], isects, usediags)
+        union!(result, isects)
+    end
+    
+    return result
+end
+
+# ----------------------------------------------------------------------------
+function _intersections_at_node(prevpt, curpt, nextpt, prev_isects, usediags)
+    @assert prevpt != curpt
+    @assert nextpt != curpt
+    v1 = (prevpt[1] - curpt[1], prevpt[2] - curpt[2])
+    v2 = (nextpt[1] - curpt[1], nextpt[2] - curpt[2])
+
+    result = Set{Tuple{CartesianIndex{2}, CartesianIndex{2}}}()
+    
+    flags = fill(false, usediags ? 8 : 4)
+    ix_start = _dir2subquadrant(v1, usediags) # from 1 to 8 or 4
+    ix_end   = _dir2subquadrant(v2, usediags)
+    if ix_start == ix_end
+        # neighbor segments enter and exit the same subquadrant - no
+        # new intersections to process
+        return result
+    elseif ix_end < ix_start
+        ix_end += usediags ? 8 : 4
+    end
+
+    for ix = ix_start+1:ix_end
+        # process subquadrant ix
+        ix_mod = ((ix-1) % (usediags ? 8 : 4)) + 1
+        flags[ix_mod] = true
+    end
+
+    # Choose where to add edges.  If there are more 'false' than true, add
+    # intersection edges for the false ones, otherwise for the true ones.
+    # However, if the previous neighbor is cardinal, it should not be included
+    # among the intersection edges to add, and we must choose the other
+    # intersection edges consistent with how those for the neighbor were
+    # chosen. If next neighbor is cardinal, we should make sure not to introduce
+    # an intersection edge to it.
+
+    # check whether any neighbor is one step in a cardinal direction away from
+    # curpt
+    prev_is_cardinal = (abs(v1[1]) <= 1) && (abs(v1[2]) <= 1)
+    next_is_cardinal = (abs(v2[1]) <= 1) && (abs(v2[2]) <= 1)
+
+    if prev_is_cardinal
+        # will flip flags if necessary
+        _set_flags_consistent_with_prev_point!(flags, curpt, prevpt, prev_isects, usediags)
+    elseif sum(flags) > length(flags)/2
+        flags = .!flags
+    end
+    prev_is_cardinal && (flags[ix_start] = false)
+    next_is_cardinal && (flags[((ix_end-1) % (usediags ? 8 : 4)) + 1] = false)
+
+    result = Set{Tuple{CartesianIndex{2}, CartesianIndex{2}}}()
+    for ix = 1:length(flags)
+        if flags[ix]
+            offset = _subquad2offset(ix, usediags)
+            push!(result, (CartesianIndex(curpt), CartesianIndex(curpt) + offset))
+        end
+    end
+    return result
+end
+
+# ----------------------------------------------------------------------------
+function _set_flags_consistent_with_prev_point!(flags, curpt, prevpt, prev_isects, usediags)
+    @assert prev_isects != nothing
+    # find which edge was added for the previous point
+    prev_dir = (curpt[1] - prevpt[1], curpt[2] - prevpt[2])
+    prev_subquad = _dir2subquadrant(prev_dir, usediags)
+    p_offset = _subquad2offset(prev_subquad%(usediags ? 8 : 4) + 1, usediags)
+
+    pflag = (CartesianIndex(prevpt), CartesianIndex(prevpt) + p_offset) in prev_isects
+    
+    cur_subquad = (prev_subquad - 1 + (usediags ? 4 : 2)) % (usediags ? 8 : 4) + 1
+
+    if flags[(cur_subquad - 2 + (usediags ? 8 : 4)) % (usediags ? 8 : 4) + 1] != pflag
+        # flip flags to make them consistent
+        flags .= .!flags
+    end
+    
+end
+
+# ----------------------------------------------------------------------------
+function _subquad2offset(subquad::Int, usediags::Bool)
+    result = nothing
+    if usediags
+        result = 
+            (subquad == 1) ? CartesianIndex(1, 0) :
+            (subquad == 2) ? CartesianIndex(1, 1) :
+            (subquad == 3) ? CartesianIndex(0, 1) :
+            (subquad == 4) ? CartesianIndex(-1, 1) :
+            (subquad == 5) ? CartesianIndex(-1, 0) :
+            (subquad == 6) ? CartesianIndex(-1, -1) :
+            (subquad == 7) ? CartesianIndex(0, -1) :
+            (subquad == 8) ? CartesianIndex(1, -1) :
+            error("conceptually unreachable")
+    else
+        result = 
+            (subquad == 1) ? CartesianIndex(1, 0) :
+            (subquad == 2) ? CartesianIndex(0, 1) :
+            (subquad == 3) ? CartesianIndex(-1, 0) :
+            (subquad == 4) ? CartesianIndex(0, -1) :
+            error("conceptually unreachable")
+    end
+    return result
+end
+
+# ----------------------------------------------------------------------------
+function _dir2subquadrant(dir::Tuple{Int, Int}, usediags::Bool)
+    # return a number from 1 to 8 (or 4) indicating which subquadrant the direction
+    # vector is contained in
+    xflag = sign(dir[1]) # -1, 0, or 1
+    yflag = sign(dir[2]) # -1, 0, or 1
+    dflag = sign(abs(dir[2])-abs(dir[1])) # -1, 0, or 1
+
+    @assert abs(xflag) + abs(yflag) != 0 # zero vector not allowed
+    return (xflag > 0 && yflag >= 0) ?
+              # quadrant 1
+              (usediags ? (dflag == -1 ? 1 : 2) : 1 ) :
+           (xflag <= 0 && yflag > 0) ?
+              # quadrant 2
+              (usediags ? (dflag ==  1 ? 3 : 4) : 2) :
+           (xflag < 0 && yflag <= 0) ?        
+              # quadrant 3
+              (usediags ? (dflag == -1 ? 5 : 6) : 3) :
+           (xflag >= 0 && yflag < 0) ?
+              # quadrant 4
+              (usediags ? (dflag ==  1 ? 7 : 8) : 4) :
+              error("conceptually unreachable")
+end
+
+# ----------------------------------------------------------------------------
+function _grid_segment_interior_intersections(segment_start, segment_end, usediags)
+    
+    @assert eltype(segment_start) <: Integer
+    @assert eltype(segment_end) <: Integer
+    startpt = CartesianIndex(segment_start[1], segment_start[2])
+    endpt = CartesianIndex(segment_end[1], segment_end[2])
+    
+    # An edge is described by its tw o neighbor gridcells.
+    edges = Vector{Tuple{CartesianIndex{2}, CartesianIndex{2}}}()
+    
+    # vertical edges intersected, not counting start and end point
+    n = segment_end[1] - segment_start[1] 
+    irange = (1:abs(n)-1).*sign(n)
+    
+    for ix in irange
+        dydx = (segment_end[2] - segment_start[2]) / (segment_end[1] - segment_start[1])
+        ypos = dydx * ix
+        iy = floor(Int, ypos)
+        push!(edges, (startpt + CartesianIndex(ix, iy),
+                      startpt + CartesianIndex(ix, iy+1)))
+    end
+
+    # horizontal edges intersected, not counting start and endpoint
+    n = segment_end[2] - segment_start[2]
+    irange = (1:abs(n)-1).*sign(n)
+
+    for iy in irange
+        dxdy = (segment_end[1] - segment_start[1]) / (segment_end[2] - segment_start[2])
+        xpos = dxdy * iy
+        ix = floor(Int, xpos)
+        push!(edges, (startpt + CartesianIndex(ix, iy),
+                      startpt + CartesianIndex(ix+1, iy)))
+    end
+
+    # diagonal intersections (\)
+    dx = segment_end[1] - segment_start[1]
+    dy = segment_end[2] - segment_start[2]
+    n = dx + dy # an integer here
+    irange = (1:abs(n)-1).*sign(n)
+
+    for i in irange
+        t = i / n
+        xpos = t * dx
+        ypos = t * dy
+        ix, iy = floor(Int, xpos), floor(Int, ypos)
+        push!(edges, (startpt + CartesianIndex(ix+1, iy),
+                      startpt + CartesianIndex(ix, iy+1)))
+    end
+
+    # diagonal intersections (/)
+    n = dx - dy # an integer here
+    irange = (1:abs(n)-1).*sign(n)
+    for i in irange
+        t = i / n
+        xpos = t * dx
+        ypos = t * dy
+        ix, iy = floor(Int, xpos), floor(Int, ypos)
+        push!(edges, (startpt + CartesianIndex(ix, iy),
+                      startpt + CartesianIndex(ix+1, iy+1)))
+    end
+
+    return edges
+end
+
+# ----------------------------------------------------------------------------
+"""
+    edgeset2dict(edges)
+Convert a set of edges into a dictionary mapping each node to its neighbors.
+"""
+function edgeset2dict(edges::Set{Tuple{CartesianIndex{2}, CartesianIndex{2}}})
+    result = Dict{CartesianIndex{2}, Vector{CartesianIndex{2}}}()
+    for e in edges
+        # one way
+        if haskey(result, e[1])
+            push!(result[e[1]], e[2])
+        else
+            result[e[1]] = [e[2]]
+        end
+        # other way
+        if haskey(result, e[2])
+            push!(result[e[2]], e[1])
+        else
+            result[e[2]] = [e[1]]
+        end
+    end
+    # ensure no duplicity in any vector
+    for (k, v) in result
+        result[k] = unique(v)
+    end
+
+    # return the finished dictionary
+    return result
+end

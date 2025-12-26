@@ -41,32 +41,54 @@ See also [`TrapStructure`](@ref), [`fill_sequence`](@ref).
 function spillanalysis(grid::Matrix{<:Real};
                   usediags::Bool=true,
                   building_mask::Union{Matrix{<:Bool}, BitMatrix, Nothing}=nothing,
-                  sinks::Union{Vector{Tuple{Int, Int}}, Matrix{Bool}, Nothing}=nothing,
+                  sinks::Union{Vector{CartesianIndex{2}}, Matrix{Bool}}=Vector{CartesianIndex{2}}(),
                   lengths::Union{Tuple{<:Real}, Nothing}=nothing,
                   domain::Union{Domain2D, Nothing}=nothing,
                   merge_outregions::Bool=false, 
-                  verbose::Bool=false)
-    
-
+                  verbose::Bool=false,
+                  culverts::Vector{Tuple{CartesianIndex{2}, CartesianIndex{2}}}=
+                           Vector{Tuple{CartesianIndex{2}, CartesianIndex{2}}}(),
+                  barriers::Vector{Vector{CartesianIndex{2}}}=
+                           Vector{Vector{CartesianIndex{2}}}())
 
     verbose && println("Entering spillfield")
 
+    # ensure `sinks` is a vector of CartesianIndex
     if typeof(sinks) <: Matrix
-        sinks = [(i[1], i[2]) for i in findall(sinks)]
+        sinks = [CartesianIndex(i[1], i[2]) for i in findall(sinks)]
+    elseif sinks == nothing
+        sinks = Vector{CartesianIndex{2}}()
     end
 
+    # ensure culverts are directed from higher to lower elevation
+    directed_culverts = [ grid[x[1]] >= grid[x[2]] ? x : (x[2], x[1]) for x in culverts ]
+    
+    # determine any connections cut by barriers
+    cut_edges = Set{Tuple{CartesianIndex{2}, CartesianIndex{2}}}()
+    for b in barriers
+        @assert length(b) >= 2 "Each barrier must have at least two points"
+        e = polyline_grid_intersections(b.I, usediags=usediags)
+        union!(cut_edges, e)
+    end
+    cut_edge_dict = edgeset2dict(cut_edges)
+    
     field, slope = spillfield(grid, usediags=usediags,
                               lengths=lengths, domain=domain,
                               sinks=sinks,
+                              blocked_edges=cut_edge_dict,
                               building_mask=building_mask)
 
-    verbose && println("Entering spillregions")
-    regions = spillregions(field, usediags=usediags)
-
-    verbose && println("Entering spillpoints")
-    spoints, regbnd = spillpoints(grid, regions, usediags=usediags)
+    trap_bottoms = findall(field .== -1)
     
-    verbose && println("Entering sshierarchy")
+    verbose && println("Entering spillregions")
+    regions, flowgraph = spillregions(field, usediags=usediags,
+                                      cut_edges=cut_edge_dict, culverts=culverts)
+    
+    verbose && println("Entering spillpoints")
+    spoints, regbnd = spillpoints(grid, regions, usediags=usediags,
+                                  cut_edges=cut_edge_dict)
+    
+    verbose && println("entering sshierarchy")
     subtrapgraph, lowest_regions = sshierarchy!(grid, regions, spoints, regbnd)
     
     toptraps = []
@@ -95,9 +117,10 @@ function spillanalysis(grid::Matrix{<:Real};
             end
         end
     end
-    
+
     return TrapStructure{eltype(grid)}(copy(grid),
-                                       field,
+                                       flowgraph,
+                                       trap_bottoms,
                                        regions,
                                        spoints,
                                        trapvols,
@@ -107,9 +130,10 @@ function spillanalysis(grid::Matrix{<:Real};
                                        supertraps_of,
                                        subtrapgraph,
                                        building_mask,
-                                       sinks)
+                                       sinks,
+                                       cut_edge_dict)
 end
-    
+
 # ----------------------------------------------------------------------------
 function _compute_supertraps_of(lowest_regions)
     # produce a vector with one entry per lowest-level trap, giving the indices

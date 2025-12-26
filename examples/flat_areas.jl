@@ -108,10 +108,10 @@ set_camerapos(sc, view1...)
 sinks = [(119,193), (180, 193)]; # two drain locations
 for s in sinks
     ## add the sinks to the map that we used to represent sinks (and flat areas)
-    isflat[s...] = true;
+    isflat[s...] = true; 
 end
 
-## run the spill analysis again
+## Run the spill analysis again
 tstruct = spillanalysis(grid, sinks=isflat)
 
 # The result of this analysis no longer indicate a large lake in this region:
@@ -124,7 +124,48 @@ tex[isflat] .= cmap[:blue]
 
 drape_surface(sf, tex)
 set_camerapos(sc, view1...)
+
+# ## Inserting a culvert
 #
+# Instead of using a sink in the depression behind the railroad, we can connect it
+# to the other side by a culvert.  We specify the culvert as a connection between
+# two grid cells on either side of the railroad:
+for s in sinks
+    isflat[s...] = false; # remove the sink previously added
+end
+
+# Specify a culvert connecting the two sides of the railroad
+culvert = (CartesianIndex(119, 193), CartesianIndex(175, 193))
+
+# Run the spill analysis again, now with the culvert specified
+tstruct = spillanalysis(grid, sinks=isflat, culverts=[culvert])
+
+# In the result, the lake behind the railroad is now drained through the culvert:
+tex = show_region_selection(tstruct,
+                            region_color=4,
+                            river_color=2,
+                            trap_color=2);
+tex[tex.==0] .= cmap[:green]-1
+tex[isflat] .= cmap[:blue]
+
+tex[119, 193] = cmap[:red] # mark the culvert location in red
+tex[175, 193] = cmap[:red]
+tex[180, 193] = cmap[:red]
+
+drape_surface(sf, tex)
+set_camerapos(sc, view1...)
+# Since there is no sink in the the depression in front of the railroad, there is water
+# accumulation both in front of and behind the railroad now, with the same water level
+# on both sides due to the connection provided by the culvert. 
+#
+# If we examine the upstream area of the trap bottom of the front depression, we see
+# that this now includes the spill region behind the railroad as well:
+pt_ix = LinearIndices(size(grid))[CartesianIndex(180, 193)] # trap bottom in front of railroad
+upstream_cells = upstream_area(tstruct, pt_ix, local_only=false)
+tex[upstream_cells] .= cmap[:orange] # mark upstream area in orange
+
+drape_surface(sf, tex)
+set_camerapos(sc, view1...)
 # [^1]:
 #     The data used in this example was originally obtained from
 #     [Kartverket](https://kartverket.no/) (the Norwegian Mapping Authority) under the

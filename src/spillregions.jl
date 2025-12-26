@@ -26,31 +26,56 @@ exit the domain are assigned negative region numbers.
       tuple specifying number of 'tiles' to subdivide surface in for parallel 
       processing.  Default is (1,1), which means the whole surface is treated
       as a single tile (no parallel processing).
-
+- `cut_edges::Dict{CartesianIndex{2}, Vector{CartesianIndex{2}}}`:
+      dictionary specifying edges that should be cut (i.e., no flow allowed
+      across these edges).  Keys are CartesianIndices of grid cells, and values
+      are Vectors of CartesianIndices of neighboring grid cells to which flow
+      is blocked.  This dict should also have been used when generating the spillfield.
+- `culverts::Vector{Tuple{CartesianIndex{2}, CartesianIndex{2}}}`:
+      vector specifying culverts as pairs of CartesianIndices of grid cells
+      that are connected by the culvert.  The grid cells should be ordered so that
+      the first cell in the tuple is at higher elevation than the second cell.
 See also [`spillfield`](@ref), [`update_spillregions!`](@ref).
 """
 function spillregions(spillfield::Matrix{Int8};
                       usediags::Bool=true,
-                      tiling=nothing)
+                      tiling=nothing,
+                      cut_edges::Dict{CartesianIndex{2}, Vector{CartesianIndex{2}}}=
+                          Dict{CartesianIndex{2}, Vector{CartesianIndex{2}}}(),
+                      culverts::Vector{Tuple{CartesianIndex{2}, CartesianIndex{2}}}=
+                          Vector{Tuple{CartesianIndex{2}, CartesianIndex{2}}}())
     
     regions = similar(spillfield, Int64)
+    edges = Set{Tuple{Int, Int}}()
     domain = Domain2D(1:size(spillfield,1), 1:size(spillfield,2))
-
+    cut_edges_bidir = _prepare_cut_edges_bidir(cut_edges, size(spillfield))
+    
     if tiling == nothing
-        _process_domain!(regions, spillfield,
+        _process_domain!(regions, edges, spillfield,
                          domain=domain,
-                         usediags=usediags)
+                         usediags=usediags,
+                         cut_edges=cut_edges_bidir,
+                         culverts=culverts)
     else
+        @assert false "proper parallel implementation of spillregions not yet complete."
+        # @@ TODO What needs to be done is ensure that edges crossing tile boundaries
+        # are registered (which is not the case for the code below).  Moreover,
+        # when fixing boundary seams, we need to make sure that cut_edges are considered.
+        # Also, there's issues around sharing of `edges` across threads.
+        
         tiles, splits = tiledomain(domain, tiling[1], tiling[2])
         
         Threads.@threads for i = 1:length(tiles)
-            _process_domain!(regions, spillfield,
+            _process_domain!(regions, edges, spillfield,
                              domain=tiles[i],
-                             usediags=usediags)
+                             usediags=usediags,
+                             cut_edges=cut_edges_bidir,
+                             culverts=culverts)
         end
 
         xsplits = splits[1]
         ysplits = splits[2]
+        # @@ TODO: needs to process `edges` too
         _fix_boundary_seams!(regions, spillfield, usediags,
                              xsplits[2:end-1], ysplits[2:end-1])
     end
@@ -66,7 +91,14 @@ function spillregions(spillfield::Matrix{Int8};
     # the domain.
     _renumerate_regions!(regions, exitregions=enoderegs)
 
-    return regions
+    # construct spillfield graph
+
+    # remove self-loops and edges connecting nodes within the same region
+    edge_filt = filter(a->(a[1] != a[2]), edges)
+    
+    g = Graphs.SimpleDiGraph([Graphs.SimpleEdge{Int64}((e[1], e[2])) for e in edge_filt])
+    
+    return regions, g
     
 end
 
@@ -97,7 +129,8 @@ See also [`spillregions`](@ref).
 function update_spillregions!(regions::Matrix{Int64}, spillfield::Matrix{Int8},
                               domain::Domain2D;
                               usediags=true, return_region_reindex=false)
-
+    @assert false "This function needs to be updated to handle cut_edges properly, as well as also updating the flowgraph."
+    
     # expand domain by one gridcell in all direction, since the gridcell closest
     # to the modified area may also have changed spill direction (which depends
     # on the immediate neighbors)
@@ -216,26 +249,43 @@ end
 
 # ----------------------------------------------------------------------------
 function _process_domain!(regions::Matrix{Int64},
+                          edges::Set{Tuple{Int, Int}},
                           spillfield::Matrix{Int8};
                           usediags::Bool=true,
-                          domain=nothing)
+                          domain=nothing,
+                          cut_edges::Set{Tuple{Int, Int}},
+                          culverts::Vector{Tuple{CartesianIndex{2}, CartesianIndex{2}}})
 
     spilldomain = view(spillfield, domain.xrange, domain.yrange)
     regionsdomain = view(regions, domain.xrange, domain.yrange)
 
-    # As sizehint, we use a value slightly larger than the number of cells in
-    # the domain
-    edges = sizehint!(Vector{Tuple{Int, Int}}(),
-                      spilldomain |> size |> prod |> (x)->x*1.1 |> ceil |> Int)
-
     # Identify grid edges connecting neighbor 'trap bottom' cells.
-    _flat_zone_connecting_edges!(edges, spilldomain, usediags)
+    all_connections = Set{Tuple{Int, Int}}()
+    _flat_zone_connecting_edges!(all_connections, spilldomain, usediags)
 
+    # eliminate the edges where barriers split flat zones into separate regions
+    setdiff!(all_connections, cut_edges)
+    
     # Identify grid edges constituting "streamlines"
     _spillfield_flow_edges!(edges, spilldomain)
 
+    # Redirect flow across culverts: If the culvert is between p1 to p2, insert
+    # an edge between these two points, directed from highest (p1) to lowest
+    # (p2) elevation, and remove any edges flowing out from p1.
+    LI = LinearIndices(size(spilldomain))
+    edges_to_remove = Set{Tuple{Int, Int}}()
+    for c in culverts
+        p1, p2 = LI[c[1]], LI[c[2]]
+        # identify any edges flowing out from p1
+        push!(edges_to_remove, filter(e->e[1] == p1, edges)...)
+        # add edge from p1 to p2
+        push!(edges, (p1, p2))
+    end
+    setdiff!(edges, edges_to_remove)
+
     # identify regions connected by streamlines
-    components = _determine_connected_components(edges, length(regions))
+    union!(all_connections, edges)
+    components = _determine_connected_components(all_connections, length(regions))
     
     # filling in spill regions
     regionsdomain .= 0 # masked areas do not have any spill regions, and will be
@@ -244,6 +294,20 @@ function _process_domain!(regions::Matrix{Int64},
         regionsdomain[components[i]] .= i
     end
 end
+
+# ----------------------------------------------------------------------------
+function _prepare_cut_edges_bidir(cut_edges::Dict{CartesianIndex{2}, Vector{CartesianIndex{2}}}, 
+                                  gridsize::Tuple{Int, Int})
+    cut_edges_bidir = Set{Tuple{Int, Int}}()
+    for (k, v) in cut_edges
+        for neigh in v
+            push!(cut_edges_bidir, (LinearIndices(gridsize)[k],
+                                    LinearIndices(gridsize)[neigh]))
+        end
+    end
+    return cut_edges_bidir
+end
+
 
 # ----------------------------------------------------------------------------
 function _remap!(regions::AbstractArray{Int64}, fromto::Array{Int64, 2})
@@ -391,6 +455,8 @@ function _fix_boundary_seams!(regions::Matrix{Int64}, spillfield::Matrix{Int8},
                 
     # update region numbers based on the detected correspondences
     _update_correspondences!(regions, correspondences)
+
+
 end
 
 # ----------------------------------------------------------------------------

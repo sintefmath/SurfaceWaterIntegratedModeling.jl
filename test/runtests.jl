@@ -58,8 +58,8 @@ end
 @testset "MaskingTests" begin
     @test test_buildings_and_flattening(grid2, mask2, (1983, 2005)) usediags=false
     @test test_buildings_and_flattening(grid2, mask2, (1294, 1319)) usediags=true
-    @test test_sinks(grid2, [(119,193), (180, 193)]) usediags=false
-    @test test_sinks(grid2, [(119,193), (180, 193)]) usediags=true
+    @test test_sinks(grid2, [CartesianIndex(119,193), CartesianIndex(180, 193)]) usediags=false
+    @test test_sinks(grid2, [CartesianIndex(119,193), CartesianIndex(180, 193)]) usediags=true
 end
 
 @testset "Watercourses" begin

@@ -56,7 +56,8 @@ function watercourses(tstruct::TrapStructure{<:Real},
     offregion_runoff = Ref(0.0)
     
     # Compute basic flow field intensity, as if all traps were empty
-    g = compute_spillfield_graph(tstruct.spillfield)
+    #g = compute_spillfield_graph(tstruct.spillfield)
+    g = tstruct.flowgraph
     sortedg = Graphs.topological_sort_by_dfs(g) # sort nodes to avoid invalidating
                                                 # earlier work
     for cur_node in sortedg
