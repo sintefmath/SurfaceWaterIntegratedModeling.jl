@@ -261,7 +261,7 @@ end
 
 # ----------------------------------------------------------------------------
 """
-    vconcat_spillfields(dir1, slope1, grid1, dir2, slope2, grid2, usediags=true, 
+    vconcat_spillfields(dir1, slope1, grid1, dir2, slope2, grid2; usediags=true, 
                         lengths=nothing)
 
 Concatenate two spill fields along the 'vertical' direction (adding rows).
@@ -281,8 +281,8 @@ well as the associated slopes (corresponding to `[slope1; slope2]`)
 - `dir2::Matrix{Int8}`:  second spill field
 - `slope2::Matrix{<:Real}`: matrix with local slopes for second spill field
 - `grid2::Matrix{<:Real}`: topography grid from which `dir2` was computed
-- `usediags::Bool`: if true, also consider slopes along diagonals
-- `lengths::Union{Tuple{<:Real}, Nothing}`: 
+- `usediags::Bool=true`: if true, also consider slopes along diagonals
+- `lengths::Union{Tuple{<:Real}, Nothing}=nothing`: 
       tuple expressing the length and width of the combined grid (used to compute
       aspect ratios)
 
@@ -333,7 +333,7 @@ end
 
 # ----------------------------------------------------------------------------
 """
-    hconcat_spillfields(dir1, slope1, grid1, dir2, slope2, grid2, usediags=true, 
+    hconcat_spillfields(dir1, slope1, grid1, dir2, slope2, grid2; usediags=true, 
                         lengths=nothing)
 
 Concatenate two spill fields along the 'horizontal' direction (adding columns).
@@ -353,8 +353,8 @@ well as the associated slopes (corresponding to `[slope1, slope2]`)
 - `dir2::Matrix{Int8}`:  second spill field
 - `slope2::Matrix{<:Real}`: matrix with local slopes for second spill field
 - `grid2::Matrix{<:Real}`: topography grid from which `dir2` was computed
-- `usediags::Bool`: if true, also consider slopes along diagonals
-- `lengths::Union{Tuple{<:Real}, Nothing}`: 
+- `usediags::Bool=true`: if true, also consider slopes along diagonals
+- `lengths::Union{Tuple{<:Real}, Nothing}=nothing`: 
       tuple expressing the length and width of the combined grid (used to compute
       aspect ratios)
 
