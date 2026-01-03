@@ -10,8 +10,9 @@ export spillfield, update_spillfield!, vconcat_spillfields, hconcat_spillfields
 # large grids.
 # ----------------------------------------------------------------------------
 """
-    spillfield(grid, usediags=true, lengths=nothing, domain=nothing, 
-               tiling=nothing, building_mask=nothing, barriers=nothing)
+    spillfield(grid; usediags=true, building_mask=nothing, sinks=Vector{CartesianIndex{2}}(),
+               blocked_edges=Dict{CartesianIndex{2}, Vector{CartesianIndex{2}}}(),
+               lengths=nothing, domain=nothing, tiling=nothing)
 
 Compute the spillfield of a raster terrain, represented by `grid`.  
 
@@ -37,18 +38,22 @@ returned as a second argument.
 
 # Arguments
 - `grid::Matrix{<:Real}`: terrain raster grid with height values
-- `usediags::Bool`: if true, also consider slopes along diagonals
-- `building_mask::Union{Matrix{Bool}, BitMatrix, Nothing}`: 
+- `usediags::Bool=true`: if true, also consider slopes along diagonals
+- `building_mask::Union{Matrix{Bool}, BitMatrix, Nothing}=nothing`: 
       a grid of logicals, specifying which cells are masked by buildings (true), 
       and thus inactive. These cells will be assigned a spill field value of -2
       (see list above).
-- `sinks::Vector{CartesianIndex{2}}`: 
+- `sinks::Vector{CartesianIndex{2}}=Vector{CartesianIndex{2}}()`: 
       vector containing (i, j) grid coordinates of any point sinks in the grid, if any
-- `lengths::Union{Tuple{<:Real}, Nothing}`: 
+- `blocked_edges::Dict{CartesianIndex{2}, Vector{CartesianIndex{2}}}=Dict{CartesianIndex{2}, Vector{CartesianIndex{2}}}()`:
+      dictionary mapping grid cells to lists of neighboring cells where flow is blocked
+      by barriers. Flow from a cell will be redirected if it would normally go to a
+      blocked neighbor.
+- `lengths::Union{Tuple{<:Real}, Nothing}=nothing`: 
       tuple expressing the length and width of the grid (used to compute aspect ratios)
-- `domain::Union{Domain2D, Nothing}`: restrict computation to the specified domain
+- `domain::Union{Domain2D, Nothing}=nothing`: restrict computation to the specified domain
                                       of the grid
-- `tiling::Union{Tuple{Int, Int}, Nothing}`: 
+- `tiling::Union{Tuple{Int, Int}, Nothing}=nothing`: 
       tuple specifying number of 'tiles' to subdivide surface in for parallel
       processing.  Default is (1,1), which means the whole surface is treated
       as a single tile (no parallel processing).
@@ -111,13 +116,15 @@ end
 
 # ----------------------------------------------------------------------------
 """
-    update_spillfield!(dir, slope, grid, domain, usediags=true, lengths=nothing)
+    update_spillfield!(dir, slope, grid, domain; building_mask=nothing, sinks=nothing,
+                       blocked_edges=Dict{CartesianIndex{2}, Vector{CartesianIndex{2}}}(),
+                       usediags=true, lengths=nothing)
 
 Update an existing spill field in-place within a specific rectangular domain (where 
 the topography grid has presumably changed).
 
 # Arguments
-- `dir::Matrix{Int}` : the spillfield, as described in the documentation of the
+- `dir::Matrix{Int8}` : the spillfield, as described in the documentation of the
                        `spillfield` function.  Will be updated within the
                        specified domain.
 - `slope::Array{<:Real}`: the steepest slope in each grid point, as returned by
@@ -128,25 +135,28 @@ the topography grid has presumably changed).
                           domain.
 - `domain::Domain2D` : the domain in which to update the information in `dir` 
                        and `slope`
-- `usediags::Bool=true`: if true, also consider slopes along diagonals
-
-- `lengths::Union{Tuple{<:Real}, Nothing}`: 
-      tuple expressing the length and width of the grid (used to compute aspect ratios)
-- `building_mask::Union{Matrix{Bool}, Nothing}`: 
+- `building_mask::Union{Matrix{Bool}, Nothing}=nothing`: 
       a grid of logicals, specifying which cells are masked by buildings (true), 
       and thus inactive. These cells will be assigned a spill field value of -2 
       (see list of possible fieldvalues in documentation of [`spillfield`](@ref).)
-
-- `sinks::Vector{Union{Tuple{Int, Int}, Nothing}}`: 
+- `sinks::Vector{CartesianIndex{2}}=nothing`: 
       vector containing (i, j) grid coordinates of any point sinks in the grid, if any.
+- `blocked_edges::Dict{CartesianIndex{2}, Vector{CartesianIndex{2}}}=Dict{CartesianIndex{2}, Vector{CartesianIndex{2}}}()`:
+      dictionary mapping grid cells to lists of neighboring cells where flow is blocked
+      by barriers. Flow from a cell will be redirected if it would normally go to a
+      blocked neighbor.
+- `usediags::Bool=true`: if true, also consider slopes along diagonals
+- `lengths::Union{Tuple{<:Real}, Nothing}=nothing`: 
+      tuple expressing the length and width of the grid (used to compute aspect ratios)
 
 See also [`spillfield`](@ref).
 """
 function update_spillfield!(dir::Matrix{Int8}, slope::Array{<:Real}, # output
                             grid::Matrix{<:Real}, domain::Domain2D;
                             building_mask=nothing, sinks=nothing,
+                            blocked_edges::Dict{CartesianIndex{2}, Vector{CartesianIndex{2}}}=
+                                Dict{CartesianIndex{2}, Vector{CartesianIndex{2}}}(),
                             usediags::Bool=true, lengths=nothing)
-    # @@ TODO: needs to be updated after changes to spillfield interface
     
     # expand domain by one gridcell in all direction, since the gridcell closest
     # to the modified area may also have changed spill direction (which depends
@@ -166,6 +176,9 @@ function update_spillfield!(dir::Matrix{Int8}, slope::Array{<:Real}, # output
 
     # fill in any buildings
     _fill_in_buildings_and_sinks!(dir, slope, building_mask, sinks)
+
+    # impose barriers (only matters if `blocked_edges` is non-empty)
+    _impose_barriers!(dir, slope, grid, lengths, blocked_edges)
 end
 
 # ----------------------------------------------------------------------------
@@ -190,7 +203,7 @@ end
 
 # ----------------------------------------------------------------------------
 """
-    _spillfield!(dir, slope, grid, usediags=true, lengths=nothing)
+    _spillfield!(dir, slope, grid; usediags=true, lengths=nothing, domain=nothing)
 
 Mutating version of spillfield.  The results 'dir' and 'slope' are not returned,
 but passed as arguments.  See documentation of 'spillfield' for a general
@@ -198,13 +211,22 @@ description.  A key difference in the mutating version is that the results (dir
 and slope) retain the full size of the grid, even though only a subdomain is
 addressed.  (In the non-mutating version, the returned grids are limited to the
 size of the addressed subdomain.)
+
+# Arguments
+- `dir::Matrix{Int8}`: output spillfield matrix (modified in place)
+- `slope::Array{<:Real}`: output slope matrix (modified in place)
+- `grid::Matrix{<:Real}`: terrain raster grid with height values
+- `usediags::Bool=true`: if true, also consider slopes along diagonals
+- `lengths::Union{Tuple{<:Real}, Nothing}=nothing`: tuple expressing the length and width
+      of the grid (used to compute aspect ratios). Defaults to size of grid if not provided.
+- `domain::Union{Domain2D, Nothing}=nothing`: restrict computation to the specified domain
+      of the grid. Defaults to entire grid if not provided.
 """
 function _spillfield!(dir::Matrix{Int8}, slope::Array{<:Real}, # output args
                      grid::Matrix{<:Real}; # input arg
                      usediags::Bool=true,
                      lengths=nothing,
                       domain=nothing)
-    # @@ TODO: Needs to be updated after changes to spillfield interface
     
     if domain == nothing
        domain = Domain2D(1:size(grid,1), 1:size(grid, 2)); 
@@ -239,7 +261,7 @@ end
 
 # ----------------------------------------------------------------------------
 """
-    vconcat_spillfields(dir1, slope1, grid1, dir2, slope2, grid2, usediags=true, 
+    vconcat_spillfields(dir1, slope1, grid1, dir2, slope2, grid2; usediags=true, 
                         lengths=nothing)
 
 Concatenate two spill fields along the 'vertical' direction (adding rows).
@@ -259,8 +281,8 @@ well as the associated slopes (corresponding to `[slope1; slope2]`)
 - `dir2::Matrix{Int8}`:  second spill field
 - `slope2::Matrix{<:Real}`: matrix with local slopes for second spill field
 - `grid2::Matrix{<:Real}`: topography grid from which `dir2` was computed
-- `usediags::Bool`: if true, also consider slopes along diagonals
-- `lengths::Union{Tuple{<:Real}, Nothing}`: 
+- `usediags::Bool=true`: if true, also consider slopes along diagonals
+- `lengths::Union{Tuple{<:Real}, Nothing}=nothing`: 
       tuple expressing the length and width of the combined grid (used to compute
       aspect ratios)
 
@@ -275,7 +297,6 @@ function vconcat_spillfields(dir1::Matrix{Int8}, # upper grid spillfield info
                              usediags::Bool=true,
                              lengths::Union{Tuple{<:Real}, Nothing}=nothing)
 
-    # @@ TODO: Needs to be updated after changes to spillfield interface                             
     # Check that grids are of compatible sizes
     @assert(size(dir1) == size(slope1) == size(grid1));
     @assert(size(dir2) == size(slope2) == size(grid2));
@@ -294,7 +315,7 @@ function vconcat_spillfields(dir1::Matrix{Int8}, # upper grid spillfield info
     if lengths != nothing
         # readjust lengths to correspond to the seamgrid
         dx, dy = lengths ./ [size(dir1, 1) + size(dir2, 1), size(dir1, 2)]
-        lengths = (dx, xy) .* size(tmpgrid)
+        lengths = (dx, dy) .* size(tmpgrid)
     end
 
     dir_seam, slope_seam = spillfield(tmpgrid;
@@ -312,7 +333,7 @@ end
 
 # ----------------------------------------------------------------------------
 """
-    hconcat_spillfields(dir1, slope1, grid1, dir2, slope2, grid2, usediags=true, 
+    hconcat_spillfields(dir1, slope1, grid1, dir2, slope2, grid2; usediags=true, 
                         lengths=nothing)
 
 Concatenate two spill fields along the 'horizontal' direction (adding columns).
@@ -332,8 +353,8 @@ well as the associated slopes (corresponding to `[slope1, slope2]`)
 - `dir2::Matrix{Int8}`:  second spill field
 - `slope2::Matrix{<:Real}`: matrix with local slopes for second spill field
 - `grid2::Matrix{<:Real}`: topography grid from which `dir2` was computed
-- `usediags::Bool`: if true, also consider slopes along diagonals
-- `lengths::Union{Tuple{<:Real}, Nothing}`: 
+- `usediags::Bool=true`: if true, also consider slopes along diagonals
+- `lengths::Union{Tuple{<:Real}, Nothing}=nothing`: 
       tuple expressing the length and width of the combined grid (used to compute
       aspect ratios)
 
@@ -348,8 +369,6 @@ function hconcat_spillfields(dir1::Matrix{Int8}, # upper grid spillfield info
                              usediags::Bool=true,
                              lengths::Union{Tuple{<:Real}, Nothing}=nothing)
 
-    # @@ TODO: Needs to be updated after changes to spillfield interface
-    
     # Check that grids are of compatible sizes
     @assert(size(dir1) == size(slope1) == size(grid1));
     @assert(size(dir2) == size(slope2) == size(grid2));
@@ -369,7 +388,7 @@ function hconcat_spillfields(dir1::Matrix{Int8}, # upper grid spillfield info
     if lengths != nothing
         # readjust lengths to correspond to the seamgrid
         dx, dy = lengths ./ [size(dir1, 1), size(dir1, 2) + size(dir2, 2)]
-        lengths = (dx, xy) .* size(tmpgrid)
+        lengths = (dx, dy) .* size(tmpgrid)
     end
     
     dir_seam, slope_seam = spillfield(tmpgrid;
