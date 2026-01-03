@@ -275,7 +275,7 @@ function vconcat_spillfields(dir1::Matrix{Int8}, # upper grid spillfield info
                              usediags::Bool=true,
                              lengths::Union{Tuple{<:Real}, Nothing}=nothing)
 
-    # @@ TODO: Needs to be updated after changes to spillfield interface                             
+    # @@ TODO: Needs to be updated after changes to spillfield interface (reinstated)
     # Check that grids are of compatible sizes
     @assert(size(dir1) == size(slope1) == size(grid1));
     @assert(size(dir2) == size(slope2) == size(grid2));
@@ -348,7 +348,7 @@ function hconcat_spillfields(dir1::Matrix{Int8}, # upper grid spillfield info
                              usediags::Bool=true,
                              lengths::Union{Tuple{<:Real}, Nothing}=nothing)
 
-    # @@ TODO: Needs to be updated after changes to spillfield interface
+    # @@ TODO: Needs to be updated after changes to spillfield interface (reinstated)
     
     # Check that grids are of compatible sizes
     @assert(size(dir1) == size(slope1) == size(grid1));
