@@ -7,7 +7,9 @@ _SPILLFIELD_INACTIVE_FLAG = -10; # could in principle be any integer outside the
                                  # range [-2:7]
 # ----------------------------------------------------------------------------
 """
-    spillregions(spillfield)
+    spillregions(spillfield; usediags=true, tiling=nothing,
+                 cut_edges=Dict{CartesianIndex{2}, Vector{CartesianIndex{2}}}(),
+                 culverts=Vector{Tuple{CartesianIndex{2}, CartesianIndex{2}}}())
 
 Identify all spill regions to be derived from a given [`spillfield`](@ref).
 
@@ -19,19 +21,19 @@ the same integer value belong to the same spill region.  Spill regions that
 exit the domain are assigned negative region numbers.
 
 # Arguments
-- `spillfield::Matrix{Int}`: the matrix containing the spillfield already 
+- `spillfield::Matrix{Int8}`: the matrix containing the spillfield already 
                              computed from the [`spillfield`](@ref) function.
-- `usediags` : if `true`, diagonal connections between cells will also be considered
-- `tiling::Union{Tuple{Int, Int}, Nothing}`: 
+- `usediags::Bool=true` : if `true`, diagonal connections between cells will also be considered
+- `tiling::Union{Tuple{Int, Int}, Nothing}=nothing`: 
       tuple specifying number of 'tiles' to subdivide surface in for parallel 
       processing.  Default is (1,1), which means the whole surface is treated
       as a single tile (no parallel processing).
-- `cut_edges::Dict{CartesianIndex{2}, Vector{CartesianIndex{2}}}`:
+- `cut_edges::Dict{CartesianIndex{2}, Vector{CartesianIndex{2}}}=Dict{CartesianIndex{2}, Vector{CartesianIndex{2}}}()`:
       dictionary specifying edges that should be cut (i.e., no flow allowed
       across these edges).  Keys are CartesianIndices of grid cells, and values
       are Vectors of CartesianIndices of neighboring grid cells to which flow
       is blocked.  This dict should also have been used when generating the spillfield.
-- `culverts::Vector{Tuple{CartesianIndex{2}, CartesianIndex{2}}}`:
+- `culverts::Vector{Tuple{CartesianIndex{2}, CartesianIndex{2}}}=Vector{Tuple{CartesianIndex{2}, CartesianIndex{2}}}()`:
       vector specifying culverts as pairs of CartesianIndices of grid cells
       that are connected by the culvert.  The grid cells should be ordered so that
       the first cell in the tuple is at higher elevation than the second cell.

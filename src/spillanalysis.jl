@@ -3,9 +3,10 @@ export spillanalysis
 # all outside regions represented as -1 if true
 # @@ NB: Domain currently only implemented for spillfield!
 """
-    spillanalysis(grid, usediags=true, building_mask=nothing, sinks=nothing,
-                  lengths=nothing, domain=nothing, merge_outregions=false, 
-                  verbose=false)
+    spillanalysis(grid; usediags=true, building_mask=nothing, sinks=Vector{CartesianIndex{2}}(),
+                  lengths=nothing, domain=nothing, merge_outregions=false, verbose=false,
+                  culverts=Vector{Tuple{CartesianIndex{2}, CartesianIndex{2}}}(),
+                  barriers=Vector{Vector{CartesianIndex{2}}}())
 
 Analyse a terrain and compute all key information regarding its trap structure.
 
@@ -18,23 +19,29 @@ documentation for details.
 
 # Arguments
 - `grid::Matrix{<:Real}`: topograpical grid to analyse
-- `usediags::Bool`: if true, also consider slopes along diagonals
-- `building_mask::Union{Matrix{<:Bool}, BitMatrix, Nothing}`: 
+- `usediags::Bool=true`: if true, also consider slopes along diagonals
+- `building_mask::Union{Matrix{<:Bool}, BitMatrix, Nothing}=nothing`: 
       if present, provides a mask that specifies the footprint of buildings.  
       These parts of the domain will be clipped away.
-- `sinks::Union{Vector{Tuple{Int, Int}}, Matrix{Bool}, Nothing}`:
+- `sinks::Union{Vector{CartesianIndex{2}}, Matrix{Bool}}=Vector{CartesianIndex{2}}()`:
       vector containing (i, j) grid coordinates of any point sinks in the grid, if any.
       Can also be a Matrix{Bool} of same size as `grid`, indicating the sink locations.
-- `lengths::Union{Tuple{<:Real}, Nothing}`: 
+- `lengths::Union{Tuple{<:Real}, Nothing}=nothing`: 
       tuple expressing the length and width of the grid (used to compute aspect ratios)
-- `domain::Union{Domain2D, Nothing}`: 
+- `domain::Union{Domain2D, Nothing}=nothing`: 
       restrict computation to the specified domain of the grid.  @@ Note that this is not
       fully supported yet for this function.
-- `merge_outregions::Bool`: if `true`, all "outside" regions will be merged and 
+- `merge_outregions::Bool=false`: if `true`, all "outside" regions will be merged and 
       represented as region -1.   Otherwise, each "outside" region will be represented
       by its own negative integer.
-- `verbose::Bool`: if `true`, print information showing progress in the computation 
+- `verbose::Bool=false`: if `true`, print information showing progress in the computation 
                    along the way.
+- `culverts::Vector{Tuple{CartesianIndex{2}, CartesianIndex{2}}}=Vector{Tuple{CartesianIndex{2}, CartesianIndex{2}}}()`:
+      vector of culverts, each defined by a pair of grid coordinates. Culverts allow flow
+      between two cells that would otherwise be blocked by terrain.
+- `barriers::Vector{Vector{CartesianIndex{2}}}=Vector{Vector{CartesianIndex{2}}}()`:
+      vector of barriers, where each barrier is a polyline defined by a sequence of grid 
+      coordinates. Barriers block flow between cells along the polyline.
 
 See also [`TrapStructure`](@ref), [`fill_sequence`](@ref).
 """

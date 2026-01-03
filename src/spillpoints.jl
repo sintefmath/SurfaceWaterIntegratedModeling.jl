@@ -31,7 +31,8 @@ Spillpoint() = Spillpoint(0, 0, 0, Inf)
 
 
 """
-    spillpoints(grid, spillregions, usediags)
+    spillpoints(grid, spillregions; usediags=true, tiling=nothing,
+                cut_edges=Dict{CartesianIndex{2}, Vector{CartesianIndex{2}}}())
 
 Compute the spillpoint positions for each (low-level) spill region in the grid.
 
@@ -53,12 +54,17 @@ region 'j'.
 - `grid::Matrix{<:Real}` - the terrain grid (matrix) with height values
 - `spillregions::Matrix{Int}`: the matrix containing the regions already computed 
                                 from the [`spillregions`](@ref) function
-- `usediags::Bool` : if `true` (default), diagonal connections between cells will also be
+- `usediags::Bool=true` : if `true` (default), diagonal connections between cells will also be
                      considered
-- `tiling::Union{Tuple{Int, Int}, Nothing}`: 
+- `tiling::Union{Tuple{Int, Int}, Nothing}=nothing`: 
         tuple specifying number of 'tiles' to subdivide surface in for parallel
         processing.  Default is (1,1), which means the whole surface is treated
         as a single tile (no parallel processing).
+- `cut_edges::Dict{CartesianIndex{2}, Vector{CartesianIndex{2}}}=Dict{CartesianIndex{2}, Vector{CartesianIndex{2}}}()`:
+        dictionary specifying edges that should be cut (i.e., no flow allowed
+        across these edges).  Keys are CartesianIndices of grid cells, and values
+        are Vectors of CartesianIndices of neighboring grid cells to which flow
+        is blocked.  This dict should also have been used when generating the spillfield and spillregions.
 
 See also [`Spillpoint`](@ref).
 """
