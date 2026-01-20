@@ -89,9 +89,23 @@ function plotgrid(grid::AbstractArray{<:Real, 2};
         texture = z;
     end
 
+    plot3Dgeometry(points, faces, uv, normals;
+                   texture=z,
+                   colormap=colormap,
+                   wireframe=wireframe,
+                   colorrange=colorrange)
+end
+
+# ----------------------------------------------------------------------------
+function plot3Dgeometry(points, faces, uv, normals;
+                        texture::Union{Matrix{<:Union{<:Real, <:Colorant}}, Nothing}=nothing,
+                        colormap::Union{Symbol, ColorScheme}=:lightrainbow,
+                        wireframe::Bool=false,
+                        colorrange::Union{Tuple{<:Real, <:Real}, Nothing}=nothing)
+
     # create mesh
     glmesh = Mesh(vec(points), faces; uv=vec(uv), normal=normals)
-
+    
     # GLMakie handles texture coordinates differently
     textransform = _get_tex_transform(texture)
     
@@ -122,8 +136,11 @@ function plotgrid(grid::AbstractArray{<:Real, 2};
                            linewidth=1, transparency=true);      
     end
     return plt, fig, ax.scene
+
+
 end
 
+# ----------------------------------------------------------------------------    
 function grid3Dgeometry(grid::AbstractArray{<:Real, 2};
                         downsamplefac::Real=1.0,
                         heightfac::Real=1.0)
