@@ -4,7 +4,7 @@ import Base: size, min, max
 using GeometryBasics: Point3f, Vec2f, decompose, QuadFace, Tesselation, Rect, Mesh
 using Colors, ColorSchemes
 
-export loadgrid, savegrid, plotgrid, drape_surface, set_camerapos
+export loadgrid, savegrid, plotgrid, drape_surface, set_camerapos, grid3Dgeometry
 
 # ----------------------------------------------------------------------------
 """
@@ -79,45 +79,18 @@ function plotgrid(grid::AbstractArray{<:Real, 2};
                   downsamplefac::Real=1.0,
                   heightfac::Real=1.0,
                   colorrange::Union{Tuple{<:Real, <:Real}, Nothing}=nothing)
-    z = grid;
 
-    if downsamplefac > 1
-        downsample(range) =
-            Int.(floor.(unique(ceil.(range / downsamplefac)) * downsamplefac));
-
-        ix1 = min.(downsample(1:size(grid, 1)), size(grid, 1));
-        ix2 = min.(downsample(1:size(grid, 2)), size(grid, 2));
-
-        z = Base.view(grid, ix1, ix2);
-    end
+    # generate geometry
+    points, faces, uv, normals, z =
+        grid3Dgeometry(grid; downsamplefac=downsamplefac, heightfac=heightfac);
 
     if texture==nothing
         @show typeof(z)
         texture = z;
     end
 
-    # define points
-    res = size(z);
-    x = LinRange(0, size(grid, 1), res[1]);
-    y = LinRange(0, size(grid, 2), res[2]);
-    points = [Point3f(x[i], y[j], heightfac * z[i,j]) for i in 1:res[1], j in 1:res[2]];
-
-    # define faces
-    faces = decompose(QuadFace{Makie.GLIndex}, Tesselation(Rect(0, 0, 1, 1), res));
-
-    # define parameterization
-    uv = map(points) do p
-        tup = ((p[1], p[2])) ./ size(grid);
-        return Vec2f(tup);
-    end;
-
-    # define normals
-    normals = vec(_computenormals(x[2] - x[1], y[2] - y[1], z));
-
     # create mesh
-    #glmesh = Mesh(Makie.meta(vec(points); uv=Makie.Buffer(vec(uv)), normals), faces);
-    #glmesh = Mesh(Makie.meta(vec(points); uv=vec(uv), normals), faces);
-    glmesh = Mesh(vec(points), faces; uv=vec(uv), normal=normals);
+    glmesh = Mesh(vec(points), faces; uv=vec(uv), normal=normals)
 
     # GLMakie handles texture coordinates differently
     textransform = _get_tex_transform(texture)
@@ -149,6 +122,40 @@ function plotgrid(grid::AbstractArray{<:Real, 2};
                            linewidth=1, transparency=true);      
     end
     return plt, fig, ax.scene
+end
+
+function grid3Dgeometry(grid::AbstractArray{<:Real, 2};
+                        downsamplefac::Real=1.0,
+                        heightfac::Real=1.0)
+    z = grid;
+    if downsamplefac > 1
+        downsample(range) =
+            Int.(floor.(unique(ceil.(range / downsamplefac)) * downsamplefac));
+
+        ix1 = min.(downsample(1:size(grid, 1)), size(grid, 1));
+        ix2 = min.(downsample(1:size(grid, 2)), size(grid, 2));
+
+        z = Base.view(grid, ix1, ix2);
+    end
+
+    # define points
+    res = size(z);
+    x = LinRange(0, size(grid, 1), res[1])
+    y = LinRange(0, size(grid, 2), res[2])
+    points = [Point3f(x[i], y[j], heightfac * z[i,j]) for i in 1:res[1], j in 1:res[2]]
+    # define faces
+    faces = decompose(QuadFace{Makie.GLIndex}, Tesselation(Rect(0, 0, 1, 1), res))
+
+    # define parameterization
+    uv = map(points) do p
+        tup = ((p[1], p[2])) ./ size(grid)
+        return Vec2f(tup)
+    end
+    # define normals
+    normals = vec(_computenormals(x[2] - x[1], y[2] - y[1], z))
+
+    # return geometry
+    return points, faces, uv, normals, z
 end
 
 # ----------------------------------------------------------------------------
