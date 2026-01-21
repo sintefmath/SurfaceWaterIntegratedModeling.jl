@@ -138,7 +138,7 @@ set_camerapos(sc, view1...)
 # (specified by the `usediags` argument when calling [`spillanalysis`](@ref)).
 # We can visualize the spillfield by draping it directly on the surface:
 
-drape_surface(sf, tstruct.spillfield .*2)
+drape_surface(sf, reconstruct_spillfield(tstruct) .*2)
 set_camerapos(sc, view1...)
 
 # The eight different colors on this plot indicate the eight different local

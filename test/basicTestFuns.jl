@@ -16,7 +16,7 @@ function test_spillregions(grid, minreg, maxreg, outregsize;
 
     field, slope = spillfield(grid, usediags=usediags)
 
-    regions = spillregions(field, usediags=usediags, tiling=tiling)
+    regions, = spillregions(field, usediags=usediags, tiling=tiling)
 
     exreg = extrema(regions)
     oreg = findall(regions .< 0)

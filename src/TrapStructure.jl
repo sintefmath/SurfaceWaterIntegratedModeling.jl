@@ -11,7 +11,7 @@ A struct representing a watershed drainage trap for topographical analysis.
 # Fieldnames
 
 - `topography::Matrix{T}`: raster grid of terrain height values.
-- `spillfield::Matrix{Int8}`: local direction of streamline (see [`spillfield`](@ref))
+- `flowgraph::Graphs.SimpleDiGraph`: graph describing flow routing between cells
 - `regions::Matrix{Int}`: raster grid with region numbers (see [`spillregions`](@ref))
 - `spillpoints::Vector{Spillpoint}`: vector with spill point information per trap
                                      (see [`spillpoints`](@ref))
@@ -29,11 +29,15 @@ A struct representing a watershed drainage trap for topographical analysis.
 - `building_mask::Union{Matrix{Bool}, Nothing}`: building mask (0: terrain, 1: building)
 - `sinks::Union{Vector{Tuple{Int, Int}}, Nothing}`: list of sinks, in term of grid
                                                     cell coordinates
+- `cut_edges::Dict{CartesianIndex{2}, Vector{CartesianIndex{2}}}`:
+                                              Dict of cut edges (barriers), i.e. edges
+                                              that block flow between adjacent cells
 """
 mutable struct TrapStructure{T<:Real}
 
     topography::Matrix{T}           # raster grid of terrain height values
-    spillfield::Matrix{Int8}        # local direction of streamline
+    flowgraph::Graphs.SimpleDiGraph  # graph describing flow routing between cells
+    trap_bottoms::Vector{CartesianIndex{2}} # list of trap bottom cells in grid
     regions::Matrix{Int}            # raster grid with region numbers
     spillpoints::Vector{Spillpoint} # vector with spill point information per trap
     trapvolumes::Vector{T}          # computed trap volumes
@@ -47,8 +51,8 @@ mutable struct TrapStructure{T<:Real}
                                        # to (including itself)
     agglomerations::Graphs.SimpleDiGraph # hierarchy of sub/supertraps
     building_mask::Union{Matrix{Bool}, Nothing} # building mask (0: terrain, 1: building)
-    sinks::Union{Vector{Tuple{Int, Int}}, Nothing} # list of sinks, in term of grid cell
-                                                   # coordinates
+    sinks::Vector{CartesianIndex{2}}      # list of sinks, in term of grid cell coordinates
+    cut_edges::Dict{CartesianIndex{2}, Vector{CartesianIndex{2}}} # Dict of cut edges (barriers)
 end
 
 # ----------------------------------------------------------------------------

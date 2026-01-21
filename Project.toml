@@ -1,7 +1,7 @@
 name = "SurfaceWaterIntegratedModeling"
 uuid = "71e2a337-b4d4-4738-9f2b-3c37e1d3d462"
-authors = ["Odd Andersen <odd.andersen@sintef.no>"]
 version = "1.0.3"
+authors = ["Odd Andersen <odd.andersen@sintef.no>"]
 
 [deps]
 ColorSchemes = "35d6a980-a343-548e-a6ea-1d62b119f2f4"
@@ -20,6 +20,7 @@ SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
 [compat]
 ColorSchemes = "3.24"
 Colors = "0.12.10, 0.13"
+
 #DifferentialEquations = "7.13"
 #GeometryBasics = "0.4.11, 0.5"
 #Graphs = "1.9"
@@ -27,7 +28,7 @@ Colors = "0.12.10, 0.13"
 #Makie = "0.21, 0.22"
 #OffsetArrays = "1.13"
 #Roots = "2.1.2"
-julia = "1.9"
+#julia = "1.9"
 
 [extras]
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"

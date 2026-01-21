@@ -74,11 +74,29 @@ end
 
 # ----------------------------------------------------------------------------
 function _is_trap_bottom(cell, tstruct)
-    return cell > 0 && tstruct.spillfield[cell] == -1
+    # if a cell has no outneighbors, is not a sink and belongs to a nonnegative
+    # region, it must be a trap bottom.  (If it were a cell spilling out of the
+    # domain, it would belong to a negative reion)
+    @assert cell > 0
+    return isempty(Graphs.outneighbors(tstruct.flowgraph, cell)) && 
+        (tstruct.regions[cell] > 0) &&
+        !_is_sink(cell, tstruct)
 end
+
+# # ----------------------------------------------------------------------------
+# function _is_trap_bottom(cell, tstruct)
+#     #return cell > 0 && tstruct.spillfield[cell] == -1
+#     return cell > 0 && isempty(outneighbors(tstruct.flowgraph, cell))
+# end
+
 # ----------------------------------------------------------------------------
 function _is_sink(cell, tstruct)
-    return cell > 0 && tstruct.spillfield[cell] == -3
+    #return cell > 0 && tstruct.spillfield[cell] == -3
+
+    # @@ TODO: should this be optimized, to avoid creation of intermediary
+    # CartesianIndices objects every time?
+    return cell > 0 && (tstruct.sinks !== nothing) &&
+        CartesianIndices(size(tstruct.topography))[cell] in tstruct.sinks
 end
 # ----------------------------------------------------------------------------
 function _track_flow!(rateinfo, node, amount, tstruct)
@@ -107,15 +125,25 @@ function _track_flow!(rateinfo, node, amount, tstruct)
 
         (sign(amount) != initial_sign) && break # stop when there is no more to
                                                 # propagate/remove
-        _is_trap_bottom(cell, tstruct) && break # return if the cell is a trap bottom
+        ds = Graphs.outneighbors(tstruct.flowgraph, cell)
+        isempty(ds) && break # no downstream cell, stop here (either trap bottom, sink, or 
+                             # domain boundary)
+        @assert length(ds) == 1
+        cell = ds[1]
+        
+        #_is_trap_bottom(cell, tstruct) && break # return if the cell is a trap bottom
 
-        cell, = SurfaceWaterIntegratedModeling._downstream_cell(tstruct.spillfield, cell)
+        #cell, = SurfaceWaterIntegratedModeling._downstream_cell(tstruct.spillfield, cell)
+        # downstream cell should exist since this is not a trap bottom
+        # @@ TODO: we might combine this with _is_trap_bottom to avoid double lookup
+        #cell = Graphs.outneighbors(tstruct.flowgraph, cell)[1]
 
-        _is_sink(cell, tstruct) && break # return if the new cell is a sink
+        #_is_sink(cell, tstruct) && break # return if the new cell is a sink
     end
 
     # recompute inflow and footprint infiltration of affected supertraps
-    reg = cell > 0 ? tstruct.regions[cell] : -1
+    @assert cell > 0
+    reg = tstruct.regions[cell]
     if reg > 0
         _update_Smin_Smax!(rateinfo, tstruct, tstruct.supertraps_of[reg])
     end
@@ -125,6 +153,18 @@ function _track_flow!(rateinfo, node, amount, tstruct)
     if reg > 0 && _is_trap_bottom(cell, tstruct)
         setinflow!(rateinfo, reg, getinflow(rateinfo, reg) + amount)
     end
+    
+    # # recompute inflow and footprint infiltration of affected supertraps
+    # reg = cell > 0 ? tstruct.regions[cell] : -1
+    # if reg > 0
+    #     _update_Smin_Smax!(rateinfo, tstruct, tstruct.supertraps_of[reg])
+    # end
+
+    # amount = (sign(amount) != initial_sign) ? 0.0 : amount
+
+    # if reg > 0 && _is_trap_bottom(cell, tstruct)
+    #     setinflow!(rateinfo, reg, getinflow(rateinfo, reg) + amount)
+    # end
     return amount
 end
 

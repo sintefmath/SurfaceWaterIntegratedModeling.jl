@@ -31,7 +31,8 @@ Spillpoint() = Spillpoint(0, 0, 0, Inf)
 
 
 """
-    spillpoints(grid, spillregions, usediags)
+    spillpoints(grid, spillregions; usediags=true, tiling=nothing,
+                cut_edges=Dict{CartesianIndex{2}, Vector{CartesianIndex{2}}}())
 
 Compute the spillpoint positions for each (low-level) spill region in the grid.
 
@@ -53,23 +54,30 @@ region 'j'.
 - `grid::Matrix{<:Real}` - the terrain grid (matrix) with height values
 - `spillregions::Matrix{Int}`: the matrix containing the regions already computed 
                                 from the [`spillregions`](@ref) function
-- `usediags::Bool` : if `true` (default), diagonal connections between cells will also be
+- `usediags::Bool=true` : if `true` (default), diagonal connections between cells will also be
                      considered
-- `tiling::Union{Tuple{Int, Int}, Nothing}`: 
+- `tiling::Union{Tuple{Int, Int}, Nothing}=nothing`: 
         tuple specifying number of 'tiles' to subdivide surface in for parallel
         processing.  Default is (1,1), which means the whole surface is treated
         as a single tile (no parallel processing).
+- `cut_edges::Dict{CartesianIndex{2}, Vector{CartesianIndex{2}}}=Dict{CartesianIndex{2}, Vector{CartesianIndex{2}}}()`:
+        dictionary specifying edges that should be cut (i.e., no flow allowed
+        across these edges).  Keys are CartesianIndices of grid cells, and values
+        are Vectors of CartesianIndices of neighboring grid cells to which flow
+        is blocked.  This dict should also have been used when generating the spillfield and spillregions.
 
 See also [`Spillpoint`](@ref).
 """
 function spillpoints(grid::Matrix{<:Real}, spillregions::Matrix{Int};
-                     usediags::Bool=true, tiling=nothing)
+                     usediags::Bool=true, tiling=nothing,
+                     cut_edges::Dict{CartesianIndex{2}, Vector{CartesianIndex{2}}}=
+                                Dict{CartesianIndex{2}, Vector{CartesianIndex{2}}}())
 
     domain = Domain2D(1:size(grid,1), 1:size(grid,2))
     
     if tiling == nothing
         spillpoints, boundaries =
-            _process_domain(grid, spillregions, usediags, domain)
+            _process_domain(grid, spillregions, usediags, domain, cut_edges)
     else
         tiles, = tiledomain(domain, tiling...)
         spoints_vec = Vector{Vector{Spillpoint}}(undef, length(tiles))
@@ -77,7 +85,7 @@ function spillpoints(grid::Matrix{<:Real}, spillregions::Matrix{Int};
 
         Threads.@threads for i = 1:length(tiles)
             spoints_vec[i], boundaries_vec[i] =
-                _process_domain(grid, spillregions, usediags, tiles[i])
+                _process_domain(grid, spillregions, usediags, tiles[i], cut_edges)
         end
 
         spillpoints = spoints_vec[1]
@@ -102,7 +110,7 @@ end
 
 # ----------------------------------------------------------------------------
 function _process_domain(grid::Matrix{<:Real}, spillregions::Matrix{Int},
-                         usediags::Bool, domain::Domain2D)
+                         usediags::Bool, domain::Domain2D, cut_edges)
     # each tuple contains (second region, cell in this region, cell in second
     # region, z-value).
 
@@ -130,6 +138,13 @@ function _process_domain(grid::Matrix{<:Real}, spillregions::Matrix{Int},
         if reg1 != reg2
             lpos1 = LI[pos]
             lpos2 = LI[pos+shift]
+
+            if !isempty(cut_edges)
+                if pos in keys(cut_edges) &&
+                    (pos + shift) in cut_edges[pos]
+                    return
+                end
+            end
 
             # register this point as part of the respective region boundaries
             reg1 > 0 ? push!(boundaries[reg1], (lpos1, lpos2)) : nothing

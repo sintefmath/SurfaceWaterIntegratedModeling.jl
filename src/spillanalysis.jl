@@ -3,9 +3,10 @@ export spillanalysis
 # all outside regions represented as -1 if true
 # @@ NB: Domain currently only implemented for spillfield!
 """
-    spillanalysis(grid, usediags=true, building_mask=nothing, sinks=nothing,
-                  lengths=nothing, domain=nothing, merge_outregions=false, 
-                  verbose=false)
+    spillanalysis(grid; usediags=true, building_mask=nothing, sinks=Vector{CartesianIndex{2}}(),
+                  lengths=nothing, domain=nothing, merge_outregions=false, verbose=false,
+                  culverts=Vector{Tuple{CartesianIndex{2}, CartesianIndex{2}}}(),
+                  barriers=Vector{Vector{CartesianIndex{2}}}())
 
 Analyse a terrain and compute all key information regarding its trap structure.
 
@@ -18,55 +19,83 @@ documentation for details.
 
 # Arguments
 - `grid::Matrix{<:Real}`: topograpical grid to analyse
-- `usediags::Bool`: if true, also consider slopes along diagonals
-- `building_mask::Union{Matrix{<:Bool}, BitMatrix, Nothing}`: 
+- `usediags::Bool=true`: if true, also consider slopes along diagonals
+- `building_mask::Union{Matrix{<:Bool}, BitMatrix, Nothing}=nothing`: 
       if present, provides a mask that specifies the footprint of buildings.  
       These parts of the domain will be clipped away.
-- `sinks::Union{Vector{Tuple{Int, Int}}, Matrix{Bool}, Nothing}`:
+- `sinks::Union{Vector{CartesianIndex{2}}, Matrix{Bool}}=Vector{CartesianIndex{2}}()`:
       vector containing (i, j) grid coordinates of any point sinks in the grid, if any.
       Can also be a Matrix{Bool} of same size as `grid`, indicating the sink locations.
-- `lengths::Union{Tuple{<:Real, <:Real}, Nothing}`: 
+- `lengths::Union{Tuple{<:Real}, Nothing}=nothing`: 
       tuple expressing the length and width of the grid (used to compute aspect ratios)
-- `domain::Union{Domain2D, Nothing}`: 
+- `domain::Union{Domain2D, Nothing}=nothing`: 
       restrict computation to the specified domain of the grid.  @@ Note that this is not
       fully supported yet for this function.
-- `merge_outregions::Bool`: if `true`, all "outside" regions will be merged and 
+- `merge_outregions::Bool=false`: if `true`, all "outside" regions will be merged and 
       represented as region -1.   Otherwise, each "outside" region will be represented
       by its own negative integer.
-- `verbose::Bool`: if `true`, print information showing progress in the computation 
+- `verbose::Bool=false`: if `true`, print information showing progress in the computation 
                    along the way.
+- `culverts::Vector{Tuple{CartesianIndex{2}, CartesianIndex{2}}}=Vector{Tuple{CartesianIndex{2}, CartesianIndex{2}}}()`:
+      vector of culverts, each defined by a pair of grid coordinates. Culverts allow flow
+      between two cells that would otherwise be blocked by terrain.
+- `barriers::Vector{Vector{CartesianIndex{2}}}=Vector{Vector{CartesianIndex{2}}}()`:
+      vector of barriers, where each barrier is a polyline defined by a sequence of grid 
+      coordinates. Barriers block flow between cells along the polyline.
 
 See also [`TrapStructure`](@ref), [`fill_sequence`](@ref).
 """
 function spillanalysis(grid::Matrix{<:Real};
                   usediags::Bool=true,
                   building_mask::Union{Matrix{<:Bool}, BitMatrix, Nothing}=nothing,
-                  sinks::Union{Vector{Tuple{Int, Int}}, Matrix{Bool}, Nothing}=nothing,
-                  lengths::Union{Tuple{<:Real, <:Real}, Nothing}=nothing,
+                  sinks::Union{Vector{CartesianIndex{2}}, Matrix{Bool}}=Vector{CartesianIndex{2}}(),
+                  lengths::Union{Tuple{<:Real}, Nothing}=nothing,
                   domain::Union{Domain2D, Nothing}=nothing,
                   merge_outregions::Bool=false, 
-                  verbose::Bool=false)
-    
-
+                  verbose::Bool=false,
+                  culverts::Vector{Tuple{CartesianIndex{2}, CartesianIndex{2}}}=
+                           Vector{Tuple{CartesianIndex{2}, CartesianIndex{2}}}(),
+                  barriers::Vector{Vector{CartesianIndex{2}}}=
+                           Vector{Vector{CartesianIndex{2}}}())
 
     verbose && println("Entering spillfield")
 
+    # ensure `sinks` is a vector of CartesianIndex
     if typeof(sinks) <: Matrix
-        sinks = [(i[1], i[2]) for i in findall(sinks)]
+        sinks = [CartesianIndex(i[1], i[2]) for i in findall(sinks)]
+    elseif sinks == nothing
+        sinks = Vector{CartesianIndex{2}}()
     end
 
+    # ensure culverts are directed from higher to lower elevation
+    directed_culverts = [ grid[x[1]] >= grid[x[2]] ? x : (x[2], x[1]) for x in culverts ]
+    
+    # determine any connections cut by barriers
+    cut_edges = Set{Tuple{CartesianIndex{2}, CartesianIndex{2}}}()
+    for b in barriers
+        @assert length(b) >= 2 "Each barrier must have at least two points"
+        e = polyline_grid_intersections(b.I, usediags=usediags)
+        union!(cut_edges, e)
+    end
+    cut_edge_dict = edgeset2dict(cut_edges)
+    
     field, slope = spillfield(grid, usediags=usediags,
                               lengths=lengths, domain=domain,
                               sinks=sinks,
+                              blocked_edges=cut_edge_dict,
                               building_mask=building_mask)
 
-    verbose && println("Entering spillregions")
-    regions = spillregions(field, usediags=usediags)
-
-    verbose && println("Entering spillpoints")
-    spoints, regbnd = spillpoints(grid, regions, usediags=usediags)
+    trap_bottoms = findall(field .== -1)
     
-    verbose && println("Entering sshierarchy")
+    verbose && println("Entering spillregions")
+    regions, flowgraph = spillregions(field, usediags=usediags,
+                                      cut_edges=cut_edge_dict, culverts=culverts)
+    
+    verbose && println("Entering spillpoints")
+    spoints, regbnd = spillpoints(grid, regions, usediags=usediags,
+                                  cut_edges=cut_edge_dict)
+    
+    verbose && println("entering sshierarchy")
     subtrapgraph, lowest_regions = sshierarchy!(grid, regions, spoints, regbnd)
     
     toptraps = []
@@ -95,9 +124,10 @@ function spillanalysis(grid::Matrix{<:Real};
             end
         end
     end
-    
+
     return TrapStructure{eltype(grid)}(copy(grid),
-                                       field,
+                                       flowgraph,
+                                       trap_bottoms,
                                        regions,
                                        spoints,
                                        trapvols,
@@ -107,9 +137,10 @@ function spillanalysis(grid::Matrix{<:Real};
                                        supertraps_of,
                                        subtrapgraph,
                                        building_mask,
-                                       sinks)
+                                       sinks,
+                                       cut_edge_dict)
 end
-    
+
 # ----------------------------------------------------------------------------
 function _compute_supertraps_of(lowest_regions)
     # produce a vector with one entry per lowest-level trap, giving the indices
