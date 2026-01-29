@@ -90,7 +90,7 @@ function plotgrid(grid::AbstractArray{<:Real, 2};
     end
 
     plot3Dgeometry(points, faces, uv, normals;
-                   texture=z,
+                   texture=texture,
                    colormap=colormap,
                    wireframe=wireframe,
                    colorrange=colorrange)
