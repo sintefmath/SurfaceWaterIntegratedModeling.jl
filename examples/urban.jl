@@ -204,7 +204,7 @@ set_camerapos(sc_sinks, view2...)
 # (volume per time passing through the cell).
 
 ## assume all traps already filled
-filled_traps = fill(false, numtraps(tstruct_sinks))
+filled_traps = fill(true, numtraps(tstruct_sinks))
 
 ## compute flow intensity on terrain
 precip = fill(1.0, size(tstruct_sinks.topography)...) # uniform precipitation field
