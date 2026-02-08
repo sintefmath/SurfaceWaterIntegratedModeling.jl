@@ -157,15 +157,15 @@ function grid3Dgeometry(grid::AbstractArray{<:Real, 2};
 
     # define points
     res = size(z);
-    x = LinRange(0, size(grid, 1), res[1])
-    y = LinRange(0, size(grid, 2), res[2])
+    x = LinRange(0, size(grid, 1)-1, res[1])
+    y = LinRange(0, size(grid, 2)-1, res[2])
     points = [Point3f(x[i], y[j], heightfac * z[i,j]) for i in 1:res[1], j in 1:res[2]]
     # define faces
     faces = decompose(QuadFace{Makie.GLIndex}, Tesselation(Rect(0, 0, 1, 1), res))
 
     # define parameterization
     uv = map(points) do p
-        tup = ((p[1], p[2])) ./ size(grid)
+        tup = ((p[1], p[2])) ./ (size(grid) .- 1)
         return Vec2f(tup)
     end
     # define normals
