@@ -531,6 +531,11 @@ function show_region_selection(tstruct::TrapStructure{<:Real};
     end
 
     result = zeros(Int64, size(regions)...)
+
+    # return early if no internal regions
+    if maximum(regions) < 1
+        return result
+    end
     
     # trace rivers
     if river_color != 0
@@ -548,7 +553,7 @@ function show_region_selection(tstruct::TrapStructure{<:Real};
             end
         end
     end
-        
+
     supertrap_lookup = fill(Int(0), maximum(regions))
     for s in selection
         supertrap_lookup[regmap[s]] .= s

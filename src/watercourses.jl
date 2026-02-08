@@ -52,7 +52,7 @@ function watercourses(tstruct::TrapStructure{<:Real},
     
     # The following three variables constitute the return values
     runoff = precipitation - infiltration;
-    region_accum = zeros(Float64, maximum(tstruct.regions))
+    region_accum = zeros(Float64, max(maximum(tstruct.regions), 0))
     offregion_runoff = Ref(0.0)
     
     # Compute basic flow field intensity, as if all traps were empty
