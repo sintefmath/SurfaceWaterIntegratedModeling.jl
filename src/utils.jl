@@ -667,16 +667,26 @@ function upstream_area(tstruct::TrapStructure{<:Real},
         if local_only
             return findall(tstruct.regions[:] .== region)
         else
-            uregs = all_upstream_regions(tstruct, region)
+            # topmost subtrap of the current region
+            toptrap = maximum(tstruct.supertraps_of[region])
+
+            # identify regions belonging to the upstream area of the topmost trap
             num_regions = length(tstruct.supertraps_of)
-            lookup = fill(false, num_regions)
-            lookup[uregs] .= true
+            lookup = fill(false, num_regions) # used to keep trap of upstream regions
+            
+            # loop over all subtraps of the topmost trap
+            sgraph = saturated_spillgraph(tstruct) # cache this for speedup
+            for s in tstruct.lowest_subtraps_for[toptrap]
+                lookup[all_upstream_regions(tstruct, s; sgraph=sgraph)] .= true
+            end
+            
+            # identify all grid cells belonging to any of the identified upstream regions
             tmp = fill(false, size(tstruct.topography))
             for i=1:length(tmp[:])
                 r = tstruct.regions[i]
                 tmp[i] = (r > 0) ? lookup[r] : false
             end
-            return findall(tmp[:])            
+            return findall(tmp[:])
         end
     else
         # outside a trap, the only upstream area is the one consisting of cells
@@ -730,12 +740,22 @@ that will be upstream of the specified region when all traps are filled.
 - `tstruct::TrapStructure{<:Real}`: trap structure object describing the terrain traps
 - `region::Int`: index of the region in question
 
+# Optional argument
+- `sgraph`::Tuple{Graphs.SimpleDiGraph, Vector{Int}, Dict{Int, Int}}: the spill graph,
+  as computed by `saturated_spillgraph`.  Providing it can speed up repeated calls to this
+  function.
 See also [`upstream_area`](@ref)
 """
 function all_upstream_regions(tstruct::TrapStructure{<:Real},
-                              region::Int)
+                              region::Int;
+                              sgraph::Union{Nothing,
+                                            Tuple{Graphs.SimpleDiGraph{Int},
+                                                  Vector{Int},
+                                                  Dict{Int, Int}}}=nothing
+                              )
+
+    g, vmap, vmap_inv = (sgraph == nothing) ? saturated_spillgraph(tstruct) : sgraph
     
-    g, vmap, vmap_inv = saturated_spillgraph(tstruct)
     reg_graphnode_ix = vmap_inv[tstruct.supertraps_of[region][end]]
     upstream_graph_nodes = findall(Graphs.dfs_parents(g, reg_graphnode_ix, dir=:in) .> 0)
     upstream_regions = vmap[upstream_graph_nodes]
