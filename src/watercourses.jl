@@ -1,6 +1,6 @@
 import Graphs
 
-export watercourses, saturated_spillgraph
+export watercourses, saturated_spillgraph, flow_path_from
 
 """
     watercourses(tstruct, full_traps, precipitation, infiltration)
@@ -116,26 +116,83 @@ function watercourses(tstruct::TrapStructure{<:Real},
 end
 
 # ----------------------------------------------------------------------------
-function flow_path_from(tstruct, start_node, full_traps::Vector{Bool})
-    # Stage A: if start_node not in trap, trace path downstream until we hit a
-    # trap bottom or exit domain
-    path_nodes = [start_node]
-    while true
-        ds_nodes = Graphs.outneighbors(tstruct.flowgraph, path_nodes[end])
-        if isempty(ds_nodes)
-            break;
+"""
+     flow_path_from(tstruct, start_node, full_traps)
+
+Given a node in the flow graph, trace the path downstream as far as it goes, until
+it ends in an unfilled trap bottom or exits the domain.
+
+# Arguments
+- `tstruct::TrapStructure`: a TrapStructure object containing all the information from
+                            the topographical analysis, as returned by the
+                            `spillanalysis` function.
+- `start_node::Int`: the node in the flow graph from which to start tracing the path
+                     downstream.  This should be a linear index of a cell in the grid.
+- `full_traps::Vector{Int}`: a vector with the indices of the traps that are currently full.
+                             If left empty, it will be substituted by an empty vector,
+                             meaning that all traps are considered full.
+
+# Returns
+- `paths`: a vector of vectors, representing the path segments traced downstream from
+           the startpoint and between the traps encountered along the way.
+- `downstream_filled_traps`: a vector with the indices of the full traps encountered
+                             along the way.
+
+"""
+function flow_path_from(tstruct::TrapStructure{<:Real},
+                        start_node::Int;
+                        full_traps::Union{Nothing, Vector{Int}}=nothing)
+
+    # helper function tracing a path donwstream from a given node until we hit a
+    # trap bottom or exit the domain
+    function _trace_path(node)
+        path = [node]
+        while true
+            ds_nodes = Graphs.outneighbors(tstruct.flowgraph, path[end])
+            if isempty(ds_nodes)
+                break;
+            end
+            @assert length(ds_nodes) == 1
+            push!(path, ds_nodes[1])
         end
-        @assert length(ds_nodes) == 1
-        push!(path_nodes, ds_nodes[1])
+        return path
     end
 
-    # Stage B: if current trap not full, stop, otherwise, determine sequence of
-    # filled traps downstream until we hit an unfilled trap or exit domain
-    downstream_filled_traps = Vector{Int64}() # list of filled traps downstream
-    # @ todo: implement
+    cur_node = start_node
+    paths = Vector{Vector{Int64}}() # list of paths traced downstream from start_node
+    downstream_filled_traps = Vector{Int64}() # list of filled traps downstream of start_node
+    while cur_node > 0 
+        push!(paths, _trace_path(cur_node))
 
-    # return list of nodes identified in (A), and list of filled traps in (B)
-    
+        cur_reg = tstruct.regions[paths[end][end]] # region where we ended up
+        if cur_reg <= 0
+            # we ended up in a region that spills out of the domain, so we stop
+            break
+        end
+
+        # find the uppermost trap that is full
+        supertraps = tstruct.supertraps_of[cur_reg]
+        full_supertraps = full_traps === nothing ? supertraps :
+                                     filter(x -> x ∈ full_traps, supertraps)
+        if isempty(full_supertraps)
+            # we ended up in an unfilled trap, so we stop
+            break
+        else
+            # we are spilling into a full trap, so we need to continue downstream
+            largest_full_supertrap = maximum(full_supertraps)
+            @assert largest_full_supertrap == full_supertraps[end] # should be sorted
+            push!(downstream_filled_traps, largest_full_supertrap)
+
+            # remove any cells in the last path that are covered by the
+            # footprint of this trap, since we are now spilling into the trap
+            paths[end] = setdiff(paths[end], tstruct.footprints[largest_full_supertrap])
+
+            # find the node from where to continue tracing downstream.
+            cur_node = tstruct.spillpoints[largest_full_supertrap].downstream_region_cell
+        end
+    end
+
+    return paths, downstream_filled_traps
 end
 
 

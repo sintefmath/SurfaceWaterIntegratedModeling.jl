@@ -603,35 +603,75 @@ end
     end
 end
 
-# ----------------------------------------------------------------------------
-@inline function _downstream_cell(spillfield::Matrix{Int8}, cix::CartesianIndex{2})
+# # ----------------------------------------------------------------------------
+# @inline function _downstream_cell(spillfield::Matrix{Int8}, cix::CartesianIndex{2})
 
-    dir = spillfield[cix]
-    if dir < 0
-        return cix, true; # finished
-    end
+#     dir = spillfield[cix]
+#     if dir < 0
+#         return cix, true; # finished
+#     end
 
-    cix =
-        (dir == 0) ? cix + CartesianIndex(-1, 0) :
-        (dir == 1) ? cix + CartesianIndex(1, 0) :
-        (dir == 2) ? cix + CartesianIndex(0, -1) :
-        (dir == 3) ? cix + CartesianIndex(0, 1) :
-        (dir == 4) ? cix + CartesianIndex(-1, -1) :
-        (dir == 5) ? cix + CartesianIndex(1, 1) :
-        (dir == 6) ? cix + CartesianIndex(1, -1) :
-        (dir == 7) ? cix + CartesianIndex(-1, 1) :
-        cix
+#     cix =
+#         (dir == 0) ? cix + CartesianIndex(-1, 0) :
+#         (dir == 1) ? cix + CartesianIndex(1, 0) :
+#         (dir == 2) ? cix + CartesianIndex(0, -1) :
+#         (dir == 3) ? cix + CartesianIndex(0, 1) :
+#         (dir == 4) ? cix + CartesianIndex(-1, -1) :
+#         (dir == 5) ? cix + CartesianIndex(1, 1) :
+#         (dir == 6) ? cix + CartesianIndex(1, -1) :
+#         (dir == 7) ? cix + CartesianIndex(-1, 1) :
+#         cix
 
-    finished = !( (1 <= cix[1] <= size(spillfield, 1)) && (1 <= cix[2] <= size(spillfield, 2)) )
+#     finished = !( (1 <= cix[1] <= size(spillfield, 1)) && (1 <= cix[2] <= size(spillfield, 2)) )
 
-    return cix, finished
+#     return cix, finished
     
-end
+# end
+
+# # ----------------------------------------------------------------------------
+# @inline function _downstream_cell(spillfield::Matrix{Int8}, lix::Int)
+#     cix, finished = _downstream_cell(spillfield, CartesianIndices(spillfield)[lix])
+#     return (finished ? -1 : LinearIndices(spillfield)[cix], finished)
+# end
+
 
 # ----------------------------------------------------------------------------
-@inline function _downstream_cell(spillfield::Matrix{Int8}, lix::Int)
-    cix, finished = _downstream_cell(spillfield, CartesianIndices(spillfield)[lix])
-    return (finished ? -1 : LinearIndices(spillfield)[cix], finished)
+"""
+        show_downstream_path(tstruct, startpoint; trap_color=2, river_color=3)
+
+Show the downstream path from a given point in the terrain grid, as traced on a raster.
+
+The path is traced by following the flow directions from the given starting
+point, as given by the flow graph in `tstruct`.  The path is shown on a raster
+grid, where the cells along the path are colored with `river_color`.  If the
+path passes through any traps, those are colored with `trap_color`.
+The result is returned as a matrix of integers, where the integers can be
+thought of as 'colors'.  Cells along the downstream path are colored with
+`river_color`, while cells belonging to traps along the path are colored with
+`trap_color`.  Other cells are attributed the value zero.
+
+# Arguments
+- `tstruct::TrapStructure{<:Real}`: trap structure object describing the terrain
+- `startpoint::Int`: linear index to the terrain grid cell from which the downstream path should be traced
+- `trap_color::Int`: integer to represent trap cells along the path (default: 2)
+- `river_color::Int`: integer to represent river cells along the path (default: 3)
+"""
+function show_downstream_path(tstruct, startpoint; trap_color=2, river_color=3)
+
+    paths, traps = flow_path_from(tstruct, startpoint)
+
+    result = zeros(Int64, size(tstruct.topography)...)
+
+    for p in paths
+        for cix in p
+            result[cix] = river_color
+        end
+    end
+    for t in traps
+        footprint = tstruct.footprints[t]
+        result[trapcells] .= trap_color
+    end
+    return result
 end
 
 # ----------------------------------------------------------------------------
