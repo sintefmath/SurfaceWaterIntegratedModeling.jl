@@ -116,6 +116,30 @@ function watercourses(tstruct::TrapStructure{<:Real},
 end
 
 # ----------------------------------------------------------------------------
+function flow_path_from(tstruct, start_node, full_traps::Vector{Bool})
+    # Stage A: if start_node not in trap, trace path downstream until we hit a
+    # trap bottom or exit domain
+    path_nodes = [start_node]
+    while true
+        ds_nodes = Graphs.outneighbors(tstruct.flowgraph, path_nodes[end])
+        if isempty(ds_nodes)
+            break;
+        end
+        @assert length(ds_nodes) == 1
+        push!(path_nodes, ds_nodes[1])
+    end
+
+    # Stage B: if current trap not full, stop, otherwise, determine sequence of
+    # filled traps downstream until we hit an unfilled trap or exit domain
+    downstream_filled_traps = Vector{Int64}() # list of filled traps downstream
+    # @ todo: implement
+
+    # return list of nodes identified in (A), and list of filled traps in (B)
+    
+end
+
+
+# ----------------------------------------------------------------------------
 """
     saturated_spillgraph(tstruct)
 
