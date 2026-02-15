@@ -702,7 +702,10 @@ function upstream_area(tstruct::TrapStructure{<:Real},
     # If the point is within a trap, the whole spill region is considered upstream
     in_trap = (region > 0) &&
         (tstruct.topography[point] <=
-         tstruct.spillpoints[tstruct.supertraps_of[region][end]].elevation)
+        tstruct.spillpoints[tstruct.supertraps_of[region][end]].elevation)
+    # convert poitn to cartesian coordinate
+    cpt = CartesianIndices(tstruct.topography)[point]
+    is_sink = (cpt ∈ tstruct.sinks)
     if in_trap
         if local_only
             return findall(tstruct.regions[:] .== region)
@@ -728,17 +731,30 @@ function upstream_area(tstruct::TrapStructure{<:Real},
             end
             return findall(tmp[:])
         end
+    elseif is_sink
+        # @@ ideally this should be restructured together with the outside-trap
+        # case, as there is some redundancy.
+        if local_only
+            return findall(tstruct.regions[:] .== region)
+        else
+            utraps = filter(x -> tstruct.spillpoints[x].downstream_region == region,
+                            1:length(tstruct.spillpoints))
+            ucells = findall(tstruct.regions[:] .== region)
+            for ut in utraps
+                append!(ucells,
+                        upstream_area(tstruct,
+                                      tstruct.spillpoints[ut].current_region_cell,
+                                      local_only=false))
+            end
+        end
+        return unique(ucells)
     else
+        
         # outside a trap, the only upstream area is the one consisting of cells
         # spilling directly into the current cell
-        
-        # @@ This computation is wasteful and should be restructured later, as
-        # we are only interested in a single region.
-        # sgraph = compute_spillfield_graph(tstruct.spillfield)
-        sgraph = tstruct.flowgraph
 
         # upstream cells in region
-        ucells = findall(Graphs.dfs_parents(sgraph, point, dir=:in) .> 0) 
+        ucells = findall(Graphs.dfs_parents(tstruct.flowgraph, point, dir=:in) .> 0) 
         
         if local_only
             return ucells
