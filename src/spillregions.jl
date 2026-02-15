@@ -95,10 +95,15 @@ function spillregions(spillfield::Matrix{Int8};
 
     # construct spillfield graph
 
-    # remove self-loops and edges connecting nodes within the same region
-    edge_filt = filter(a->(a[1] != a[2]), edges)
+    # remove self-loops 
+    #edge_filt = filter(a->(a[1] != a[2]), edges)
+    #edge_filt = Set(e for e in edges if e[1] != e[2])
+
+    # create graph but skip edges representing self-loops
+    g = Graphs.SimpleDiGraph([Graphs.SimpleEdge{Int64}((e[1], e[2])) for e in edges
+                                  if e[1] != e[2]])
     
-    g = Graphs.SimpleDiGraph([Graphs.SimpleEdge{Int64}((e[1], e[2])) for e in edge_filt])
+    #g = Graphs.SimpleDiGraph([Graphs.SimpleEdge{Int64}((e[1], e[2])) for e in edge_filt])
     
     return regions, g
     
@@ -334,7 +339,7 @@ function _renumerate_regions!(regions::Matrix{Int64}; exitregions=[],
     
     regnums = unique(regions)
     regnums = setdiff(regnums, [0]); # remove 0, which represents masked areas
-    
+
     new_numbering = zeros(Int64, length(regnums))
 
     insidereg = .!in.(regnums, Ref(exitregions))
@@ -567,12 +572,15 @@ function _spillfield_flow_edges!(edges, spillfield)
 end
 
 # ----------------------------------------------------------------------------
-# Identify all grid edges that connects two neighbor trap bottoms.  If two trap
+# Identify all grid edges that connects two neighbor trap bottoms/sinks.  If two trap
 # bottoms are connected as neighbors, they have the same z-value, and are part
 # of the same 'bottom point' of a trap.
 function _flat_zone_connecting_edges!(edges, M, usediags::Bool=true)
 
-    nodeixs = findall(M .== -1); # locate all cells marked as trap bottoms
+    # trap bottoms are -1; sinks are -3
+    nodeixs = findall(x->(x == -1 || x == -3), M)    
+
+    #@nodeixs = findall(M .== -1); # locate all cells marked as trap bottoms or sinks
 
     num_nodes = length(nodeixs)
 
@@ -594,7 +602,7 @@ function _flat_zone_connecting_edges!(edges, M, usediags::Bool=true)
             if ix_endnode[1] <= IMax[1] && ix_endnode[2] <= IMax[2] &&
                ix_endnode[1] >= IMin[1] && ix_endnode[2] >= IMin[2]
                 # we found a neighbor to this node, add the edge to edgelist
-                if M[ix_endnode] == -1
+                if M[ix_endnode] == -1 || M[ix_endnode] == -3
                     n1 = linear[ix_startnode]
                     n2 = linear[ix_endnode]
                     push!(edges, (n1, n2))
