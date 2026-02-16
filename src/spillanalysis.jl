@@ -74,7 +74,7 @@ function spillanalysis(grid::Matrix{<:Real};
     cut_edges = Set{Tuple{CartesianIndex{2}, CartesianIndex{2}}}()
     for b in barriers
         @assert length(b) >= 2 "Each barrier must have at least two points"
-        e = polyline_grid_intersections(b.I, usediags=usediags)
+        e = polyline_grid_intersections([p.I for p in b], usediags=usediags)
         union!(cut_edges, e)
     end
     cut_edge_dict = edgeset2dict(cut_edges)
