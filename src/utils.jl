@@ -918,6 +918,9 @@ function _subdivide_polyline(pl::Vector{Tuple{Int, Int}})
     for i in 1:length(pl)-1
         Dx = pl[i+1][1] - pl[i][1]
         Dy = pl[i+1][2] - pl[i][2]
+        if Dx == 0 && Dy == 0
+            continue
+        end
         subdiv = gcd(abs(Dx), abs(Dy))
         Dx_step = Dx ÷ subdiv
         Dy_step = Dy ÷ subdiv
