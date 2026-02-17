@@ -628,12 +628,13 @@ function _recompute_local_flow!(dir, slope, grid, lengths,
             end
             
             delta = d > 3 ? dxy : (d > 1 ? dy : dx)
-            local_slope = (grid[cell_ix] - grid[neigh_ix]) / delta
+            local_slope = (grid[neigh_ix] - grid[cell_ix]) / delta
 
-            if 0.0 <= local_slope < best_slope
+            if local_slope < 0 && local_slope < best_slope
                 best_slope = local_slope
                 best_dir = d
             end
+
         end
     end
 
