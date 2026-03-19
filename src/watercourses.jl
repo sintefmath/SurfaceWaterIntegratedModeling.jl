@@ -189,6 +189,11 @@ function flow_path_from(tstruct::TrapStructure{<:Real},
 
             # find the node from where to continue tracing downstream.
             cur_node = tstruct.spillpoints[largest_full_supertrap].downstream_region_cell
+
+            # if the spillpoint of the trap is directly spilling out of the domain
+            if tstruct.spillpoints[largest_full_supertrap].downstream_region == 0
+                break
+            end
         end
     end
 
