@@ -4,7 +4,8 @@ import Roots
 export flatten_grid!, identify_flat_areas, toplevel_traps,
     show_region_selection, all_subtraps_of, interpolate_timeseries,
     trap_states_at_timepoints, compute_spillfield_graph, all_upstream_regions,
-    upstream_area, polyline_grid_intersections, edgeset2dict, reconstruct_spillfield
+    upstream_area, current_upstream_area,
+    polyline_grid_intersections, edgeset2dict, reconstruct_spillfield
 
 # ----------------------------------------------------------------------------
 """
@@ -674,6 +675,156 @@ function show_downstream_path(tstruct, startpoint; trap_color=2, river_color=3)
     return result
 end
 
+
+# ----------------------------------------------------------------------------
+function current_upstream_area(tstruct::TrapStructure{<:Real}, point, tstates; recur=1)
+    if recur >= 10000 # @@@ stack overflow guard
+        return []
+    end
+    
+    submerged, puddlecells = _is_submerged(tstruct, point, tstates)
+    #@show submerged
+    
+    if !submerged
+        # if we are not submerged, the only upstream area is the one consisting of
+        # cells spilling directly into the current cell
+        result = findall(Graphs.dfs_parents(tstruct.flowgraph, point, dir=:in) .> 0)
+    else
+        # all cells that immediately spills into the puddle, i.e. the whole local region
+        puddle_regions = Set(tstruct.regions[puddlecells])
+        result = collect(findall(in(puddle_regions), tstruct.regions[:]))
+    end
+
+    # add contribution of upstream spill regions that actively spill into the current
+    utraps = _in_dynamic_spillpath(tstruct, result, tstates)
+    #@show utraps
+    for ut in utraps
+        #@show ut
+        spillpoint = tstruct.spillpoints[ut].current_region_cell
+        append!(result, current_upstream_area(tstruct, spillpoint, tstates, recur=recur+1))
+    end
+    
+    return unique(result)
+end
+
+function _trap_stack_of(tstruct, pt)
+
+    # check if the cell is in a region at all.  If not, it cannot be in a trap,
+    # and we can return nothing.
+    region = tstruct.regions[pt]
+    if region <= 0
+        return []
+    end
+
+    region_supertraps = tstruct.supertraps_of[region]
+
+    # return stack of traps whose spill points are above the current point
+    pt_z = tstruct.topography[pt]
+    keep = pt_z .< [x.elevation for x in tstruct.spillpoints[region_supertraps]]
+
+    return region_supertraps[keep]
+    # #@show region_supertraps
+    # trap_stack = []
+    
+    
+    # for s in length(region_supertraps):-1:1
+    #     if pt_z > tstruct.spillpoints[region_supertraps[s]].elevation
+    #         # not within this supertrap, so not in any of its subtraps either
+    #         break
+    #     end
+    #     push!(trap_stack, region_supertraps[s])
+    # end
+    # return trap_stack
+end
+
+function _is_submerged(tstruct, pt, tstates)
+
+    ltrap = _trap_stack_of(tstruct, pt)
+    #@show ltrap
+    if isempty(ltrap)
+        # the cell is not within a trap, so it cannot be submerged
+        return false, nothing
+    end    
+    # we are in a trap, but is the cell submerged?  We can check this by looking
+    # at the current fill state of the trap, and comparing it to the current
+    # water level in it.
+    filled_traps = tstates[1]
+    trap_water_content = tstates[2]
+
+    # find the uppermost trap in the stack that contains water
+    ix = findlast(trap_water_content[ltrap] .> 0)
+    if ix == nothing
+        # no trap in the stack contains water, so we are not submerged.
+        return false, nothing
+    end
+
+    target_trap = ltrap[ix]
+
+    if filled_traps[target_trap]
+        # we are submerged in this trap, and no higher trap contains water, so
+        # puddle is limited to the footprint of this trap
+        return true, tstruct.footprints[target_trap]
+    end
+    
+    # If we got here, we are in a trap that is partially filled with water.  We
+    # need to determine whether the waterlevel submerges the point in question.
+    z_spill = tstruct.spillpoints[target_trap].elevation
+    vol_remaining =
+        tstruct.trapvolumes[target_trap] -
+        tstruct.subvolumes[target_trap] -
+        trap_water_content[target_trap]
+
+    rem_vol_fun =
+        z-> sum(z_spill .- max.(z, tstruct.topography[tstruct.footprints[target_trap]]))
+
+    FAC = 1-sqrt(eps()) # Avoid problem with bracketing interval due to roundoff error
+    bracket = (minimum(tstruct.topography[tstruct.footprints[target_trap]]), z_spill) 
+
+    z_cur = Roots.find_zero(z -> rem_vol_fun(z) - vol_remaining*FAC, bracket)
+
+    if tstruct.topography[pt] < z_cur
+        # the cell is submerged, and the 'puddle' consists of all cells in the trap
+        # with elevation below z_cur
+        footprint = tstruct.footprints[target_trap]
+        puddle_cells = footprint[tstruct.topography[footprint] .< z_cur]
+        return true, puddle_cells
+    else
+        # the cell is not submerged, so we are done
+        return false, nothing
+    end
+end
+
+function _in_dynamic_spillpath(tstruct, cells, tstates)
+    
+    # Check if there are any filled traps that are spilling into one of the
+    # cells, while not part of the cells themselves.
+
+    # @ Note: the recurring loop through spillpoints may be an efficiency
+    # bottleneck if the recursion runs deeply, and there are many spillpoints.
+    # If this turns out to be a problem, we should optimize by precomputing
+    # trap spillgraph and pass it along.
+
+    # To avoid having to search trhough all cells each time (they may be numerous)
+    # we first identify the regions they represent, so we can do a quick screening
+    # first
+    regions = unique(tstruct.regions[cells])
+
+    # Now we can check for each filled trap if it is spilling into any of the regions
+    filled_traps = tstates[1]
+    spillpoints = tstruct.spillpoints
+    utraps = []
+    for i in 1:length(spillpoints)
+
+        if (filled_traps[i] &&
+            spillpoints[i].downstream_region > 0 &&
+            spillpoints[i].downstream_region ∈ regions &&
+            spillpoints[i].downstream_region_cell ∈ cells &&
+            spillpoints[i].current_region_cell ∉ cells)
+            push!(utraps, i)
+        end
+    end
+    return utraps
+end
 # ----------------------------------------------------------------------------
 """
     upstream_area(tstruct, point, local_only=true)
@@ -703,7 +854,7 @@ function upstream_area(tstruct::TrapStructure{<:Real},
     in_trap = (region > 0) &&
         (tstruct.topography[point] <=
         tstruct.spillpoints[tstruct.supertraps_of[region][end]].elevation)
-    # convert poitn to cartesian coordinate
+    # convert point to cartesian coordinate
     cpt = CartesianIndices(tstruct.topography)[point]
     is_sink = (cpt ∈ tstruct.sinks)
     if in_trap

@@ -181,11 +181,19 @@ function flow_path_from(tstruct::TrapStructure{<:Real},
             # we are spilling into a full trap, so we need to continue downstream
             largest_full_supertrap = maximum(full_supertraps)
             @assert largest_full_supertrap == full_supertraps[end] # should be sorted
+            if largest_full_supertrap ∈ downstream_filled_traps
+                # trap spilling into already-visited trap.  These are both subtraps
+                # of the same, unfilled supertrap, so the path ends here
+                break
+            end
             push!(downstream_filled_traps, largest_full_supertrap)
 
             # remove any cells in the last path that are covered by the
             # footprint of this trap, since we are now spilling into the trap
             paths[end] = setdiff(paths[end], tstruct.footprints[largest_full_supertrap])
+            if isempty(paths[end])
+                pop!(paths)
+            end
 
             # find the node from where to continue tracing downstream.
             cur_node = tstruct.spillpoints[largest_full_supertrap].downstream_region_cell
