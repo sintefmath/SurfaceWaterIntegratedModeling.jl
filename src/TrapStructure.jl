@@ -108,7 +108,9 @@ end
 
 # ----------------------------------------------------------------------------
 function regioncells(regions::Matrix{Int})
-    # returns a vector of vectors, where the i'th entry is a vector of the linear indices of all cells in region i
+    # returns a vector of vectors, where the i'th entry is a vector of the
+    # linear indices of all cells in region i.  Does not consider regions with
+    # zero or negative numbers (out-of-domain regions).
     numregions = maximum(regions)
     cells = [Int[] for i in 1:numregions]
 

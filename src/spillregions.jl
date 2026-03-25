@@ -61,7 +61,7 @@ function spillregions(spillfield::Matrix{Int8};
                          domain=domain,
                          usediags=usediags,
                          cut_edges=cut_edges_bidir,
-                         culverts=culverts)
+                         culverts=directed_culverts)
     else
         @assert false "proper parallel implementation of spillregions not yet complete."
         # @@ TODO What needs to be done is ensure that edges crossing tile boundaries
@@ -76,7 +76,7 @@ function spillregions(spillfield::Matrix{Int8};
                              domain=tiles[i],
                              usediags=usediags,
                              cut_edges=cut_edges_bidir,
-                             culverts=culverts)
+                             culverts=directed_culverts)
         end
 
         xsplits = splits[1]
@@ -86,9 +86,9 @@ function spillregions(spillfield::Matrix{Int8};
                              xsplits[2:end-1], ysplits[2:end-1])
     end
 
-    # Eliminate flat traps if requested (i.e. topoggraphy grid supplied)
+    # Eliminate flat traps if requested (i.e. topography grid supplied)
     if grid != nothing
-        _eliminate_flat_traps!(regions, spillfield, grid, culverts, cut_edges, usediags)
+        _eliminate_flat_traps!(regions, edges, spillfield, grid, directed_culverts, cut_edges, usediags)
     end
     
     # Identifying exit nodes (nodes whose stream direction points out of the
@@ -272,7 +272,8 @@ function _process_domain!(regions::Matrix{Int64},
                           usediags::Bool=true,
                           domain=nothing,
                           cut_edges::Set{Tuple{Int, Int}},
-                          culverts::Vector{Tuple{CartesianIndex{2}, CartesianIndex{2}}})
+                          directed_xculverts::Vector{Tuple{CartesianIndex{2},
+                                                           CartesianIndex{2}}})
 
     spilldomain = view(spillfield, domain.xrange, domain.yrange)
     regionsdomain = view(regions, domain.xrange, domain.yrange)
@@ -292,7 +293,7 @@ function _process_domain!(regions::Matrix{Int64},
     # (p2) elevation, and remove any edges flowing out from p1.
     LI = LinearIndices(size(spilldomain))
     edges_to_remove = Set{Tuple{Int, Int}}()
-    for c in culverts
+    for c in directed_culverts
         p1, p2 = LI[c[1]], LI[c[2]]
         # identify any edges flowing out from p1
         push!(edges_to_remove, filter(e->e[1] == p1, edges)...)
@@ -624,12 +625,14 @@ function _flat_zone_connecting_edges!(edges, M, usediags::Bool=true)
 end
 
 # ----------------------------------------------------------------------------
-function _eliminate_flat_traps!(regions, spillfield, grid,
+# This function may modify 'regions' and 'edges'
+function _eliminate_flat_traps!(regions, edges, spillfield, grid,
                                 culverts::Vector{Tuple{CartesianIndex{2}, CartesianIndex{2}}},
                                 cut_edges::Dict{CartesianIndex{2}, Vector{CartesianIndex{2}}},
                                 usediags::Bool)
-
-    bottomcells = findall(spillfield .== -1)
+    spillfield_modif = copy(spillfield)
+    spillfield_modif[x[1] for x in culverts] .= 10 # culvert inlets should not be regarded trap bottoms
+    bottomcells = findall(spillfield_modif .== -1)
     cartind = CartesianIndices(size(spillfield))
     nx, ny = size(spillfield)...
 
@@ -647,14 +650,13 @@ function _eliminate_flat_traps!(regions, spillfield, grid,
             cind[1] < nx && cind[2] < ny && push!(neighs, cind + CartesianIndex( 1, 1))
         end
         
-        # adjust for possible barriers or culverts
-        if !
-        TODO
-        
+        # adjust for possible barriers (if cell->neighbor is a cut edge, then
+        # this neighbor should not be considered)
+        neighs = filter(n -> !((cell, n) in cut_edges), neighs)
     end
-
     
     region_changes = Vector{Tuple{Int, Int}}()
+    outlet_affected = Dict{Int, Vector{CartesianIndex{2}}}()
     for cell ∈ bottomcells
         neighs = _get_active_neighbors(cell)
         for n in neighs
@@ -662,13 +664,25 @@ function _eliminate_flat_traps!(regions, spillfield, grid,
                 # The neighbor spills out of the trap, with an elevation not higher than
                 # the bottom cell.  This trap must have zero volume.
                 push!(region_changes, (regions[cell], regions[n]))
+
+                # identify all bottomcells that belong to this region, and remove
+                # them from the list of bottomcells to be processed
+                affected_bottomcells = bottomcells[regions[bottomcells] .== regions[cell]]
+                outlet_affected[n] = affected_bottomcells
+                bottomcells = setdiff(bottomcells, affected_bottomcells)
+                break # it's enough to have identified one exit point
             end
         end
     end
 
+    for n in keys(outlet_affected)
+        append!(edges, _construct_outlet_flowpaths(n, outlet_affected[n],
+                                                   usediags, size(spillfield)))
+    end
+    
     regcells = regioncells(regions) # make lookups faster
     for i in 1:length(region_changes)
-        from, to = region_changes[i]...;
+        from, to = region_changes[i]...
         append!(regcells[to], regcells[from])
         empty!(regcells[from])
         for j in i+1:length(region_changes)
@@ -679,5 +693,57 @@ function _eliminate_flat_traps!(regions, spillfield, grid,
     end
     for r_ix = 1:length(regcells)
         regions[regcells[r_ix]] .= r_ix
+    end
+end
+
+function _construct_outlet_flowpaths(outlet_cell::CartesianIndex{2},
+                                   affected_bottomcells::Vector{CartesianIndex{2}},
+                                   usediags::Bool, gridsize)
+    # for each of the affected bottomcells, we need to construct the shortest
+    # flow path to the outlet cell.  This flow path should pass entirely through
+    # other affected bottomcells.  Flow can be along x-axis and y-axis, and
+    # optionally along diagonals as well.
+    # Return a list of all edges thus generated.
+
+    covered = fill(false, size(affected_bottomcells))
+    edges = Vector{Tuple{Int, Int}}()
+    active_set = [outlet_cell]
+    while !all(covered)
+        # find the set of uncovered neighbors to the current active set
+        next_active_set = Vector{CartesianIndex{2}}()
+        for c in active_set
+            neighs = _get_uncovered_neighbors(c, affected_bottomcells, covered, usediags)
+            # add edges
+            target = LinearIndices(gridsize)[c]
+            for n in neighs
+                from = LinearIndices(gridsize)[affected_bottomcells[neighs]]
+                push!(edges, (from, target))
+                covered[n] = true
+                push!(next_active_set, affected_bottomcells[n])
+            end
+        end
+        if next_active_set == []
+            @assert all(covered) "Could not find flow path from some bottomcells to outlet cell."
+            break
+        end
+        active_set = next_active_set
+    end
+end
+
+function _get_uncovered_neighbors(target_cell, other_cells, covered, usediags)
+    result = Vector{Int}()
+    for c in other_cells
+        if !covered[c] && _are_neighbors(target_cell, c, usediags)
+            push!(result, c)
+        end
+    end
+
+    function _are_neighbors(c1, c2, usediags)
+        if usediags
+            return abs(c1[1] - c2[1]) <= 1 && abs(c1[2] - c2[2]) <= 1
+        else
+            return (c1[1] == c2[1] && abs(c1[2] - c2[2]) == 1) ||
+                   (c1[2] == c2[2] && abs(c1[1] - c2[1]) == 1)
+        end
     end
 end

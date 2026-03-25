@@ -87,10 +87,13 @@ function spillanalysis(grid::Matrix{<:Real};
                               building_mask=building_mask)
 
     trap_bottoms = findall(field .== -1)
+    # remove any trap bottoms that are the first point of a culvert
+    trap_bottoms = setdiff(trap_bottoms, [x[1] for x in directed_culverts])
     
     verbose && println("Entering spillregions")
     regions, flowgraph = spillregions(field, usediags=usediags,
-                                      cut_edges=cut_edge_dict, culverts=culverts)
+                                      grid=grid, # for eliminating 'flat' traps
+                                      cut_edges=cut_edge_dict, culverts=directed_culverts)
     
     verbose && println("Entering spillpoints")
     spoints, regbnd = spillpoints(grid, regions, usediags=usediags,
