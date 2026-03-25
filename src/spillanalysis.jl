@@ -1,3 +1,4 @@
+import Graphs
 export spillanalysis
 
 # all outside regions represented as -1 if true
@@ -94,6 +95,9 @@ function spillanalysis(grid::Matrix{<:Real};
     verbose && println("Entering spillpoints")
     spoints, regbnd = spillpoints(grid, regions, usediags=usediags,
                                   cut_edges=cut_edge_dict)
+
+    # verbose && println("Eliminating flat traps")
+    # _eliminate_flat_traps!(regions, spoints, flowgraph, trap_bottoms, grid)
     
     verbose && println("entering sshierarchy")
     subtrapgraph, lowest_regions = sshierarchy!(grid, regions, spoints, regbnd)
@@ -213,3 +217,99 @@ function _compute_trap_footprints(heights, lowest_subtraps_for, regions,
     end
     return footprints
 end
+
+# # ----------------------------------------------------------------------------
+# # Helper function to eliminate flat traps (traps with spill points at the same
+# # elevation as their bottoms). This is not necessary for the spillpoint
+# # algorithms to work, but reduces unnecessary complexity in the trap structure
+# # and can speed up subsequent computations.
+# # In this function, the following arguments are mutable:
+# # - regions
+# # - spillpoints
+# # - flowgraph
+# # - trap_bottoms
+# # Note that the `grid` argument is not mutable, but is needed to determine the
+# # elevation of the spill points and trap bottoms.
+# function _eliminate_flat_traps!(regions, spillpoints, flowgraph, trap_bottoms, grid)
+
+#     lowest_elevations = fill(-Inf, length(spillpoints))
+#     for tb in trap_bottoms
+#         reg = regions[tb]
+#         if reg > 0
+#             lowest_elevations[reg] = grid[tb]
+#         end
+#     end
+#     @assert all(lowest_elevations .> -Inf) "All traps should be covered."
+#     @assert length(spillpoints) == length(lowest_elevations) "One spill point per trap."
+    
+#     traps_to_eliminate = []
+#     # loop through regions and identify those that are 'flat' and should be eliminated
+#     for reg in 1:length(spillpoints)
+#         if isapprox(lowest_elevations[reg], spillpoints[reg].elevation; atol=1e-6)
+#              push!(traps_to_eliminate, reg)
+#         end
+#     end
+#     println("Number of traps to eliminate: ", length(traps_to_eliminate)) # @@
+    
+#     # loop through connections in flowgraph, and reconnect all bottom cells in
+#     # flat traps directly to the corresponding spillpoint cell (ensure that existing
+#     # connections are eliminated)
+#     linear = LinearIndices(size(grid))
+#     tb_to_remove = []
+#     for tb_ix in 1:length(trap_bottoms)
+#         tb = trap_bottoms[tb_ix]
+#         tb_linear = linear[tb]
+#         reg = regions[tb]
+#         if reg > 0 && reg ∈ traps_to_eliminate
+#             sp_cell = spillpoints[reg].current_region_cell
+#             target = (tb_linear == sp_cell) ? spillpoints[reg].downstream_region_cell : sp_cell
+
+#             # delete all outgoing edges from tb
+#             outneighs = Graphs.outneighbors(flowgraph, tb_linear)
+#             for neighbor in outneighs
+#                 Graphs.rem_edge!(flowgraph, tb_linear, neighbor)
+#             end
+#             # add the new, unique edge
+#             # @@ If we want contiguous spill paths, we can replace the below line with
+#             # an algorithm determining the correct path
+#             Graphs.add_edge!(flowgraph, tb_linear, target)
+
+#             push!(tb_to_remove, tb_ix)
+#         end
+#     end
+#     deleteat!(trap_bottoms, tb_to_remove)
+        
+#     # Loop through traps to eliminate, set the associated spill region equal to
+#     # the downstream region, update flowgraph, remove the spillpoint, and
+#     # renumerate all traps/regions.
+#     regcells = regioncells(regions) # make lookups quicker
+    
+#     for reg in traps_to_eliminate
+#         downstream_reg = spillpoints[reg].downstream_region
+
+#         # assign cells from region 'reg' to downstream region
+#         append!(regcells[downstream_reg], regcells[reg])
+#         empty!(regcells[reg])
+
+#     end
+
+#     # delete entries correpsonding to eliminated cells, and regenerate (positive
+#     # entries of) regions matrix
+#     deleteat!(regcells, traps_to_eliminate)
+#     for r_ix = 1:length(regcells)
+#         regions[regcells[r_ix]] .= r_ix
+#     end
+
+#     # update spillpoint list (including recomputing the downstream regions of
+#     # spillpoints, as they might have changed
+#     deleteat!(spillpoints, traps_to_eliminate)
+#     for sp_ix = 1:length(spillpoints)
+#         target_region = regions[spillpoints[sp_ix].downstream_region_cell]
+#         if spillpoints[sp_ix].downstream_region != target_region
+#             spillpoints[sp_ix] = Spillpoint(target_region,
+#                                             spillpoints[sp_ix].current_region_cell,
+#                                             spillpoints[sp_ix].downstream_region_cell,
+#                                             spillpoints[sp_ix].elevation)
+#         end
+#     end
+# end

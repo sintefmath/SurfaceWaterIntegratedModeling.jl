@@ -105,3 +105,20 @@ function parentof(tstruct::TrapStructure, trap_ix::Int)
     @assert length(out) <= 1
     return isempty(out) ? nothing : out[1]
 end
+
+# ----------------------------------------------------------------------------
+function regioncells(regions::Matrix{Int})
+    # returns a vector of vectors, where the i'th entry is a vector of the linear indices of all cells in region i
+    numregions = maximum(regions)
+    cells = [Int[] for i in 1:numregions]
+
+    # iterate through cells in 'regions' and collect the indices of cells for each region
+    for idx in eachindex(regions)
+        region_ix = regions[idx]
+        if region_ix > 0
+            push!(cells[region_ix], idx)
+        end
+    end
+    
+    return cells
+end

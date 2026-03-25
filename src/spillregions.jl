@@ -7,7 +7,7 @@ _SPILLFIELD_INACTIVE_FLAG = -10; # could in principle be any integer outside the
                                  # range [-2:7]
 # ----------------------------------------------------------------------------
 """
-    spillregions(spillfield; usediags=true, tiling=nothing,
+    spillregions(spillfield; usediags=true, tiling=nothing, grid=nothing,
                  cut_edges=Dict{CartesianIndex{2}, Vector{CartesianIndex{2}}}(),
                  culverts=Vector{Tuple{CartesianIndex{2}, CartesianIndex{2}}}())
 
@@ -28,6 +28,9 @@ exit the domain are assigned negative region numbers.
       tuple specifying number of 'tiles' to subdivide surface in for parallel 
       processing.  Default is (1,1), which means the whole surface is treated
       as a single tile (no parallel processing).
+- `grid`: the topography grid or nothing.  If present, it will be used to identify
+      traps with zero volume, whose spill region will then be merged with its downstream
+      neighbor.
 - `cut_edges::Dict{CartesianIndex{2}, Vector{CartesianIndex{2}}}=Dict{CartesianIndex{2}, Vector{CartesianIndex{2}}}()`:
       dictionary specifying edges that should be cut (i.e., no flow allowed
       across these edges).  Keys are CartesianIndices of grid cells, and values
@@ -42,6 +45,7 @@ See also [`spillfield`](@ref), [`update_spillregions!`](@ref).
 function spillregions(spillfield::Matrix{Int8};
                       usediags::Bool=true,
                       tiling=nothing,
+                      grid=nothing,
                       cut_edges::Dict{CartesianIndex{2}, Vector{CartesianIndex{2}}}=
                           Dict{CartesianIndex{2}, Vector{CartesianIndex{2}}}(),
                       culverts::Vector{Tuple{CartesianIndex{2}, CartesianIndex{2}}}=
@@ -81,6 +85,12 @@ function spillregions(spillfield::Matrix{Int8};
         _fix_boundary_seams!(regions, spillfield, usediags,
                              xsplits[2:end-1], ysplits[2:end-1])
     end
+
+    # Eliminate flat traps if requested (i.e. topoggraphy grid supplied)
+    if grid != nothing
+        _eliminate_flat_traps!(regions, spillfield, grid, culverts, cut_edges, usediags)
+    end
+    
     # Identifying exit nodes (nodes whose stream direction points out of the
     # domain, or bottom nodes lying right on the boundary).  
     enodes = _find_exit_nodes(spillfield)
@@ -88,6 +98,7 @@ function spillregions(spillfield::Matrix{Int8};
     # Determine the spill regions of exit nodes
     enoderegs = unique(regions[enodes])
 
+    
     # give consistent numbering to regions: from 1 and upwards for regions
     # associated with a trap, and from -1 downwards for regions spilling out of
     # the domain.
@@ -609,5 +620,64 @@ function _flat_zone_connecting_edges!(edges, M, usediags::Bool=true)
                 end
             end
         end
+    end
+end
+
+# ----------------------------------------------------------------------------
+function _eliminate_flat_traps!(regions, spillfield, grid,
+                                culverts::Vector{Tuple{CartesianIndex{2}, CartesianIndex{2}}},
+                                cut_edges::Dict{CartesianIndex{2}, Vector{CartesianIndex{2}}},
+                                usediags::Bool)
+
+    bottomcells = findall(spillfield .== -1)
+    cartind = CartesianIndices(size(spillfield))
+    nx, ny = size(spillfield)...
+
+    function _get_active_neighbors(cell)
+        cind = cartind(cell)
+        neighs = Vector{Int}()
+        cind[1] > 1  && push!(neighs, cind + CartesianIndex(-1, 0))
+        cind[1] < nx && push!(neighs, cind + CartesianIndex(1, 0))
+        cind[2] > 1  && push!(neighs, cind + CartesianIndex(0, -1))
+        cind[3] < ny && push!(neighs, cind + cartesianIndex(0, 1))
+        if usediags
+            cind[1] > 1  && cind[2] > 1  && push!(neighs, cind + Cartesianindex(-1,-1))
+            cind[1] < nx && cind[2] > 1  && push!(neighs, cind + CartesianIndex(1, -1))
+            cind[1] > 1  && cind[2] < ny && push!(neighs, cind + CartesianIndex(-1, 1))
+            cind[1] < nx && cind[2] < ny && push!(neighs, cind + CartesianIndex( 1, 1))
+        end
+        
+        # adjust for possible barriers or culverts
+        if !
+        TODO
+        
+    end
+
+    
+    region_changes = Vector{Tuple{Int, Int}}()
+    for cell ∈ bottomcells
+        neighs = _get_active_neighbors(cell)
+        for n in neighs
+            if spillfield[n] > 0 && grid[n] <= grid[cell]
+                # The neighbor spills out of the trap, with an elevation not higher than
+                # the bottom cell.  This trap must have zero volume.
+                push!(region_changes, (regions[cell], regions[n]))
+            end
+        end
+    end
+
+    regcells = regioncells(regions) # make lookups faster
+    for i in 1:length(region_changes)
+        from, to = region_changes[i]...;
+        append!(regcells[to], regcells[from])
+        empty!(regcells[from])
+        for j in i+1:length(region_changes)
+            if region_changes[j][2] == from
+                region_changes[j] = (region_changes[j][1], to)
+            end
+        end
+    end
+    for r_ix = 1:length(regcells)
+        regions[regcells[r_ix]] .= r_ix
     end
 end

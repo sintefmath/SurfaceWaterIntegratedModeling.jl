@@ -5,7 +5,8 @@ export flatten_grid!, identify_flat_areas, toplevel_traps,
     show_region_selection, all_subtraps_of, interpolate_timeseries,
     trap_states_at_timepoints, compute_spillfield_graph, all_upstream_regions,
     upstream_area, current_upstream_area,
-    polyline_grid_intersections, edgeset2dict, reconstruct_spillfield
+    polyline_grid_intersections, edgeset2dict, reconstruct_spillfield,
+    flatten_small_traps
 
 # ----------------------------------------------------------------------------
 """
@@ -1325,3 +1326,21 @@ function edgeset2dict(edges::Set{Tuple{CartesianIndex{2}, CartesianIndex{2}}})
     # return the finished dictionary
     return result
 end
+
+# ----------------------------------------------------------------------------
+function flatten_small_traps(topography::Matrix{<:Real}, vol_threshold::Real) 
+    # Function to flatten/eliminate traps smaller than a given volume threshold, by
+    # raising their elevation to the spill point elevation.  
+
+    tstruct = spillanalysis(topography)
+    new_topography = copy(topography)
+
+    for i in 1:length(tstruct.trapvolumes)
+        if tstruct.trapvolumes[i] < vol_threshold
+            new_topography[tstruct.footprints[i]] .= tstruct.spillpoints[i].elevation
+        end
+    end
+
+    return new_topography
+end
+    
