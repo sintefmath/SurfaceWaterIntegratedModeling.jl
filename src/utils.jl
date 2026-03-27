@@ -6,7 +6,7 @@ export flatten_grid!, identify_flat_areas, toplevel_traps,
     trap_states_at_timepoints, compute_spillfield_graph, all_upstream_regions,
     upstream_area, current_upstream_area,
     polyline_grid_intersections, edgeset2dict, reconstruct_spillfield,
-    flatten_small_traps
+    flatten_small_traps, waterheight
 
 # ----------------------------------------------------------------------------
 """
@@ -58,9 +58,7 @@ function interpolate_timeseries(tstruct::TrapStructure{<:Real},
     for i in 1:length(tstates)
         verbose && println("Generating timepoint: ", i)
         filled_traps = tstates[i][1]
-        ownvolumes = tstruct.trapvolumes - tstruct.subvolumes
-        remaining =  ownvolumes - tstates[i][2]
-        push!(result, _fill_state_to_terrainmap(tstruct, filled_traps, remaining,
+        push!(result, _fill_state_to_terrainmap(tstruct, filled_traps, tstates[i][2],
                                                 filled_color, trap_color, river_color))
         push!(tix, tstates[i][3])
     end
@@ -196,30 +194,6 @@ function _find_trapcells(tstruct, trap)
 end
 
 # ----------------------------------------------------------------------------
-function _map_all_trapcells(tstruct)
-    num_traps = length(tstruct.spillpoints)
-    result = [Vector{Int64}() for i = 1:num_traps]
-    
-    rmap = _regionmap(tstruct)
-    num_regions = length(rmap)
-    
-    for rix = 1:num_regions
-        rcells = rmap[rix]
-        trap_ix = rix
-        while trap_ix > 0
-            spill_height = tstruct.spillpoints[trap_ix].elevation
-            push!(result[trap_ix], rcells[tstruct.topography[rcells] .<= spill_height]...)
-
-            immediate_supertrap = Graphs.outneighbors(tstruct.agglomerations, trap_ix)
-            @assert length(immediate_supertrap) < 2 # should be max. 1 immediate supertrap
-            trap_ix = length(immediate_supertrap) == 0 ? -1 : immediate_supertrap[1]
-        end
-    end
-    return result
-end
-
-    
-# ----------------------------------------------------------------------------
 function _regionmap(tstruct)
     # we only map positive regions (those that do not spill out of domain)
     result = [Vector{Int64}() for i = 1:maximum(tstruct.regions)]
@@ -236,7 +210,7 @@ end
 # ----------------------------------------------------------------------------
 function _fill_state_to_terrainmap(tstruct::TrapStructure{<:Real},
                                    filled::Vector{Bool}, 
-                                   remaining::Vector{<:Real},
+                                   trapwater::Vector{<:Real},
                                    filled_color::Int, trap_color::Int, river_color::Int)
 
     # if a trap is filled, show it along with the river running out of it.
@@ -257,34 +231,47 @@ function _fill_state_to_terrainmap(tstruct::TrapStructure{<:Real},
     end
     # # if a trap is not filled, but all subtraps are filled, we need to plot its
     # # exact fill trap_is_filled
-    trapmap = _map_all_trapcells(tstruct)
     for trap in findall(.!filled)
-        if remaining[trap] >= tstruct.trapvolumes[trap] -
-                              tstruct.subvolumes[trap] - sqrt(eps())
+        if trapwater[trap] <= sqrt(eps())
             # there is no water in the trap yet - nothing to plot
             continue
         end
         subtraps = Graphs.inneighbors(tstruct.agglomerations, trap)
         if all(filled[subtraps])
-            trapcells = trapmap[trap]
-            FAC = 1-sqrt(eps()) # Avoid problem with bracketing interval due to
-                                # roundoff error
-            if !isempty(trapcells)
-                z_spill = tstruct.spillpoints[trap].elevation
-                bottom = minimum(tstruct.topography[trapcells])
-                bracket = (bottom, z_spill)
-                volfun = z -> sum(z_spill .- max.(z, tstruct.topography[trapcells]))
-
-                z_cur = Roots.find_zero(z -> volfun(z) - remaining[trap]*FAC, bracket)
-                covered_trapcells = trapcells[tstruct.topography[trapcells] .< z_cur]
-                result[covered_trapcells] .= filled_color
-            end
+            trapcells = tstruct.footprints[trap]
+            z_cur = waterheight(tstruct, trap, trapwater[trap])
+            covered_trapcells = trapcells[tstruct.topography[trapcells] .< z_cur]
+            result[covered_trapcells] .= filled_color
         end
     end
     
     return result
 end
 
+# ----------------------------------------------------------------------------
+"""
+        waterheight(tstruct, trap, current_watervolume)
+Compute the water height in a trap, given the current water volume.
+
+The water volume provided should not exceed the total volume of the trap, minus
+the volume of its subtraps. The function will compute the water height by
+finding the level at which the volume of water in the trap (net of any subtraps)
+matches the provided `current_watervolume`.
+"""
+function waterheight(tstruct, trap, current_watervolume; tol=sqrt(eps()))
+    ownvolume = tstruct.trapvolumes[trap] - tstruct.subvolumes[trap]
+    remaining = ownvolume - current_watervolume
+    
+    trapcells = tstruct.footprints[trap]
+    z_spill = tstruct.spillpoints[trap].elevation
+    bottom = minimum(tstruct.topography[trapcells])
+    bracket = (bottom, z_spill)
+    fac = 1 - tol # avoid problem with bracketing interval due to roundoff error
+    volfun = z -> sum(z_spill .- max.(z, tstruct.topography[trapcells]))
+
+    z_cur = Roots.find_zero(z -> volfun(z) - remaining*fac, bracket)
+    return z_cur
+end
 
 # ----------------------------------------------------------------------------
 """
@@ -679,6 +666,7 @@ end
 
 # ----------------------------------------------------------------------------
 function current_upstream_area(tstruct::TrapStructure{<:Real}, point, tstates; recur=1)
+    @show recur
     if recur >= 10000 # @@@ stack overflow guard
         return []
     end
@@ -699,12 +687,21 @@ function current_upstream_area(tstruct::TrapStructure{<:Real}, point, tstates; r
     # add contribution of upstream spill regions that actively spill into the current
     utraps = _in_dynamic_spillpath(tstruct, result, tstates)
     #@show utraps
+    @show length(unique(result))
+    @return unique(result)
+    
     for ut in utraps
         #@show ut
         spillpoint = tstruct.spillpoints[ut].current_region_cell
+        @show spillpoint
+        @show "before append"
+        @show length(result)
         append!(result, current_upstream_area(tstruct, spillpoint, tstates, recur=recur+1))
+        @show "after append"
+        @show length(result)
     end
-    
+
+    @show length(unique(result))
     return unique(result)
 end
 
@@ -769,19 +766,7 @@ function _is_submerged(tstruct, pt, tstates)
     
     # If we got here, we are in a trap that is partially filled with water.  We
     # need to determine whether the waterlevel submerges the point in question.
-    z_spill = tstruct.spillpoints[target_trap].elevation
-    vol_remaining =
-        tstruct.trapvolumes[target_trap] -
-        tstruct.subvolumes[target_trap] -
-        trap_water_content[target_trap]
-
-    rem_vol_fun =
-        z-> sum(z_spill .- max.(z, tstruct.topography[tstruct.footprints[target_trap]]))
-
-    FAC = 1-sqrt(eps()) # Avoid problem with bracketing interval due to roundoff error
-    bracket = (minimum(tstruct.topography[tstruct.footprints[target_trap]]), z_spill) 
-
-    z_cur = Roots.find_zero(z -> rem_vol_fun(z) - vol_remaining*FAC, bracket)
+    z_cur = waterheight(tstruct, target_trap, trap_water_content[target_trap])
 
     if tstruct.topography[pt] < z_cur
         # the cell is submerged, and the 'puddle' consists of all cells in the trap

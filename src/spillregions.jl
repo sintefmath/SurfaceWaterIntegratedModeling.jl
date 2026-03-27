@@ -118,7 +118,7 @@ function spillregions(spillfield::Matrix{Int8};
     # create graph but skip edges representing self-loops
     g = Graphs.SimpleDiGraph([Graphs.SimpleEdge{Int64}((e[1], e[2])) for e in edges
                                   if e[1] != e[2]])
-    
+
     #g = Graphs.SimpleDiGraph([Graphs.SimpleEdge{Int64}((e[1], e[2])) for e in edge_filt])
     
     return regions, g, bottomcells
@@ -637,7 +637,7 @@ function _eliminate_flat_traps!(regions, edges, spillfield, grid,
                                 usediags::Bool)
     spillfield_modif = copy(spillfield)
     spillfield_modif[[x[1] for x in culverts]] .= 10 # culvert inlets should not be regarded trap bottoms
-    bottomcells = Set(findall(spillfield_modif .== -1))
+    bottomcells = findall(spillfield_modif .== -1)
     #cartind = CartesianIndices(size(spillfield))
     nx, ny = size(spillfield)
 
@@ -661,18 +661,29 @@ function _eliminate_flat_traps!(regions, edges, spillfield, grid,
     end
     
     region_changes = Vector{Tuple{Int, Int}}()
-    outlet_affected = Dict{CartesianIndex{2}, Set{CartesianIndex{2}}}()
-    for cell ∈ bottomcells
+    outlet_affected = Dict{CartesianIndex{2}, Vector{CartesianIndex{2}}}()
+    covered = fill(false, length(bottomcells))
+
+    for cell_ix = 1:length(bottomcells)
+        if covered[cell_ix]
+            continue
+        end
+        # this cell has not yet been covered by a previously identified outlet.
+        cell = bottomcells[cell_ix]
         neighs = _get_active_neighbors(cell)
         for n in neighs
-            if spillfield[n] > 0 && grid[n] <= grid[cell]
+            if spillfield[n] >= 0 && grid[n] <= grid[cell]
                 # The neighbor spills out of the trap, with an elevation not higher than
                 # the bottom cell.  This trap must have zero volume.
                 push!(region_changes, (regions[cell], regions[n]))
 
+                
                 # identify all bottomcells that belong to this region, and remove
                 # them from the list of bottomcells to be processed
-                outlet_affected[n], bottomcells = _partition(c -> regions[c] == regions[cell], bottomcells)
+                affected = findall(x -> regions[x] == regions[cell], bottomcells)
+                covered[affected] .= true
+                outlet_affected[n] = bottomcells[affected]
+
                 break # it's enough to have identified one exit point
             end
         end
@@ -702,31 +713,30 @@ function _eliminate_flat_traps!(regions, edges, spillfield, grid,
 end
 
 
-function _partition(pred, S)
-    # partition the set S into two sets, one for which the predicate is true, and
+function _partition(pred, vec)
+    # partition the vector into two vectors, one for which the predicate is true, and
     # one for which it is false.
-    set1 = Set{eltype(S)}()
-    set2 = Set{eltype(S)}()
-    for x in S
+    vec1 = Vector{eltype(vec)}()
+    vec2 = Vector{eltype(vec)}()
+    for x in vec
         if pred(x)
-            push!(set1, x)
+            push!(vec1, x)
         else
-            push!(set2, x)
+            push!(vec2, x)
         end
     end
-    return set1, set2
+    return vec1, vec2
 end
 
 
 function _construct_outlet_flowpaths(outlet_cell::CartesianIndex{2},
-                                   remaining_bottomcells::Set{CartesianIndex{2}},
+                                   remaining_bottomcells::Vector{CartesianIndex{2}},
                                    usediags::Bool, gridsize)
     # for each of the affected bottomcells, we need to construct the shortest
     # flow path to the outlet cell.  This flow path should pass entirely through
     # other affected bottomcells.  Flow can be along x-axis and y-axis, and
     # optionally along diagonals as well.
     # Return a list of all edges thus generated.
-
     edges = Vector{Tuple{Int, Int}}()
     active_set = [outlet_cell]
     while !isempty(remaining_bottomcells)
@@ -742,7 +752,7 @@ function _construct_outlet_flowpaths(outlet_cell::CartesianIndex{2},
             end
         end
         if next_active_set == []
-            @assert empty(remaining_bottomcells) "Could not find flow path from some bottomcells to outlet cell."
+            @assert isempty(remaining_bottomcells) "Could not find flow path from some bottomcells to outlet cell."
             break
         end
         active_set = next_active_set
