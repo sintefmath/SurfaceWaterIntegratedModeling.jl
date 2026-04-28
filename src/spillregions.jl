@@ -1,5 +1,6 @@
 import Graphs
 import OffsetArrays: OffsetArray
+import JLD2: @save # @@ debug
 
 export spillregions, update_spillregions!
 
@@ -89,8 +90,10 @@ function spillregions(spillfield::Matrix{Int8};
     bottomcells = []
     if grid != nothing
         # Eliminate flat traps if requested (i.e. topography grid supplied)
+        println("Eliminating flat traps...")
         bottomcells = _eliminate_flat_traps!(regions, edges, spillfield,
                                              grid, culverts, cut_edges, usediags)
+        println("Done eliminating flat traps.")
     else
         bottomcells = findall(spillfield .== -1)
         bottomcells = setdiff(bottomcells, [x[1] for x in culverts])
@@ -629,6 +632,21 @@ function _flat_zone_connecting_edges!(edges, M, usediags::Bool=true)
     end
 end
 
+function _all_logical_neighbors(cell::CartesianIndex{2}, usediags::Bool, sz)
+    neighs = Vector{CartesianIndex{2}}()
+    cell[1] > 1  && push!(neighs, cell + CartesianIndex(-1, 0))
+    cell[1] < sz[1] && push!(neighs, cell + CartesianIndex(1, 0))
+    cell[2] > 1  && push!(neighs, cell + CartesianIndex(0, -1))
+    cell[2] < sz[2] && push!(neighs, cell + CartesianIndex(0, 1))
+    if usediags
+        cell[1] > 1  && cell[2] > 1  && push!(neighs, cell + CartesianIndex(-1,-1))
+        cell[1] < sz[1] && cell[2] > 1  && push!(neighs, cell + CartesianIndex(1, -1))
+        cell[1] > 1  && cell[2] < sz[2] && push!(neighs, cell + CartesianIndex(-1, 1))
+        cell[1] < sz[1] && cell[2] < sz[2] && push!(neighs, cell + CartesianIndex( 1, 1))
+    end
+    return neighs
+end
+
 # ----------------------------------------------------------------------------
 # This function may modify 'regions' and 'edges'
 function _eliminate_flat_traps!(regions, edges, spillfield, grid,
@@ -638,23 +656,12 @@ function _eliminate_flat_traps!(regions, edges, spillfield, grid,
     spillfield_modif = copy(spillfield)
     spillfield_modif[[x[1] for x in culverts]] .= 10 # culvert inlets should not be regarded trap bottoms
     bottomcells = findall(spillfield_modif .== -1)
-    #cartind = CartesianIndices(size(spillfield))
-    nx, ny = size(spillfield)
+    cartind = CartesianIndices(size(spillfield))
+    #nx, ny = size(spillfield)
 
     function _get_active_neighbors(cell)
-        #cell = cartind[cell]
-        neighs = Vector{CartesianIndex{2}}()
-        cell[1] > 1  && push!(neighs, cell + CartesianIndex(-1, 0))
-        cell[1] < nx && push!(neighs, cell + CartesianIndex(1, 0))
-        cell[2] > 1  && push!(neighs, cell + CartesianIndex(0, -1))
-        cell[2] < ny && push!(neighs, cell + CartesianIndex(0, 1))
-        if usediags
-            cell[1] > 1  && cell[2] > 1  && push!(neighs, cell + CartesianIndex(-1,-1))
-            cell[1] < nx && cell[2] > 1  && push!(neighs, cell + CartesianIndex(1, -1))
-            cell[1] > 1  && cell[2] < ny && push!(neighs, cell + CartesianIndex(-1, 1))
-            cell[1] < nx && cell[2] < ny && push!(neighs, cell + CartesianIndex( 1, 1))
-        end
-        
+        cell = cartind[cell]
+        neighs = _all_logical_neighbors(cell, usediags, size(spillfield))
         # adjust for possible barriers (if cell->neighbor is a cut edge, then
         # this neighbor should not be considered)
         neighs = filter(n -> !(haskey(cut_edges, cell) && cut_edges[cell] == n), neighs)
@@ -688,7 +695,7 @@ function _eliminate_flat_traps!(regions, edges, spillfield, grid,
             end
         end
     end
-
+    
     for n in keys(outlet_affected)
         union!(edges, _construct_outlet_flowpaths(n, outlet_affected[n],
                                                   usediags, size(spillfield)))
@@ -709,7 +716,7 @@ function _eliminate_flat_traps!(regions, edges, spillfield, grid,
         regions[regcells[r_ix]] .= r_ix
     end
 
-    return collect(bottomcells)
+    return collect(bottomcells[.!covered])
 end
 
 
@@ -729,36 +736,37 @@ function _partition(pred, vec)
 end
 
 
-function _construct_outlet_flowpaths(outlet_cell::CartesianIndex{2},
-                                   remaining_bottomcells::Vector{CartesianIndex{2}},
-                                   usediags::Bool, gridsize)
-    # for each of the affected bottomcells, we need to construct the shortest
-    # flow path to the outlet cell.  This flow path should pass entirely through
-    # other affected bottomcells.  Flow can be along x-axis and y-axis, and
-    # optionally along diagonals as well.
-    # Return a list of all edges thus generated.
-    edges = Vector{Tuple{Int, Int}}()
-    active_set = [outlet_cell]
-    while !isempty(remaining_bottomcells)
-        # find the set of uncovered neighbors to the current active set
-        next_active_set = Vector{CartesianIndex{2}}()
-        for c in active_set
-            neighs, remaining_bottomcells = _partition(x -> _are_neighbors(c, x, usediags), remaining_bottomcells)
-            # add edges
-            target = LinearIndices(gridsize)[c]
-            for n in neighs
-                push!(edges, (LinearIndices(gridsize)[n], target))
-                push!(next_active_set, n)
-            end
-        end
-        if next_active_set == []
-            @assert isempty(remaining_bottomcells) "Could not find flow path from some bottomcells to outlet cell."
-            break
-        end
-        active_set = next_active_set
-    end
-    return edges
-end
+# function _construct_outlet_flowpaths(outlet_cell::CartesianIndex{2},
+#                                      remaining_bottomcells::Vector{CartesianIndex{2}},
+#                                      usediags::Bool, gridsize)
+#     # for each of the affected bottomcells, we need to construct the shortest
+#     # flow path to the outlet cell.  This flow path should pass entirely through
+#     # other affected bottomcells.  Flow can be along x-axis and y-axis, and
+#     # optionally along diagonals as well.
+#     # Return a list of all edges thus generated.
+#     edges = Vector{Tuple{Int, Int}}()
+#     active_set = [outlet_cell]
+#     while !isempty(remaining_bottomcells)
+#         @show length(remaining_bottomcells), length(active_set)
+#         # find the set of uncovered neighbors to the current active set
+#         next_active_set = Vector{CartesianIndex{2}}()
+#         for c in active_set
+#             neighs, remaining_bottomcells = _partition(x -> _are_neighbors(c, x, usediags), remaining_bottomcells)
+#             # add edges
+#             target = LinearIndices(gridsize)[c]
+#             for n in neighs
+#                 push!(edges, (LinearIndices(gridsize)[n], target))
+#                 push!(next_active_set, n)
+#             end
+#         end
+#         if next_active_set == []
+#             @assert isempty(remaining_bottomcells) "Could not find flow path from some bottomcells to outlet cell."
+#             break
+#         end
+#         active_set = next_active_set
+#     end
+#     return edges
+# end
 
 function _are_neighbors(c1, c2, usediags)
     if usediags
@@ -769,3 +777,69 @@ function _are_neighbors(c1, c2, usediags)
     end
 end
 
+function _construct_outlet_flowpaths(outlet_cell::CartesianIndex{2},
+                                     remaining_bottomcells::Vector{CartesianIndex{2}},
+                                     usediags::Bool, gridsize)
+
+    # make bidirectional connectivity graph.  Nodes are numbered as follows: the
+    # first N nodes correspond to the remaining bottomcells, and the last node
+    # corresponds to the outlet cell.  Edges are between nodes that are
+    # neighbors (i.e. they are adjacent in the grid, or diagonally adjacent if
+    # usediags is true).
+    all_nodes = [remaining_bottomcells; outlet_cell]
+    g = _make_neighbor_graph(all_nodes, usediags)
+    targets = fill(-1, length(remaining_bottomcells))
+    N = length(targets)
+    queue = [length(all_nodes)] # start from the outlet cell, which is the last node in 'all_nodes'
+    while !isempty(queue)
+        current = popfirst!(queue)
+        neighs = Graphs.neighbors(g, current)
+        if !isnothing(neighs)
+            for neighbor in neighs
+                if neighbor <= N && targets[neighbor] == -1
+                    targets[neighbor] = current
+                    push!(queue, neighbor)
+                end
+            end
+        end
+    end
+    @assert all(x -> x != -1, targets) "Could not find flow path from some bottomcells to outlet cell."
+
+    edges = Vector{Tuple{Int, Int}}()
+    lind = LinearIndices(gridsize)
+    for (ix, trg) in enumerate(targets)
+        push!(edges, (lind[all_nodes[ix]], lind[all_nodes[trg]]))
+    end
+    return edges
+end
+
+function _make_neighbor_graph(cells::Vector{CartesianIndex{2}}, usediags::Bool)
+
+    # determinining bounding box of cells
+    min_i, max_i = extrema(c->c[1], cells)
+    min_j, max_j = extrema(c->c[2], cells)
+
+    # helper grid to speed up neighbor lookups
+    grd = fill(-1, max_i - min_i + 1, max_j - min_j + 1)
+
+    # fill in the grid with the indices of the cells
+    for (i, c) in enumerate(cells)
+        grd[c[1] - min_i + 1, c[2] - min_j + 1] = i
+    end
+    
+    edges = Graphs.SimpleEdge{Int64}[]
+    for c in cells
+        neighs = _all_logical_neighbors(c, usediags, (max_i, max_j))
+        for n in neighs
+            if n[1] < min_i || n[1] > max_i || n[2] < min_j || n[2] > max_j
+                continue
+            end
+            if grd[n[1] - min_i + 1, n[2] - min_j + 1] != -1
+                push!(edges, Graphs.SimpleEdge{Int64}((grd[c[1] - min_i + 1, c[2] - min_j + 1],
+                                                       grd[n[1] - min_i + 1, n[2] - min_j + 1])))
+            end
+        end
+    end
+
+    return Graphs.SimpleGraph(edges)
+end

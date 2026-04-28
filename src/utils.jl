@@ -666,13 +666,10 @@ end
 
 # ----------------------------------------------------------------------------
 function current_upstream_area(tstruct::TrapStructure{<:Real}, point, tstates; recur=1)
-    @show recur
     if recur >= 10000 # @@@ stack overflow guard
         return []
     end
-    
     submerged, puddlecells = _is_submerged(tstruct, point, tstates)
-    #@show submerged
     
     if !submerged
         # if we are not submerged, the only upstream area is the one consisting of
@@ -686,22 +683,10 @@ function current_upstream_area(tstruct::TrapStructure{<:Real}, point, tstates; r
 
     # add contribution of upstream spill regions that actively spill into the current
     utraps = _in_dynamic_spillpath(tstruct, result, tstates)
-    #@show utraps
-    @show length(unique(result))
-    @return unique(result)
-    
     for ut in utraps
-        #@show ut
         spillpoint = tstruct.spillpoints[ut].current_region_cell
-        @show spillpoint
-        @show "before append"
-        @show length(result)
         append!(result, current_upstream_area(tstruct, spillpoint, tstates, recur=recur+1))
-        @show "after append"
-        @show length(result)
     end
-
-    @show length(unique(result))
     return unique(result)
 end
 
@@ -718,27 +703,15 @@ function _trap_stack_of(tstruct, pt)
 
     # return stack of traps whose spill points are above the current point
     pt_z = tstruct.topography[pt]
-    keep = pt_z .< [x.elevation for x in tstruct.spillpoints[region_supertraps]]
+    keep = pt_z .<= [x.elevation for x in tstruct.spillpoints[region_supertraps]]
 
     return region_supertraps[keep]
-    # #@show region_supertraps
-    # trap_stack = []
-    
-    
-    # for s in length(region_supertraps):-1:1
-    #     if pt_z > tstruct.spillpoints[region_supertraps[s]].elevation
-    #         # not within this supertrap, so not in any of its subtraps either
-    #         break
-    #     end
-    #     push!(trap_stack, region_supertraps[s])
-    # end
-    # return trap_stack
 end
 
 function _is_submerged(tstruct, pt, tstates)
 
     ltrap = _trap_stack_of(tstruct, pt)
-    #@show ltrap
+
     if isempty(ltrap)
         # the cell is not within a trap, so it cannot be submerged
         return false, nothing
@@ -1317,7 +1290,7 @@ function flatten_small_traps(topography::Matrix{<:Real}, vol_threshold::Real)
     # Function to flatten/eliminate traps smaller than a given volume threshold, by
     # raising their elevation to the spill point elevation.  
 
-    tstruct = spillanalysis(topography)
+    tstruct = spillanalysis(topography, verbose=true)
     new_topography = copy(topography)
 
     for i in 1:length(tstruct.trapvolumes)

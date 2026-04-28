@@ -8,6 +8,9 @@ Images = "916415d5-f1e6-5110-898d-aaa5f9f070e0"
 Makie = "ee78f7c6-11fb-53f2-987a-cfe4a2b5a57a"
 SurfaceWaterIntegratedModeling = "71e2a337-b4d4-4738-9f2b-3c37e1d3d462"
 
+[sources]
+SurfaceWaterIntegratedModeling = {path = "/home/oddan/gitted/source/julia/SurfaceWaterIntegratedModeling"}
+
 [compat]
 #ArchGDAL = "0.10.2"
 #ColorSchemes = "3.24"
