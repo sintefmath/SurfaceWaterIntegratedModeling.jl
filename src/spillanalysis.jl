@@ -50,6 +50,7 @@ function spillanalysis(grid::Matrix{<:Real};
                   usediags::Bool=true,
                   building_mask::Union{Matrix{<:Bool}, BitMatrix, Nothing}=nothing,
                   sinks::Union{Vector{CartesianIndex{2}}, Matrix{Bool}}=Vector{CartesianIndex{2}}(),
+                  waterbodies::Union{Matrix{<:Bool}, Nothing}=nothing,
                   lengths::Union{Tuple{<:Real}, Nothing}=nothing,
                   domain::Union{Domain2D, Nothing}=nothing,
                   merge_outregions::Bool=false, 
@@ -85,7 +86,9 @@ function spillanalysis(grid::Matrix{<:Real};
                               sinks=sinks,
                               blocked_edges=cut_edge_dict,
                               building_mask=building_mask)
-
+    if waterbodies !== nothing
+        field[waterbodies] .= -4 # waterbodies override the spillfield; we use code -4
+    end
     verbose && println("Entering spillregions")
     regions, flowgraph, trap_bottoms =
         spillregions(field, usediags=usediags,
@@ -129,6 +132,8 @@ function spillanalysis(grid::Matrix{<:Real};
         end
     end
 
+    wbody_cells = isnothing(waterbodies) ? Vector{CartesianIndex{2}}() : findall(waterbodies)
+    
     return TrapStructure{eltype(grid)}(copy(grid),
                                        flowgraph,
                                        trap_bottoms,
@@ -142,6 +147,7 @@ function spillanalysis(grid::Matrix{<:Real};
                                        subtrapgraph,
                                        building_mask,
                                        sinks,
+                                       wbody_cells,
                                        cut_edge_dict)
 end
 

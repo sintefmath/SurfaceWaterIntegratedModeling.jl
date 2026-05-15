@@ -513,7 +513,7 @@ function show_region_selection(tstruct::TrapStructure{<:Real};
     #spillfield   = tstruct.spillfield
     flowgraph    = tstruct.flowgraph
     regmap       = tstruct.lowest_subtraps_for
-   
+
     if selection == nothing
         # by default, show top-level traps
         selection = toplevel_traps(subtrapgraph)
@@ -525,7 +525,7 @@ function show_region_selection(tstruct::TrapStructure{<:Real};
     if maximum(regions) < 1
         return result
     end
-    
+
     # trace rivers
     if river_color != 0
         #CI = CartesianIndices(size(grid))
@@ -537,7 +537,7 @@ function show_region_selection(tstruct::TrapStructure{<:Real};
                 while !finished
                     result[rix] = river_color
                     #rix, finished = _downstream_cell(spillfield, rix)
-                    rix, finished = _downstream_cell(flowgraph, rix)                    
+                    rix, finished = _downstream_cell(flowgraph, rix)
                 end
             end
         end
@@ -547,7 +547,7 @@ function show_region_selection(tstruct::TrapStructure{<:Real};
     for s in selection
         supertrap_lookup[regmap[s]] .= s
     end
-    
+
     selected_region_lookup = fill(Int(0), maximum(regions))
 
     if region_color >= 0
