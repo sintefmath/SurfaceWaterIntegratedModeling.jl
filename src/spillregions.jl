@@ -601,9 +601,6 @@ end
 # ----------------------------------------------------------------------------
 # Identify all edges that constitutes "streamlines"
 function _spillfield_flow_edges!(edges, spillfield)
-    # * -4 : waterbody (any passing streamline is terminated here, but these
-    #        cells are not considered sinks, and are considered being in the 
-    #        same spill region if adjacent)
     # * -3 : sink (any passing streamline is terminated here)
     # * -2 : covered by building / clipped away
     # * -1 : no downward slope (gridcell is a trap)
@@ -625,12 +622,11 @@ function _spillfield_flow_edges!(edges, spillfield)
 
         if dir == _SPILLFIELD_INACTIVE_FLAG
             continue
-        elseif dir in [-4, -3, -1]
-            # this is a waterbody cell, a sink or the bottom of a trap, no
-            # downward flow from here.  Add an edge of this cell pointing
-            # to itself, to ensure it will be not ignored by the graph algorithm
-            # identifying components, in the rare case that no other cell spills
-            # into this one.
+        elseif dir in [-3, -1]
+            # this is a sink or the bottom of a trap, no downward flow from
+            # here.  Add an edge of this cell pointing to itself, to ensure it
+            # will be not ignored by the graph algorithm identifying components,
+            # in the rare case that no other cell spills into this one.
             push!(edges, (n1, n1))
             continue
         elseif dir == -2 # masked gridcell (buildings, etc.).  No flow here
@@ -664,14 +660,10 @@ end
 # - Sinks will never be merged, as they are always considered separate 'bottom points'
 #   with their own spill region, even if adjacent. (code: -3).  They will be ignored
 #   here.
-# - Neighboring waterbody cells will be connected, as they are considered part of
-#   the same waterbody, with the same spill region. (code: -4)
-# - Do not connect cells of different types, even if adjacent.
 function _flat_zone_connecting_edges!(edges, leaks, M, grid, usediags::Bool=true)
 
-    # trap bottoms are -1; waterbodies are -4.  Ignore sinks (-3) as these should
-    # not be merged
-    nodeixs = findall(x->(x == -1 || x == -4), M)    
+    # trap bottoms are -1.  Ignore sinks (-3) as these should not be merged
+    nodeixs = findall(M.==-1)
 
     num_nodes = length(nodeixs)
 
@@ -693,8 +685,8 @@ function _flat_zone_connecting_edges!(edges, leaks, M, grid, usediags::Bool=true
             if ix_endnode[1] <= IMax[1] && ix_endnode[2] <= IMax[2] &&
                ix_endnode[1] >= IMin[1] && ix_endnode[2] >= IMin[2]
                 # this is a neighbor node inside the grid
-                if M[ix_startnode] in [-1, -4] && M[ix_endnode] == M[ix_startnode]
-                    # this is a neighboring cell of the same type; connect the cells
+                if M[ix_startnode] == -1 && M[ix_endnode] == -1
+                    # this is a neighboring trap bottom cell; connect the cells
                     n1 = linear[ix_startnode]
                     n2 = linear[ix_endnode]
                     push!(edges, (n1, n2))
@@ -711,20 +703,20 @@ function _flat_zone_connecting_edges!(edges, leaks, M, grid, usediags::Bool=true
     end
 end
 
-function _all_logical_neighbors(cell::CartesianIndex{2}, usediags::Bool, sz)
-    neighs = Vector{CartesianIndex{2}}()
-    cell[1] > 1  && push!(neighs, cell + CartesianIndex(-1, 0))
-    cell[1] < sz[1] && push!(neighs, cell + CartesianIndex(1, 0))
-    cell[2] > 1  && push!(neighs, cell + CartesianIndex(0, -1))
-    cell[2] < sz[2] && push!(neighs, cell + CartesianIndex(0, 1))
-    if usediags
-        cell[1] > 1  && cell[2] > 1  && push!(neighs, cell + CartesianIndex(-1,-1))
-        cell[1] < sz[1] && cell[2] > 1  && push!(neighs, cell + CartesianIndex(1, -1))
-        cell[1] > 1  && cell[2] < sz[2] && push!(neighs, cell + CartesianIndex(-1, 1))
-        cell[1] < sz[1] && cell[2] < sz[2] && push!(neighs, cell + CartesianIndex( 1, 1))
-    end
-    return neighs
-end
+# function _all_logical_neighbors(cell::CartesianIndex{2}, usediags::Bool, sz)
+#     neighs = Vector{CartesianIndex{2}}()
+#     cell[1] > 1  && push!(neighs, cell + CartesianIndex(-1, 0))
+#     cell[1] < sz[1] && push!(neighs, cell + CartesianIndex(1, 0))
+#     cell[2] > 1  && push!(neighs, cell + CartesianIndex(0, -1))
+#     cell[2] < sz[2] && push!(neighs, cell + CartesianIndex(0, 1))
+#     if usediags
+#         cell[1] > 1  && cell[2] > 1  && push!(neighs, cell + CartesianIndex(-1,-1))
+#         cell[1] < sz[1] && cell[2] > 1  && push!(neighs, cell + CartesianIndex(1, -1))
+#         cell[1] > 1  && cell[2] < sz[2] && push!(neighs, cell + CartesianIndex(-1, 1))
+#         cell[1] < sz[1] && cell[2] < sz[2] && push!(neighs, cell + CartesianIndex( 1, 1))
+#     end
+#     return neighs
+# end
 
 # ----------------------------------------------------------------------------
 # # This function may modify 'regions' and 'edges'

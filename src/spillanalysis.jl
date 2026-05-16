@@ -1,5 +1,6 @@
 import Graphs
 export spillanalysis
+import Images
 
 # all outside regions represented as -1 if true
 # @@ NB: Domain currently only implemented for spillfield!
@@ -62,6 +63,10 @@ function spillanalysis(grid::Matrix{<:Real};
 
     verbose && println("Entering spillfield")
 
+    # a copy of the grid will be returned by the TrapStructure, and there may be
+    # modifications to it if waterbodies are provided
+    gridcpy = copy(grid) 
+    
     # ensure `sinks` is a vector of CartesianIndex
     if typeof(sinks) <: Matrix
         sinks = [CartesianIndex(i[1], i[2]) for i in findall(sinks)]
@@ -69,8 +74,13 @@ function spillanalysis(grid::Matrix{<:Real};
         sinks = Vector{CartesianIndex{2}}()
     end
 
+    # if waterbodies are provided, ensure that the regions they cover are of uniform height
+    if waterbodies !== nothing
+        _flatten_waterbody_regions!(gridcpy, waterbodies)
+    end
+    
     # ensure culverts are directed from higher to lower elevation
-    directed_culverts = [ grid[x[1]] >= grid[x[2]] ? x : (x[2], x[1]) for x in culverts ]
+    directed_culverts = [ gridcpy[x[1]] >= gridcpy[x[2]] ? x : (x[2], x[1]) for x in culverts ]
     
     # determine any connections cut by barriers
     cut_edges = Set{Tuple{CartesianIndex{2}, CartesianIndex{2}}}()
@@ -81,29 +91,27 @@ function spillanalysis(grid::Matrix{<:Real};
     end
     cut_edge_dict = edgeset2dict(cut_edges)
     
-    field, slope = spillfield(grid, usediags=usediags,
+    field, slope = spillfield(gridcpy, usediags=usediags,
                               lengths=lengths, domain=domain,
                               sinks=sinks,
                               blocked_edges=cut_edge_dict,
                               building_mask=building_mask)
-    if waterbodies !== nothing
-        field[waterbodies] .= -4 # waterbodies override the spillfield; we use code -4
-    end
+
     verbose && println("Entering spillregions")
     regions, flowgraph, trap_bottoms =
         spillregions(field, usediags=usediags,
-                     grid=grid, # for eliminating 'flat' traps
+                     grid=gridcpy, # for eliminating 'flat' traps
                      cut_edges=cut_edge_dict, culverts=directed_culverts)
     
     verbose && println("Entering spillpoints")
-    spoints, regbnd = spillpoints(grid, regions, usediags=usediags,
+    spoints, regbnd = spillpoints(gridcpy, regions, usediags=usediags,
                                   cut_edges=cut_edge_dict)
 
     # verbose && println("Eliminating flat traps")
-    # _eliminate_flat_traps!(regions, spoints, flowgraph, trap_bottoms, grid)
+    # _eliminate_flat_traps!(regions, spoints, flowgraph, trap_bottoms, gridcpy)
     
     verbose && println("entering sshierarchy")
-    subtrapgraph, lowest_regions = sshierarchy!(grid, regions, spoints, regbnd)
+    subtrapgraph, lowest_regions = sshierarchy!(gridcpy, regions, spoints, regbnd)
     
     toptraps = []
     for i in 1:Graphs.nv(subtrapgraph)
@@ -114,9 +122,9 @@ function spillanalysis(grid::Matrix{<:Real};
 
     supertraps_of = _compute_supertraps_of(lowest_regions)
 
-    trapvols = trapvolumes(grid, regions, spoints, lowest_regions)
+    trapvols = trapvolumes(gridcpy, regions, spoints, lowest_regions)
 
-    footprints = _compute_trap_footprints(grid, lowest_regions, regions,
+    footprints = _compute_trap_footprints(gridcpy, lowest_regions, regions,
                                          spoints, maximum(regions))
 
     subvolumes = _compute_subvolumes(trapvols, subtrapgraph) 
@@ -134,7 +142,7 @@ function spillanalysis(grid::Matrix{<:Real};
 
     wbody_cells = isnothing(waterbodies) ? Vector{CartesianIndex{2}}() : findall(waterbodies)
     
-    return TrapStructure{eltype(grid)}(copy(grid),
+    return TrapStructure{eltype(grid)}(gridcpy,
                                        flowgraph,
                                        trap_bottoms,
                                        regions,
@@ -150,6 +158,19 @@ function spillanalysis(grid::Matrix{<:Real};
                                        wbody_cells,
                                        cut_edge_dict)
 end
+
+# ----------------------------------------------------------------------------
+function _flatten_waterbody_regions!(grid, waterbodies)
+    # for each contiguous waterbody region, set the elevation of all cells in that
+    # region to the same value (the minimum elevation within the region)
+    wbody_labels = Images.label_components(waterbodies)
+    for label in 1:maximum(wbody_labels)
+        region_cells = findall(wbody_labels .== label)
+        min_elev = minimum(grid[region_cells])
+        grid[region_cells] .= min_elev
+    end
+end
+
 
 # ----------------------------------------------------------------------------
 function _compute_supertraps_of(lowest_regions)
