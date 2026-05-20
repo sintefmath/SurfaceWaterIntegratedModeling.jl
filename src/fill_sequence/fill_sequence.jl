@@ -490,7 +490,8 @@ function fill_trap_until(trap, rateinfo, cur_amount, endtime, tstruct, z_vol_tab
     condition_reached = [0]
     
     function affect!(integrator, ix)
-        condition_reached[] = ix
+        # DiffEq v8+ passes ix as Vector{Int8} flags; older versions passed a scalar index
+        condition_reached[] = isa(ix, AbstractVector) ? findfirst(!iszero, ix) : ix
         terminate!(integrator)
     end
     cb = VectorContinuousCallback(condition, affect!, 3)
