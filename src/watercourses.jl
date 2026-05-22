@@ -147,6 +147,7 @@ function flow_path_from(tstruct::TrapStructure{<:Real},
     # trap bottom or exit the domain
     CI = CartesianIndices(size(tstruct.topography))
     CL = LinearIndices(size(tstruct.topography))
+    wbodies = Set(tstruct.waterbodies)
     function _trace_path(node)
         path = [node]
         while true
@@ -156,7 +157,7 @@ function flow_path_from(tstruct::TrapStructure{<:Real},
             end
             @assert length(ds_nodes) == 1
             c1, c2 = CI[path[end]], CI[ds_nodes[1]]
-            if !_are_connected(c1, c2)
+            if !_are_connected(c1, c2) && c2 ∉ wbodies
                 line_ixs = _connect_cells(c1, c2)
                 append!(path, CL[line_ixs])
             else
