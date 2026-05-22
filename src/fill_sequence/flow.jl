@@ -24,11 +24,11 @@ function compute_flow(spillgraph::SpillGraph,
                       infiltration::Union{Real, Matrix{<:Real}},
                       tstruct::TrapStructure{<:Real},
                       verbose::Bool=false) 
-
     num_traps = length(tstruct.spillpoints)
     num_regions = length(tstruct.supertraps_of)
     
     # compute initial spillfield with all traps empty
+    println("compute initial rateinfo with all traps empty")
     rateinfo = _compute_initial_rateinfo(precipitation, infiltration, tstruct)
 
     # --- Add influence of traps spilling over ---
@@ -186,6 +186,9 @@ function _compute_initial_rateinfo(precipitation, infiltration, tstruct)
 
     Smin = zeros(length(tstruct.footprints))
     Smax = zeros(length(tstruct.footprints))
+
+    # all lowest-level traps are assigned the inflow from their region,
+    # higher-level traps left at zero for now.
     trap_inflow = vcat(reg_accum, zeros(numtraps(tstruct) - numregions(tstruct)))
     rateinfo = RateInfo(runoff, Smax, Smin, trap_inflow)
     _update_Smin_Smax!(rateinfo, tstruct, 1:length(tstruct.footprints))

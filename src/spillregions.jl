@@ -320,22 +320,26 @@ function _process_domain!(regions::Matrix{Int64},
     if length(leak_edges) > 0
         unique_leak_edges = _select_unique_leakpoint(leak_edges, regionsdomain)
 
-        reg_bcells, btmcells = _region_bottomcells(regionsdomain, spilldomain,
-                                                   culverts=directed_culverts) # a Dict
-        append!(bottomcells, btmcells)
-        
+        reg_bcells = _region_bottomcells(regionsdomain, spilldomain,
+                                         culverts=directed_culverts) # a Dict
+
         remap = Vector{Int}(1:length(components)) # remapping of region numbers
         for e in unique_leak_edges
             src_reg = regionsdomain[e[1]]
             # remap all regions that were mapped to the zero-volume trap to the
             # downstream region.  
-            remap[remap .== src_reg] .= regionsdomain[e[2]]
+            remap[remap .== src_reg] .= remap[regionsdomain[e[2]]]
             # all bottom cells in source_region should now get edges directly to e[2]
             for bc in reg_bcells[src_reg]
                 push!(edges, (LI[bc], LI[e[2]]))
             end
         end
-        
+
+        # gathering the bottomcells of 'surviving' regions
+        remaining_regnums = unique(remap)
+        for r in remaining_regnums
+            append!(bottomcells, get(reg_bcells, r, []))
+        end
         # remap all nonzero entries of 'regionsdomain'
         nonzeros = regionsdomain .!= 0
         regionsdomain[nonzeros] .= remap[regionsdomain[nonzeros]]
@@ -372,6 +376,7 @@ function _region_bottomcells(regions, spillfield;
     # that region.
     bottomcells = setdiff(findall(spillfield .== -1), [x[1] for x in culverts])
 
+    # sorting bottomcells by region
     reg_bcells = Dict{Int, Vector{CartesianIndex{2}}}()
     for c in bottomcells
         reg = regions[c]
@@ -383,7 +388,7 @@ function _region_bottomcells(regions, spillfield;
             end
         end
     end
-    return reg_bcells, bottomcells
+    return reg_bcells
 end
 
 # ----------------------------------------------------------------------------
@@ -676,241 +681,40 @@ function _flat_zone_connecting_edges!(edges, leaks, M, grid, usediags::Bool=true
         [CartesianIndex(1, 0); CartesianIndex(-1, 1); CartesianIndex(0, 1); CartesianIndex(1,1)] :
         [CartesianIndex(1, 0); CartesianIndex(0, 1)]
 
+    in_domain = pt -> pt[1] <= IMax[1] && pt[1] >= IMin[1] &&
+                      pt[2] <= IMax[2] && pt[2] >= IMin[2]
+
+    # check for edges that define a connected flat zone of trap bottom cells    
     for ix_startnode in nodeixs
-
         for s in shift
+            ix_endnode  = ix_startnode + s
 
-            ix_endnode = ix_startnode + s
-
-            if ix_endnode[1] <= IMax[1] && ix_endnode[2] <= IMax[2] &&
-               ix_endnode[1] >= IMin[1] && ix_endnode[2] >= IMin[2]
-                # this is a neighbor node inside the grid
-                if M[ix_startnode] == -1 && M[ix_endnode] == -1
-                    # this is a neighboring trap bottom cell; connect the cells
+            if in_domain(ix_endnode)
+                if M[ix_endnode] == -1
+                    # we already know M[ix_startnode] == -1. This is a
+                    # neighboring trap bottom cell; connect the cells.
                     n1 = linear[ix_startnode]
                     n2 = linear[ix_endnode]
                     push!(edges, (n1, n2))
-                elseif !isnothing(grid) && M[ix_startnode] == -1 &&
-                       M[ix_endnode] ∉ [-1, -2] && grid[ix_endnode] <= grid[ix_startnode]
-                    # this is a potential leak point from a zero volume trap.
-                    # Note: code -2 represents a masked cell, e.g. a building.
-                    n1 = linear[ix_startnode]
-                    n2 = linear[ix_endnode]
-                    push!(leaks, (n1, n2))
+                end
+            end
+        end
+    end
+
+    # check for potential leak points from zero volume traps.
+    if !isnothing(grid)
+        for ix_startnode in nodeixs
+            for s in shift
+                tnodes = [ix_startnode - s, ix_startnode + s]
+                for tn in tnodes
+                    if in_domain(tn) && M[tn] ∉ [-1, -2] && grid[tn] == grid[ix_startnode]
+                        # the neighbor is not part of the trap botton, not masked, and
+                        # at the exact same elevation.
+                        push!(leaks, (linear[ix_startnode], linear[tn]))
+                    end
                 end
             end
         end
     end
 end
 
-# function _all_logical_neighbors(cell::CartesianIndex{2}, usediags::Bool, sz)
-#     neighs = Vector{CartesianIndex{2}}()
-#     cell[1] > 1  && push!(neighs, cell + CartesianIndex(-1, 0))
-#     cell[1] < sz[1] && push!(neighs, cell + CartesianIndex(1, 0))
-#     cell[2] > 1  && push!(neighs, cell + CartesianIndex(0, -1))
-#     cell[2] < sz[2] && push!(neighs, cell + CartesianIndex(0, 1))
-#     if usediags
-#         cell[1] > 1  && cell[2] > 1  && push!(neighs, cell + CartesianIndex(-1,-1))
-#         cell[1] < sz[1] && cell[2] > 1  && push!(neighs, cell + CartesianIndex(1, -1))
-#         cell[1] > 1  && cell[2] < sz[2] && push!(neighs, cell + CartesianIndex(-1, 1))
-#         cell[1] < sz[1] && cell[2] < sz[2] && push!(neighs, cell + CartesianIndex( 1, 1))
-#     end
-#     return neighs
-# end
-
-# ----------------------------------------------------------------------------
-# # This function may modify 'regions' and 'edges'
-# function _eliminate_flat_traps!(regions, edges, spillfield, grid,
-#                                 culverts::Vector{Tuple{CartesianIndex{2}, CartesianIndex{2}}},
-#                                 cut_edges::Dict{CartesianIndex{2}, Vector{CartesianIndex{2}}},
-#                                 usediags::Bool)
-#     spillfield_modif = copy(spillfield)
-#     spillfield_modif[[x[1] for x in culverts]] .= 10 # culvert inlets should not be regarded trap bottoms
-#     bottomcells = findall(spillfield_modif .== -1)
-#     cartind = CartesianIndices(size(spillfield))
-#     #nx, ny = size(spillfield)
-
-#     function _get_active_neighbors(cell)
-#         cell = cartind[cell]
-#         neighs = _all_logical_neighbors(cell, usediags, size(spillfield))
-#         # adjust for possible barriers (if cell->neighbor is a cut edge, then
-#         # this neighbor should not be considered)
-#         neighs = filter(n -> !(haskey(cut_edges, cell) && cut_edges[cell] == n), neighs)
-#     end
-    
-#     region_changes = Vector{Tuple{Int, Int}}()
-#     outlet_affected = Dict{CartesianIndex{2}, Vector{CartesianIndex{2}}}()
-#     covered = fill(false, length(bottomcells))
-
-#     for cell_ix = 1:length(bottomcells)
-#         if covered[cell_ix]
-#             continue
-#         end
-#         # this cell has not yet been covered by a previously identified outlet.
-#         cell = bottomcells[cell_ix]
-#         neighs = _get_active_neighbors(cell)
-#         for n in neighs
-#             if spillfield[n] >= 0 && grid[n] <= grid[cell]
-#                 # The neighbor spills out of the trap, with an elevation not higher than
-#                 # the bottom cell.  This trap must have zero volume.
-#                 push!(region_changes, (regions[cell], regions[n]))
-
-                
-#                 # identify all bottomcells that belong to this region, and remove
-#                 # them from the list of bottomcells to be processed
-#                 affected = findall(x -> regions[x] == regions[cell], bottomcells)
-#                 covered[affected] .= true
-#                 outlet_affected[n] = bottomcells[affected]
-
-#                 break # it's enough to have identified one exit point
-#             end
-#         end
-#     end
-    
-#     for n in keys(outlet_affected)
-#         union!(edges, _construct_outlet_flowpaths(n, outlet_affected[n],
-#                                                   usediags, size(spillfield)))
-#     end
-    
-#     regcells = regioncells(regions) # make lookups faster
-#     for i in 1:length(region_changes)
-#         from, to = region_changes[i]
-#         append!(regcells[to], regcells[from])
-#         empty!(regcells[from])
-#         for j in i+1:length(region_changes)
-#             if region_changes[j][2] == from
-#                 region_changes[j] = (region_changes[j][1], to)
-#             end
-#         end
-#     end
-#     for r_ix = 1:length(regcells)
-#         regions[regcells[r_ix]] .= r_ix
-#     end
-
-#     return collect(bottomcells[.!covered])
-# end
-
-
-# function _partition(pred, vec)
-#     # partition the vector into two vectors, one for which the predicate is true, and
-#     # one for which it is false.
-#     vec1 = Vector{eltype(vec)}()
-#     vec2 = Vector{eltype(vec)}()
-#     for x in vec
-#         if pred(x)
-#             push!(vec1, x)
-#         else
-#             push!(vec2, x)
-#         end
-#     end
-#     return vec1, vec2
-# end
-
-
-# function _construct_outlet_flowpaths(outlet_cell::CartesianIndex{2},
-#                                      remaining_bottomcells::Vector{CartesianIndex{2}},
-#                                      usediags::Bool, gridsize)
-#     # for each of the affected bottomcells, we need to construct the shortest
-#     # flow path to the outlet cell.  This flow path should pass entirely through
-#     # other affected bottomcells.  Flow can be along x-axis and y-axis, and
-#     # optionally along diagonals as well.
-#     # Return a list of all edges thus generated.
-#     edges = Vector{Tuple{Int, Int}}()
-#     active_set = [outlet_cell]
-#     while !isempty(remaining_bottomcells)
-#         @show length(remaining_bottomcells), length(active_set)
-#         # find the set of uncovered neighbors to the current active set
-#         next_active_set = Vector{CartesianIndex{2}}()
-#         for c in active_set
-#             neighs, remaining_bottomcells = _partition(x -> _are_neighbors(c, x, usediags), remaining_bottomcells)
-#             # add edges
-#             target = LinearIndices(gridsize)[c]
-#             for n in neighs
-#                 push!(edges, (LinearIndices(gridsize)[n], target))
-#                 push!(next_active_set, n)
-#             end
-#         end
-#         if next_active_set == []
-#             @assert isempty(remaining_bottomcells) "Could not find flow path from some bottomcells to outlet cell."
-#             break
-#         end
-#         active_set = next_active_set
-#     end
-#     return edges
-# end
-
-# function _are_neighbors(c1, c2, usediags)
-#     if usediags
-#         return abs(c1[1] - c2[1]) <= 1 && abs(c1[2] - c2[2]) <= 1
-#     else
-#         return (c1[1] == c2[1] && abs(c1[2] - c2[2]) == 1) ||
-#             (c1[2] == c2[2] && abs(c1[1] - c2[1]) == 1)
-#     end
-# end
-
-# function _construct_outlet_flowpaths(outlet_cell::CartesianIndex{2},
-#                                      remaining_bottomcells::Vector{CartesianIndex{2}},
-#                                      usediags::Bool, gridsize)
-
-#     # make bidirectional connectivity graph.  Nodes are numbered as follows: the
-#     # first N nodes correspond to the remaining bottomcells, and the last node
-#     # corresponds to the outlet cell.  Edges are between nodes that are
-#     # neighbors (i.e. they are adjacent in the grid, or diagonally adjacent if
-#     # usediags is true).
-#     all_nodes = [remaining_bottomcells; outlet_cell]
-#     g = _make_neighbor_graph(all_nodes, usediags)
-#     targets = fill(-1, length(remaining_bottomcells))
-#     N = length(targets)
-#     queue = [length(all_nodes)] # start from the outlet cell, which is the last node in 'all_nodes'
-#     while !isempty(queue)
-#         current = popfirst!(queue)
-#         neighs = Graphs.neighbors(g, current)
-#         if !isnothing(neighs)
-#             for neighbor in neighs
-#                 if neighbor <= N && targets[neighbor] == -1
-#                     targets[neighbor] = current
-#                     push!(queue, neighbor)
-#                 end
-#             end
-#         end
-#     end
-#     @assert all(x -> x != -1, targets) "Could not find flow path from some bottomcells to outlet cell."
-
-#     edges = Vector{Tuple{Int, Int}}()
-#     lind = LinearIndices(gridsize)
-#     for (ix, trg) in enumerate(targets)
-#         push!(edges, (lind[all_nodes[ix]], lind[all_nodes[trg]]))
-#     end
-#     return edges
-# end
-
-# function _make_neighbor_graph(cells::Vector{CartesianIndex{2}}, usediags::Bool)
-
-#     # determinining bounding box of cells
-#     min_i, max_i = extrema(c->c[1], cells)
-#     min_j, max_j = extrema(c->c[2], cells)
-
-#     # helper grid to speed up neighbor lookups
-#     grd = fill(-1, max_i - min_i + 1, max_j - min_j + 1)
-
-#     # fill in the grid with the indices of the cells
-#     for (i, c) in enumerate(cells)
-#         grd[c[1] - min_i + 1, c[2] - min_j + 1] = i
-#     end
-    
-#     edges = Graphs.SimpleEdge{Int64}[]
-#     for c in cells
-#         neighs = _all_logical_neighbors(c, usediags, (max_i, max_j))
-#         for n in neighs
-#             if n[1] < min_i || n[1] > max_i || n[2] < min_j || n[2] > max_j
-#                 continue
-#             end
-#             if grd[n[1] - min_i + 1, n[2] - min_j + 1] != -1
-#                 push!(edges, Graphs.SimpleEdge{Int64}((grd[c[1] - min_i + 1, c[2] - min_j + 1],
-#                                                        grd[n[1] - min_i + 1, n[2] - min_j + 1])))
-#             end
-#         end
-#     end
-
-#     return Graphs.SimpleGraph(edges)
-# end

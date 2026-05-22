@@ -1,5 +1,6 @@
 import Graphs
 import Roots
+#using Infiltrator # @@ for debugging
 
 export flatten_grid!, identify_flat_areas, toplevel_traps,
     show_region_selection, all_subtraps_of, interpolate_timeseries,
@@ -240,6 +241,7 @@ function _fill_state_to_terrainmap(tstruct::TrapStructure{<:Real},
         if all(filled[subtraps])
             trapcells = tstruct.footprints[trap]
             z_cur = waterheight(tstruct, trap, trapwater[trap])
+            
             covered_trapcells = trapcells[tstruct.topography[trapcells] .< z_cur]
             result[covered_trapcells] .= filled_color
         end
@@ -247,6 +249,24 @@ function _fill_state_to_terrainmap(tstruct::TrapStructure{<:Real},
     
     return result
 end
+
+# # ----------------------------------------------------------------------------
+# This earlier implemenation of `waterheight` runs into trouble if z_spill=Inf.
+# Keep in here for now, as it might be more robust in some cases?
+# function waterheight(tstruct, trap, current_watervolume; tol=sqrt(eps()))
+#     ownvolume = tstruct.trapvolumes[trap] - tstruct.subvolumes[trap]
+#     remaining = ownvolume - current_watervolume
+    
+#     trapcells = tstruct.footprints[trap]
+#     z_spill = tstruct.spillpoints[trap].elevation
+#     bottom = minimum(tstruct.topography[trapcells])
+#     bracket = (bottom, z_spill)
+#     fac = 1 - tol # avoid problem with bracketing interval due to roundoff error
+#     volfun = z -> sum(z_spill .- max.(z, tstruct.topography[trapcells]))
+
+#     z_cur = Roots.find_zero(z -> volfun(z) - remaining*fac, bracket)
+#     return z_cur
+# end
 
 # ----------------------------------------------------------------------------
 """
@@ -259,19 +279,18 @@ finding the level at which the volume of water in the trap (net of any subtraps)
 matches the provided `current_watervolume`.
 """
 function waterheight(tstruct, trap, current_watervolume; tol=sqrt(eps()))
-    ownvolume = tstruct.trapvolumes[trap] - tstruct.subvolumes[trap]
-    remaining = ownvolume - current_watervolume
-    
+    total_watervolume = current_watervolume + tstruct.subvolumes[trap]
     trapcells = tstruct.footprints[trap]
     z_spill = tstruct.spillpoints[trap].elevation
     bottom = minimum(tstruct.topography[trapcells])
     bracket = (bottom, z_spill)
     fac = 1 - tol # avoid problem with bracketing interval due to roundoff error
-    volfun = z -> sum(z_spill .- max.(z, tstruct.topography[trapcells]))
+    volfun = z -> sum(max.(z .- tstruct.topography[trapcells], 0.0))
 
-    z_cur = Roots.find_zero(z -> volfun(z) - remaining*fac, bracket)
+    z_cur = Roots.find_zero(z -> volfun(z) - total_watervolume*fac, bracket)
     return z_cur
 end
+
 
 # ----------------------------------------------------------------------------
 """
@@ -297,8 +316,8 @@ See also: [`identify_flat_areas`](@ref)
 """
 function flatten_grid!(grid::Matrix{<:Real},  # will be modified
                        mask::Matrix{<:Bool},  # constant
-                       height_choice::Symbol) # constant
-
+                       height_choice::Symbol) # constan
+t
     cl = _identify_clusters(mask)
 
     hchoice = Dict([(:min, minimum),
@@ -527,8 +546,9 @@ function show_region_selection(tstruct::TrapStructure{<:Real};
     end
 
     # trace rivers
+    wbodies = Set(tstruct.waterbodies) # convert to set for faster lookup
     if river_color != 0
-        #CI = CartesianIndices(size(grid))
+        CI = CartesianIndices(size(grid))
         for reg in selection
             if spillpoints[reg].downstream_region_cell > 0
                 #rix = CI[spillpoints[reg].downstream_region_cell]; # river startpoint
@@ -536,8 +556,18 @@ function show_region_selection(tstruct::TrapStructure{<:Real};
                 finished = false
                 while !finished
                     result[rix] = river_color
-                    #rix, finished = _downstream_cell(spillfield, rix)
+                    cell_old = CI[rix]
                     rix, finished = _downstream_cell(flowgraph, rix)
+                    # in case we are crossing a 'flat' area, the downstream
+                    # cell might not be directly connected to the previous
+                    # cell.  In this case, trace the line connecting the two cells.
+                    cell_new = CI[rix]
+                    if cell_new ∈ wbodies
+                        finished = true # always finished when reaching a water body
+                    elseif !_are_connected(cell_old, cell_new)
+                        line_ixs = _connect_cells(cell_old, cell_new)
+                        result[line_ixs] .= river_color
+                    end
                 end
             end
         end
@@ -583,6 +613,45 @@ function show_region_selection(tstruct::TrapStructure{<:Real};
 end
 
 # ----------------------------------------------------------------------------
+@inline function _connect_cells(cell1::CartesianIndex, cell2::CartesianIndex)
+    # return the linear indices of the cells along the line connecting cell1 and cell2
+    # using Bresenham's line algorithm
+    x1, y1 = Tuple(cell1)
+    x2, y2 = Tuple(cell2)
+    dx = abs(x2 - x1)
+    dy = abs(y2 - y1)
+    sx = x1 < x2 ? 1 : -1
+    sy = y1 < y2 ? 1 : -1
+    err = dx - dy
+
+    line_ixs = Vector{CartesianIndex{2}}()
+    
+    while true
+        push!(line_ixs, cell1)
+        if cell1 == cell2
+            break
+        end
+        err2 = err * 2
+        if err2 > -dy
+            err -= dy
+            cell1 += CartesianIndex(sx, 0)
+        end
+        if err2 < dx
+            err += dx
+            cell1 += CartesianIndex(0, sy)
+        end
+    end
+    
+    return line_ixs
+end
+
+# ----------------------------------------------------------------------------
+@inline function _are_connected(cell1::CartesianIndex, cell2::CartesianIndex)
+    # check if the cells are neighbors, along any of the eight cardinal directions
+    return all(abs.(Tuple(cell1) .- Tuple(cell2)) .<= 1)
+end
+
+# ----------------------------------------------------------------------------
 @inline function _downstream_cell(flowgraph::Graphs.SimpleDiGraph, lix::Int)
     outneighs = Graphs.outneighbors(flowgraph, lix)
     if isempty(outneighs)
@@ -591,38 +660,6 @@ end
         return outneighs[1], false
     end
 end
-
-# # ----------------------------------------------------------------------------
-# @inline function _downstream_cell(spillfield::Matrix{Int8}, cix::CartesianIndex{2})
-
-#     dir = spillfield[cix]
-#     if dir < 0
-#         return cix, true; # finished
-#     end
-
-#     cix =
-#         (dir == 0) ? cix + CartesianIndex(-1, 0) :
-#         (dir == 1) ? cix + CartesianIndex(1, 0) :
-#         (dir == 2) ? cix + CartesianIndex(0, -1) :
-#         (dir == 3) ? cix + CartesianIndex(0, 1) :
-#         (dir == 4) ? cix + CartesianIndex(-1, -1) :
-#         (dir == 5) ? cix + CartesianIndex(1, 1) :
-#         (dir == 6) ? cix + CartesianIndex(1, -1) :
-#         (dir == 7) ? cix + CartesianIndex(-1, 1) :
-#         cix
-
-#     finished = !( (1 <= cix[1] <= size(spillfield, 1)) && (1 <= cix[2] <= size(spillfield, 2)) )
-
-#     return cix, finished
-    
-# end
-
-# # ----------------------------------------------------------------------------
-# @inline function _downstream_cell(spillfield::Matrix{Int8}, lix::Int)
-#     cix, finished = _downstream_cell(spillfield, CartesianIndices(spillfield)[lix])
-#     return (finished ? -1 : LinearIndices(spillfield)[cix], finished)
-# end
-
 
 # ----------------------------------------------------------------------------
 """
@@ -664,31 +701,30 @@ function show_downstream_path(tstruct, startpoint; trap_color=2, river_color=3)
 end
 
 
-# ----------------------------------------------------------------------------
-function current_upstream_area(tstruct::TrapStructure{<:Real}, point, tstates; recur=1)
-    if recur >= 10000 # @@@ stack overflow guard
-        return []
-    end
-    submerged, puddlecells = _is_submerged(tstruct, point, tstates)
-    
-    if !submerged
-        # if we are not submerged, the only upstream area is the one consisting of
-        # cells spilling directly into the current cell
-        result = findall(Graphs.dfs_parents(tstruct.flowgraph, point, dir=:in) .> 0)
-    else
-        # all cells that immediately spills into the puddle, i.e. the whole local region
-        puddle_regions = Set(tstruct.regions[puddlecells])
-        result = collect(findall(in(puddle_regions), tstruct.regions[:]))
-    end
-
-    # add contribution of upstream spill regions that actively spill into the current
-    utraps = _in_dynamic_spillpath(tstruct, result, tstates)
-    for ut in utraps
-        spillpoint = tstruct.spillpoints[ut].current_region_cell
-        append!(result, current_upstream_area(tstruct, spillpoint, tstates, recur=recur+1))
-    end
-    return unique(result)
-end
+# # ----------------------------------------------------------------------------
+# function current_upstream_area(tstruct::TrapStructure{<:Real}, point, tstates; recur=1)
+#     if recur >= 10000 # @@@ stack overflow guard
+#         return []
+#     end
+#     submerged, puddlecells = _is_submerged(tstruct, point, tstates)
+#     if !submerged
+#         # if we are not submerged, the only upstream area is the one consisting of
+#         # cells spilling directly into the current cell
+#         result = findall(Graphs.dfs_parents(tstruct.flowgraph, point, dir=:in) .> 0)
+#     else
+#         # all cells that immediately spills into the puddle, i.e. the whole local region
+#         puddle_regions = Set(tstruct.regions[puddlecells])
+#         result = collect(findall(in(puddle_regions), tstruct.regions[:]))
+#     end
+#     # add contribution of upstream spill regions that actively spill into the current
+#     utraps = _in_dynamic_spillpath(tstruct, result, tstates)
+#     for ut in utraps
+#         @show ut
+#         spillpoint = tstruct.spillpoints[ut].current_region_cell
+#         append!(result, current_upstream_area(tstruct, spillpoint, tstates, recur=recur+1))
+#     end
+#     return unique(result)
+# end
 
 function _trap_stack_of(tstruct, pt)
 
@@ -753,37 +789,37 @@ function _is_submerged(tstruct, pt, tstates)
     end
 end
 
-function _in_dynamic_spillpath(tstruct, cells, tstates)
+# function _in_dynamic_spillpath(tstruct, cells, tstates)
     
-    # Check if there are any filled traps that are spilling into one of the
-    # cells, while not part of the cells themselves.
+#     # Check if there are any filled traps that are spilling into one of the
+#     # cells, while not part of the cells themselves.
 
-    # @ Note: the recurring loop through spillpoints may be an efficiency
-    # bottleneck if the recursion runs deeply, and there are many spillpoints.
-    # If this turns out to be a problem, we should optimize by precomputing
-    # trap spillgraph and pass it along.
+#     # @ Note: the recurring loop through spillpoints may be an efficiency
+#     # bottleneck if the recursion runs deeply, and there are many spillpoints.
+#     # If this turns out to be a problem, we should optimize by precomputing
+#     # trap spillgraph and pass it along.
 
-    # To avoid having to search trhough all cells each time (they may be numerous)
-    # we first identify the regions they represent, so we can do a quick screening
-    # first
-    regions = unique(tstruct.regions[cells])
+#     # To avoid having to search through all cells each time (they may be numerous)
+#     # we first identify the regions they represent, so we can do a quick screening
+#     # first
+#     regions = unique(tstruct.regions[cells])
 
-    # Now we can check for each filled trap if it is spilling into any of the regions
-    filled_traps = tstates[1]
-    spillpoints = tstruct.spillpoints
-    utraps = []
-    for i in 1:length(spillpoints)
+#     # Now we can check for each filled trap if it is spilling into any of the regions
+#     filled_traps = tstates[1]
+#     spillpoints = tstruct.spillpoints
+#     utraps = []
+#     for i in 1:length(spillpoints)
 
-        if (filled_traps[i] &&
-            spillpoints[i].downstream_region > 0 &&
-            spillpoints[i].downstream_region ∈ regions &&
-            spillpoints[i].downstream_region_cell ∈ cells &&
-            spillpoints[i].current_region_cell ∉ cells)
-            push!(utraps, i)
-        end
-    end
-    return utraps
-end
+#         if (filled_traps[i] &&
+#             spillpoints[i].downstream_region > 0 &&
+#             spillpoints[i].downstream_region ∈ regions &&
+#             spillpoints[i].downstream_region_cell ∈ cells &&
+#             spillpoints[i].current_region_cell ∉ cells)
+#             push!(utraps, i)
+#         end
+#     end
+#     return utraps
+# end
 # ----------------------------------------------------------------------------
 """
     upstream_area(tstruct, point, local_only=true)
@@ -1302,3 +1338,74 @@ function flatten_small_traps(topography::Matrix{<:Real}, vol_threshold::Real)
     return new_topography
 end
     
+# ----------------------------------------------------------------------------
+""" _active_region_spilltree(tstruct, filled) Given a set of filled traps,
+construct a tree graph expressing which regions are actively spilling onto
+others. (Regions associated with unfilled traps do not spill anywhere).
+"""
+function _active_region_spilltree(tstruct, filled)
+    @assert length(filled) == length(tstruct.spillpoints) # should be one per trap
+    uncovered = copy(filled) # keep track of which traps are already covered
+    targets = zeros(Int, numregions(tstruct))
+
+    # loop backwards,  since the spill of higher-level traps take precedence
+    for i in length(tstruct.spillpoints):-1:1
+        if uncovered[i]
+            # this trap is filled and has not already been covered by a higher-level trap
+            targets[tstruct.lowest_subtraps_for[i]] .= tstruct.spillpoints[i].downstream_region
+
+            # mark all subtraps of this trap as covered
+            subtraps = findall(Graphs.dfs_parents(tstruct.agglomerations, i, dir=:in) .> 0)
+
+            uncovered[subtraps] .= false
+        end
+    end
+            
+    # making edges for the tree graph
+    edges = [(i, targets[i]) for i in eachindex(targets) if targets[i] > 0]
+
+    # construct the graph 
+    g = Graphs.SimpleDiGraph([Graphs.SimpleEdge{Int64}((e[1], e[2])) for e in edges])
+
+    # ensure the graph contains as many nodes as there are regions, even if some are disconnected
+    Graphs.add_vertices!(g, numregions(tstruct) - Graphs.nv(g))
+
+    return g
+end
+
+function current_upstream_area(tstruct::TrapStructure{<:Real}, point, tstates)
+
+    # first, determine if location is submerged or not
+    submerged, puddlecells = _is_submerged(tstruct, point, tstates)
+
+    # determine involved, non-submerged cells
+    cells = submerged ?
+        [] :
+        findall(Graphs.dfs_parents(tstruct.flowgraph, point, dir=:in) .> 0)
+
+    # determine first-order full region contributions
+    full_regions = submerged ?
+        Set(tstruct.regions[puddlecells]) :
+        unique(vcat(tstruct.lowest_subtraps_for[
+            findall(x -> x ∈ cells, [x.downstream_region_cell for x in tstruct.spillpoints])]...))
+
+    # determine higher-order full region contributions
+    flowtree = _active_region_spilltree(tstruct, tstates[1])
+    tull = [findall(Graphs.dfs_parents(flowtree, x, dir=:in) .> 0) for x in full_regions]
+    
+    upstream_trapset = vcat([ findall(Graphs.dfs_parents(flowtree, x, dir=:in) .> 0)
+                              for x in full_regions ]...)
+
+    # list of all the regions whose full area contributes to the current point,
+    # either directly or through active spill paths
+    all_full_regions = union(upstream_trapset, full_regions)
+    
+    # determine all cells belonging to any of the contributing full regions
+
+    #regcells = findall(in(all_full_regions).(tstruct.regions[:])) # @@ Slow! 
+    mask = in.(tstruct.regions, Ref(Set(all_full_regions)))
+    regcells = findall(mask[:])
+    
+    return union(cells, regcells)
+end
+

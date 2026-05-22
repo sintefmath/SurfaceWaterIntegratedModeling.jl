@@ -145,6 +145,8 @@ function flow_path_from(tstruct::TrapStructure{<:Real},
 
     # helper function tracing a path donwstream from a given node until we hit a
     # trap bottom or exit the domain
+    CI = CartesianIndices(size(tstruct.topography))
+    CL = LinearIndices(size(tstruct.topography))
     function _trace_path(node)
         path = [node]
         while true
@@ -153,7 +155,13 @@ function flow_path_from(tstruct::TrapStructure{<:Real},
                 break;
             end
             @assert length(ds_nodes) == 1
-            push!(path, ds_nodes[1])
+            c1, c2 = CI[path[end]], CI[ds_nodes[1]]
+            if !_are_connected(c1, c2)
+                line_ixs = _connect_cells(c1, c2)
+                append!(path, CL[line_ixs])
+            else
+                push!(path, ds_nodes[1])
+            end
         end
         return path
     end
