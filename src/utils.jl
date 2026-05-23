@@ -1048,6 +1048,10 @@ function compute_spillfield_graph(spillfield::Matrix{Int8})
     # Create directed graph of connections
     g  = Graphs.SimpleDiGraph([Graphs.SimpleEdge{Int64}((e[1], e[2])) for e in edge_filt])
 
+    # Ensure all cells are present as vertices, including isolated trap bottoms
+    # surrounded by masked cells that produce no flow edges.
+    Graphs.add_vertices!(g, xmax * ymax - Graphs.nv(g))
+
     return g
 end
 
