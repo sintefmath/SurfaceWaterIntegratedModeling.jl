@@ -334,7 +334,7 @@ end
 
 # ----------------------------------------------------------------------------
 """
-    raise_buildings!(grid, building_mask, elevation_above_roof=5.0)
+    raise_buildings!(grid, building_mask, elevation_above_roof=10.0)
 
 Raise terrain cells covered by buildings to represent flat-roofed buildings in
 the elevation model.
@@ -376,14 +376,20 @@ function _identify_clusters(mask::Matrix{<:Bool})
     Dx = CartesianIndex(1, 0)
     Dy = CartesianIndex(0, 1)
     lind = LinearIndices(mask)
+    count = 0;
     for I in CartesianIndex(1,1):CartesianIndex(size(mask) .- 1)
         if mask[I]
+            count = count + 1;
             mask[I + Dx] && push!(edges, (lind[I], lind[I + Dx]))
             mask[I + Dy] && push!(edges, (lind[I], lind[I + Dy]))
         end
     end
     g = Graphs.SimpleGraph([Graphs.SimpleEdge{Int64}(e) for e in edges])
     clusters = Graphs.connected_components(g)
+    # filter out clusters with only one cell, since otherwise, all cells
+    # belong to a cluster, regardless of the mask.
+    clusters = filter(c -> length(c) > 1, clusters)
+    
     return clusters
 end
 
