@@ -1009,10 +1009,10 @@ function reconstruct_spillfield(tstruct::TrapStructure{<:Real})
         spillfield[sink] = -3
     end
 
-    # fill in buildings or clipped-away areas (-2)
-    if tstruct.building_mask != nothing
-        for I in CartesianIndices(tstruct.building_mask)
-            if tstruct.building_mask[I]
+    # fill in clipped-away areas (-2)
+    if tstruct.clip_mask != nothing
+        for I in CartesianIndices(tstruct.clip_mask)
+            if tstruct.clip_mask[I]
                 spillfield[I] = -2
             end
         end

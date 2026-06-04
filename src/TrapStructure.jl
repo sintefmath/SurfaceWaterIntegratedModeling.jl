@@ -26,7 +26,7 @@ A struct representing a watershed drainage trap for topographical analysis.
                                         the supertraps it belongs to (including itself).
 - `agglomerations::Graphs.SimpleDiGraph`: hierarchy of sub/supertraps, presented as a
                                           graph structure
-- `building_mask::Union{Matrix{Bool}, Nothing}`: building mask (0: terrain, 1: building)
+- `clip_mask::Union{Matrix{Bool}, Nothing}`: clip mask (0: active terrain, 1: clipped away)
 - `sinks::Union{Vector{Tuple{Int, Int}}, Nothing}`: list of sinks, in term of grid
                                                     cell coordinates
 - `cut_edges::Dict{CartesianIndex{2}, Vector{CartesianIndex{2}}}`:
@@ -50,7 +50,7 @@ mutable struct TrapStructure{T<:Real}
                                        # listing all the supertraps it belongs
                                        # to (including itself)
     agglomerations::Graphs.SimpleDiGraph # hierarchy of sub/supertraps
-    building_mask::Union{Matrix{Bool}, Nothing} # building mask (0: terrain, 1: building)
+    clip_mask::Union{Matrix{Bool}, Nothing} # clip mask (0: active terrain, 1: clipped away)
     sinks::Vector{CartesianIndex{2}}      # list cells being sinks
     waterbodies::Vector{CartesianIndex{2}} # list of cells belonging to waterbodies
     cut_edges::Dict{CartesianIndex{2}, Vector{CartesianIndex{2}}} # Dict of cut edges (barriers)

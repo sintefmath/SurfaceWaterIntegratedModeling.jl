@@ -10,7 +10,7 @@ export spillfield, update_spillfield!, vconcat_spillfields, hconcat_spillfields
 # large grids.
 # ----------------------------------------------------------------------------
 """
-    spillfield(grid; usediags=true, building_mask=nothing, sinks=Vector{CartesianIndex{2}}(),
+    spillfield(grid; usediags=true, clip_mask=nothing, sinks=Vector{CartesianIndex{2}}(),
                blocked_edges=Dict{CartesianIndex{2}, Vector{CartesianIndex{2}}}(),
                lengths=nothing, domain=nothing, tiling=nothing)
 
@@ -19,7 +19,7 @@ Compute the spillfield of a raster terrain, represented by `grid`.
 The spillfield is returned an integer array of same shape as `grid`, to be
 interpreted as follows: 
 * -3 : sink (any passing streamline is terminated here)
-* -2 : covered by building / clipped away
+* -2 : clipped away
 * -1 : no downward slope (gridcell is a trap)
 *  0 : steepest slope towards (i-1, j)
 *  1 : steepest slope towards (i+1, j)
@@ -39,10 +39,9 @@ returned as a second argument.
 # Arguments
 - `grid::Matrix{<:Real}`: terrain raster grid with height values
 - `usediags::Bool=true`: if true, also consider slopes along diagonals
-- `building_mask::Union{Matrix{Bool}, BitMatrix, Nothing}=nothing`: 
-      a grid of logicals, specifying which cells are masked by buildings (true), 
-      and thus inactive. These cells will be assigned a spill field value of -2
-      (see list above).
+- `clip_mask::Union{Matrix{Bool}, BitMatrix, Nothing}=nothing`:
+      a grid of logicals, specifying which cells are clipped away (true) and thus
+      inactive. These cells will be assigned a spill field value of -2 (see list above).
 - `sinks::Vector{CartesianIndex{2}}=Vector{CartesianIndex{2}}()`: 
       vector containing (i, j) grid coordinates of any point sinks in the grid, if any
 - `blocked_edges::Dict{CartesianIndex{2}, Vector{CartesianIndex{2}}}=Dict{CartesianIndex{2}, Vector{CartesianIndex{2}}}()`:
@@ -62,7 +61,7 @@ See also [`update_spillfield!`](@ref).
 """
 function spillfield(grid::Matrix{<:Real};
                     usediags::Bool=true,
-                    building_mask::Union{Matrix{<:Bool}, BitMatrix, Nothing}=nothing,
+                    clip_mask::Union{Matrix{<:Bool}, BitMatrix, Nothing}=nothing,
                     sinks::Vector{CartesianIndex{2}}=Vector{CartesianIndex{2}}(),
                     blocked_edges::Dict{CartesianIndex{2}, Vector{CartesianIndex{2}}}=
                         Dict{CartesianIndex{2}, Vector{CartesianIndex{2}}}(),
@@ -80,13 +79,13 @@ function spillfield(grid::Matrix{<:Real};
     dir   = Matrix{Int8}(undef, xlen, ylen)
     slope = Matrix{Float64}(undef, xlen, ylen)
 
-    if building_mask != nothing
+    if clip_mask != nothing
         # we are going to locally modify the grid, so we must copy it
-        building_mask = building_mask .|> Bool  # ensure type is Bool
+        clip_mask = clip_mask .|> Bool  # ensure type is Bool
         grid = copy(grid)
-        grid[building_mask] .= Inf
+        grid[clip_mask] .= Inf
     end
-    
+
     if tiling == nothing
         _spillfield!(dir, slope, grid,
                      usediags=usediags,
@@ -105,18 +104,18 @@ function spillfield(grid::Matrix{<:Real};
         end
     end
 
-    # fill in any buildings
-    _fill_in_buildings_and_sinks!(dir, slope, building_mask, sinks)
+    # fill in clip mask and sinks
+    _flag_clipped_and_sinks!(dir, slope, clip_mask, sinks)
 
     # impose barriers (only matters if `blocked_edges` is non-empty)
     _impose_barriers!(dir, slope, grid, lengths, blocked_edges)
-    
+
     return dir, slope
 end
 
 # ----------------------------------------------------------------------------
 """
-    update_spillfield!(dir, slope, grid, domain; building_mask=nothing, sinks=nothing,
+    update_spillfield!(dir, slope, grid, domain; clip_mask=nothing, sinks=nothing,
                        blocked_edges=Dict{CartesianIndex{2}, Vector{CartesianIndex{2}}}(),
                        usediags=true, lengths=nothing)
 
@@ -135,10 +134,10 @@ the topography grid has presumably changed).
                           domain.
 - `domain::Domain2D` : the domain in which to update the information in `dir` 
                        and `slope`
-- `building_mask::Union{Matrix{Bool}, Nothing}=nothing`: 
-      a grid of logicals, specifying which cells are masked by buildings (true), 
-      and thus inactive. These cells will be assigned a spill field value of -2 
-      (see list of possible fieldvalues in documentation of [`spillfield`](@ref).)
+- `clip_mask::Union{Matrix{Bool}, Nothing}=nothing`:
+      a grid of logicals, specifying which cells are clipped away (true) and thus
+      inactive. These cells will be assigned a spill field value of -2
+      (see list of possible field values in documentation of [`spillfield`](@ref).)
 - `sinks::Vector{CartesianIndex{2}}=nothing`: 
       vector containing (i, j) grid coordinates of any point sinks in the grid, if any.
 - `blocked_edges::Dict{CartesianIndex{2}, Vector{CartesianIndex{2}}}=Dict{CartesianIndex{2}, Vector{CartesianIndex{2}}}()`:
@@ -153,7 +152,7 @@ See also [`spillfield`](@ref).
 """
 function update_spillfield!(dir::Matrix{Int8}, slope::Array{<:Real}, # output
                             grid::Matrix{<:Real}, domain::Domain2D;
-                            building_mask=nothing, sinks=nothing,
+                            clip_mask=nothing, sinks=nothing,
                             blocked_edges::Dict{CartesianIndex{2}, Vector{CartesianIndex{2}}}=
                                 Dict{CartesianIndex{2}, Vector{CartesianIndex{2}}}(),
                             usediags::Bool=true, lengths=nothing)
@@ -165,31 +164,30 @@ function update_spillfield!(dir::Matrix{Int8}, slope::Array{<:Real}, # output
         max(domain.xrange[1]-1, 1):min(domain.xrange[end]+1, size(grid, 1)),
         max(domain.yrange[1]-1, 1):min(domain.yrange[end]+1, size(grid, 2)));
 
-    if building_mask != nothing
+    if clip_mask != nothing
         # we are going to locally modify the grid, so we must copy it
-        building_mask = building_mask .|> Bool  # ensure type is Bool
+        clip_mask = clip_mask .|> Bool  # ensure type is Bool
         grid = copy(grid)
-        grid[building_mask] .= Inf
+        grid[clip_mask] .= Inf
     end
-    
+
     _spillfield!(dir, slope, grid, domain=domain2, usediags=usediags, lengths=lengths)
 
-    # fill in any buildings
-    _fill_in_buildings_and_sinks!(dir, slope, building_mask, sinks)
+    # fill in clip mask and sinks
+    _flag_clipped_and_sinks!(dir, slope, clip_mask, sinks)
 
     # impose barriers (only matters if `blocked_edges` is non-empty)
     _impose_barriers!(dir, slope, grid, lengths, blocked_edges)
 end
 
 # ----------------------------------------------------------------------------
-# Flag the cells in the spillfield raster grid that are covered by buildings, or 
-# constitute sinks.
-function _fill_in_buildings_and_sinks!(dir, slope, building_mask, sinks)
+# Flag the cells in the spillfield raster grid that are clipped away, or constitute sinks.
+function _flag_clipped_and_sinks!(dir, slope, clip_mask, sinks)
 
-    # fill in any buildings
-    if building_mask != nothing
-        dir[building_mask] .= -2 # these gridcells are clipped away by buildings
-        slope[building_mask] .= NaN
+    # fill in any clipped cells
+    if clip_mask != nothing
+        dir[clip_mask] .= -2
+        slope[clip_mask] .= NaN
     end
 
     # fill in any sinks

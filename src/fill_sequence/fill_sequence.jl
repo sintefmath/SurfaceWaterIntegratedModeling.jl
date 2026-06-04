@@ -103,7 +103,7 @@ function _fill_sequence_for_weather_event!(seq, sgraph, rateinfo, changetimeest,
     count = 0
     while cur_time < endtime
         verbose && (mod(count+=1, 10) == 0) && println("Fill sequence iteration: ", count)
-        
+
         cur_time, fill_updates =
             _identify_next_status_change!(changetimeest, cur_amounts, rateinfo,
                                           filled_traps, tstruct, z_vol_tables,

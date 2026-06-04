@@ -178,7 +178,7 @@ function test_buildings_and_flattening(grid, mask, target_nums; usediags=true)
     flatten_grid!(grid_flat, water_surfaces, :min)
 
     tstruct  = spillanalysis(grid, usediags=usediags);
-    tstruct2 = spillanalysis(grid_flat, building_mask=mask, usediags=usediags);
+    tstruct2 = spillanalysis(grid_flat, clip_mask=mask, usediags=usediags);
 
     return length(unique(tstruct.regions)) == target_nums[1] &&
            length(unique(tstruct2.regions)) == target_nums[2]
@@ -201,9 +201,9 @@ end
 
 function test_spillanalysis(grid, num_spoints, tot_trapvol, tot_subvols, tot_footprint_area,
                             num_agglom_edges;
-                            usediags=true, building_mask=nothing, merge_outregs=false)
+                            usediags=true, clip_mask=nothing, merge_outregs=false)
 
-    tstruct = spillanalysis(grid, usediags=usediags, building_mask=building_mask,
+    tstruct = spillanalysis(grid, usediags=usediags, clip_mask=clip_mask,
                             merge_outregions=merge_outregs)
 
     length(tstruct.spillpoints) == num_spoints                         || return false
@@ -224,7 +224,7 @@ end
 
 function test_sequencing(grid, use_infiltration, seqlength, maxtime; mask=nothing)
 
-    tstruct = spillanalysis(grid, building_mask=mask)
+    tstruct = spillanalysis(grid, clip_mask=mask)
 
     infiltration = nothing
     weather_events = [WeatherEvent(0.0, 1.0)]

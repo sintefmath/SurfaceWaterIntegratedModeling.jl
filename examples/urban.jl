@@ -120,8 +120,8 @@ smask[smask .!= Images.Gray{Images.N0f8}(0.0)] .= Images.Gray{Images.N0f8}(1.0)
 smask = Matrix{Bool}(smask .== Images.Gray{Images.N0f8}(1.0));
 
 # ### Run the two spill analyses
-tstruct_nosinks = spillanalysis(grid_dtm, building_mask=bmask)
-tstruct_sinks = spillanalysis(grid_dtm, building_mask=bmask, sinks=smask);
+tstruct_nosinks = spillanalysis(grid_dtm, clip_mask=bmask)
+tstruct_sinks = spillanalysis(grid_dtm, clip_mask=bmask, sinks=smask);
 
 ## Visualize the result of the static analyses
 

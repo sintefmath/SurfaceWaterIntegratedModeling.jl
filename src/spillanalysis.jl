@@ -5,7 +5,7 @@ import Images
 # all outside regions represented as -1 if true
 # @@ NB: Domain currently only implemented for spillfield!
 """
-    spillanalysis(grid; usediags=true, building_mask=nothing, sinks=Vector{CartesianIndex{2}}(),
+    spillanalysis(grid; usediags=true, clip_mask=nothing, sinks=Vector{CartesianIndex{2}}(),
                   lengths=nothing, domain=nothing, merge_outregions=false, verbose=false,
                   culverts=Vector{Tuple{CartesianIndex{2}, CartesianIndex{2}}}(),
                   barriers=Vector{Vector{CartesianIndex{2}}}())
@@ -22,9 +22,10 @@ documentation for details.
 # Arguments
 - `grid::Matrix{<:Real}`: topograpical grid to analyse
 - `usediags::Bool=true`: if true, also consider slopes along diagonals
-- `building_mask::Union{Matrix{<:Bool}, BitMatrix, Nothing}=nothing`: 
-      if present, provides a mask that specifies the footprint of buildings.  
-      These parts of the domain will be clipped away.
+- `clip_mask::Union{Matrix{<:Bool}, BitMatrix, Nothing}=nothing`:
+      if present, provides a mask of cells to clip away from the analysis (e.g.
+      buildings, or other objects that water cannot flow into or through).
+      Clipped cells are excluded entirely from the terrain analysis.
 - `sinks::Union{Vector{CartesianIndex{2}}, Matrix{Bool}}=Vector{CartesianIndex{2}}()`:
       vector containing (i, j) grid coordinates of any point sinks in the grid, if any.
       Can also be a Matrix{Bool} of same size as `grid`, indicating the sink locations.
@@ -49,7 +50,7 @@ See also [`TrapStructure`](@ref), [`fill_sequence`](@ref).
 """
 function spillanalysis(grid::Matrix{<:Real};
                   usediags::Bool=true,
-                  building_mask::Union{Matrix{<:Bool}, BitMatrix, Nothing}=nothing,
+                  clip_mask::Union{Matrix{<:Bool}, BitMatrix, Nothing}=nothing,
                   sinks::Union{Vector{CartesianIndex{2}}, Matrix{Bool}}=Vector{CartesianIndex{2}}(),
                   waterbodies::Union{Matrix{<:Bool}, Nothing}=nothing,
                   lengths::Union{Tuple{<:Real}, Nothing}=nothing,
@@ -95,7 +96,7 @@ function spillanalysis(grid::Matrix{<:Real};
                               lengths=lengths, domain=domain,
                               sinks=sinks,
                               blocked_edges=cut_edge_dict,
-                              building_mask=building_mask)
+                              clip_mask=clip_mask)
 
     verbose && println("Entering spillregions")
     regions, flowgraph, trap_bottoms =
@@ -153,7 +154,7 @@ function spillanalysis(grid::Matrix{<:Real};
                                        lowest_regions,
                                        supertraps_of,
                                        subtrapgraph,
-                                       building_mask,
+                                       clip_mask,
                                        sinks,
                                        wbody_cells,
                                        cut_edge_dict)
