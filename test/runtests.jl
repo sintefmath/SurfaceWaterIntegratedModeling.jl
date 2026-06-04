@@ -62,6 +62,10 @@ end
     @test test_sinks(grid2, [CartesianIndex(119,193), CartesianIndex(180, 193)]) usediags=true
 end
 
+@testset "Raise buildings" begin
+    @test test_raise_buildings()
+end
+
 @testset "Watercourses" begin
     # on synthetic grid
     @test test_watercourses(grid3, 1.0, [], 0.0) # empty traps

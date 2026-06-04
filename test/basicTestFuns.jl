@@ -222,6 +222,35 @@ function test_upstream_area(grid, point, area; local_only=true)
 end
 
 
+function test_raise_buildings()
+
+    # 5x5 grid: grid[i,j] = i + 5*(j-1), values 1..25
+    grid = Float64[i + 5*(j-1) for i in 1:5, j in 1:5]
+
+    # Building 1: rows 1-2, cols 1-2 — cell values {1,2,6,7}, max = 7
+    # Building 2: rows 4-5, cols 4-5 — cell values {19,20,24,25}, max = 25
+    building_mask = falses(5, 5)
+    building_mask[1:2, 1:2] .= true
+    building_mask[4:5, 4:5] .= true
+
+    grid_orig = copy(grid)
+    offset = 3.0
+    raise_buildings!(grid, building_mask, offset)
+
+    all(grid[1:2, 1:2]   .== 7.0  + offset) || return false  # building 1 raised uniformly
+    all(grid[4:5, 4:5]   .== 25.0 + offset) || return false  # building 2 raised uniformly
+    all(grid[.!building_mask] .== grid_orig[.!building_mask]) || return false  # rest unchanged
+
+    # verify default offset is 5.0
+    grid2 = ones(3, 3)
+    mask2 = falses(3, 3)
+    mask2[1:2, 1:2] .= true
+    raise_buildings!(grid2, mask2)
+    all(grid2[1:2, 1:2] .== 1.0 + 5.0) || return false
+
+    return true
+end
+
 function test_sequencing(grid, use_infiltration, seqlength, maxtime; mask=nothing)
 
     tstruct = spillanalysis(grid, clip_mask=mask)
