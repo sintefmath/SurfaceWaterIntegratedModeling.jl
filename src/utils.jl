@@ -2,7 +2,7 @@ import Graphs
 import Roots
 #using Infiltrator # @@ for debugging
 
-export flatten_grid!, identify_flat_areas, toplevel_traps,
+export flatten_grid!, raise_buildings!, identify_flat_areas, toplevel_traps,
     show_region_selection, all_subtraps_of, interpolate_timeseries,
     trap_states_at_timepoints, compute_spillfield_graph, all_upstream_regions,
     upstream_area, current_upstream_area,
@@ -330,6 +330,43 @@ t
         grid[c] .= hfun(grid[c])
     end
     
+end
+
+# ----------------------------------------------------------------------------
+"""
+    raise_buildings!(grid, building_mask, elevation_above_roof=5.0)
+
+Raise terrain cells covered by buildings to represent flat-roofed buildings in
+the elevation model.
+
+For each contiguous building footprint, all cells within the footprint are set
+to the same elevation: the maximum terrain elevation found within that footprint
+plus `elevation_above_roof`.  This models each building as having a flat roof
+at a uniform height across its entire base.
+
+Modifies `grid` in place.  This is a preprocessing step for including buildings
+in the terrain analysis rather than clipping them away.  After calling this
+function the terrain can be passed directly to [`spillanalysis`](@ref) without
+a `clip_mask`, and water will be routed around and over the raised building
+cells.
+
+# Arguments
+- `grid::Matrix{<:Real}`: terrain raster grid with height values.  Modified in place.
+- `building_mask::Matrix{<:Bool}`: boolean grid of the same shape as `grid`, where
+      `true` marks cells covered by a building footprint.
+- `elevation_above_roof::Real=5.0`: height (in the same units as `grid`) added
+      above the highest terrain point within each building footprint, giving the
+      uniform roof elevation for that building.
+
+See also [`spillanalysis`](@ref), [`flatten_grid!`](@ref).
+"""
+function raise_buildings!(grid::Matrix{<:Real},
+                          building_mask::Matrix{<:Bool},
+                          elevation_above_roof::Real=5.0)
+    clusters = _identify_clusters(building_mask)
+    for c in clusters
+        grid[c] .= maximum(grid[c]) + elevation_above_roof
+    end
 end
 
 # ----------------------------------------------------------------------------
