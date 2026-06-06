@@ -58,17 +58,16 @@ function watercourses(tstruct::TrapStructure{<:Real},
     # Compute basic flow field intensity, as if all traps were empty
     #g = compute_spillfield_graph(tstruct.spillfield)
     g = tstruct.flowgraph
-    sortedg = Graphs.topological_sort_by_dfs(g) # sort nodes to avoid invalidating
-                                                # earlier work
+    sortedg = topological_order(g)
     for cur_node in sortedg
 
         if runoff[cur_node] >= 0
             # there is infiltration excess flow across this node.  Propagate downstream
-            ds_node = Graphs.outneighbors(g, cur_node)
-            
+            ds_node = downstream_cells(g, cur_node)
+
             if !isempty(ds_node)
                 @assert length(ds_node) == 1
-                ds_node = ds_node[1]
+                ds_node = Int(ds_node[1])
                 runoff[ds_node] += runoff[cur_node]
             else
                 # we are at a bottom point.  Register accumulated runoff to
@@ -151,12 +150,12 @@ function flow_path_from(tstruct::TrapStructure{<:Real},
     function _trace_path(node)
         path = [node]
         while true
-            ds_nodes = Graphs.outneighbors(tstruct.flowgraph, path[end])
+            ds_nodes = downstream_cells(tstruct.flowgraph, path[end])
             if isempty(ds_nodes)
                 break;
             end
             @assert length(ds_nodes) == 1
-            c1, c2 = CI[path[end]], CI[ds_nodes[1]]
+            c1, c2 = CI[path[end]], CI[Int(ds_nodes[1])]
             if !_are_connected(c1, c2) && c2 ∉ wbodies
                 line_ixs = _connect_cells(c1, c2)
                 append!(path, CL[line_ixs])
@@ -314,7 +313,7 @@ function _update_runoff!(runoff::Matrix{<:Real},         # modified in-place
                          spoint::Spillpoint,
                          output::Real,
                          regions::Matrix{Int64},
-                         dstream::Graphs.SimpleDiGraph)
+                         dstream::FlowGraph)
     # Propagate the additional runoff from the trap downstream until it reaches the
     # bottom of the next downstream trap, or exits the domain.
 
@@ -325,7 +324,7 @@ function _update_runoff!(runoff::Matrix{<:Real},         # modified in-place
     end
 
     target = spoint.downstream_region_cell
-    
+
     # if we got here, trap is spilling to a cell inside the domain
     while target > 0 && output > 0
 
@@ -334,8 +333,8 @@ function _update_runoff!(runoff::Matrix{<:Real},         # modified in-place
         output = max(output - infiltrated, 0.0)
 
         reg = regions[target]
-        target = Graphs.outneighbors(dstream, target)
-        if isempty(target)
+        ds = downstream_cells(dstream, target)
+        if isempty(ds)
             if (reg > 0)
                 region_accum[reg] += output
             else
@@ -343,8 +342,8 @@ function _update_runoff!(runoff::Matrix{<:Real},         # modified in-place
             end
             target = 0
         else
-            @assert length(target) == 1
-            target = target[1]
+            @assert length(ds) == 1
+            target = Int(ds[1])
         end
     end
 end

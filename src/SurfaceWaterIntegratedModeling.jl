@@ -4,6 +4,7 @@ using LazyArtifacts
 # ----------------------------------------------------------------------------
 include("domain.jl")
 include("spillfield.jl")
+include("FlowGraph.jl")
 include("spillregions.jl")
 include("spillpoints.jl")
 include("trapvolumes.jl")
