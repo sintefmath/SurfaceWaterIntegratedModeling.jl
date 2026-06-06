@@ -301,6 +301,10 @@ function _process_domain!(regions::Matrix{Int64},
         push!(edges_to_remove, filter(e->e[1] == p1, edges)...)
         # add edge from p1 to p2
         push!(edges, (p1, p2))
+
+        if spillfield[p1] == -1
+            push!(leak_edges, (p1, p1)) # map directy to top (not bottom!) of culvert
+        end
     end
     setdiff!(edges, edges_to_remove)
 
@@ -318,6 +322,8 @@ function _process_domain!(regions::Matrix{Int64},
     # set leak points from zero volume traps
     println("Setting leak points from zero volume traps...") 
     if length(leak_edges) > 0
+        @assert gdomain != nothing "Leaks only identified if grid is present"
+        
         unique_leak_edges = _select_unique_leakpoint(leak_edges, regionsdomain)
 
         reg_bcells = _region_bottomcells(regionsdomain, spilldomain,
@@ -330,8 +336,13 @@ function _process_domain!(regions::Matrix{Int64},
             # downstream region.  
             remap[remap .== src_reg] .= remap[regionsdomain[e[2]]]
             # all bottom cells in source_region should now get edges directly to e[2]
+            # Note, in the case of culverts evacuating water from a flat zone, the
+            # region will already be the same as the downstream region, so we cannot
+            # blindly add edges from all bottom cells of that region to e[2], as this
+            # would also assign edges from the cells that are _actual_ bottom cells of
+            # the region.  Hence the elevation comparison below.
             for bc in reg_bcells[src_reg]
-                push!(edges, (LI[bc], LI[e[2]]))
+                (gdomain[bc] == gdomain[e[1]]) && push!(edges, (LI[bc], LI[e[2]]))
             end
         end
 
