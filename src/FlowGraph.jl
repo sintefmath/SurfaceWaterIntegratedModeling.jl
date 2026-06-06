@@ -66,7 +66,7 @@ end
 Return the downstream neighbour(s) of `cell`.  Returns an empty vector for
 trap bottoms and domain exits.  Almost always returns a single-element vector.
 """
-@inline function downstream_cells(g::FlowGraph, cell::Int)
+@inline function downstream_cells(g::FlowGraph, cell::Integer)
     i32 = Int32(cell)
     if haskey(g.multi, i32)
         return g.multi[i32]
@@ -82,7 +82,7 @@ end
 Return `true` if `cell` has at least one downstream neighbour (i.e. is not a
 trap bottom or domain exit).
 """
-@inline function has_downstream(g::FlowGraph, cell::Int)
+@inline function has_downstream(g::FlowGraph, cell::Integer)
     return g.forward[cell] != 0 || haskey(g.multi, Int32(cell))
 end
 
@@ -105,7 +105,7 @@ first call.
 `start` itself is excluded from the result, matching the behaviour of
 `Graphs.dfs_parents(g, start, dir=:in) .> 0`.
 """
-function upstream_dfs(g::FlowGraph, start::Int)
+function upstream_dfs(g::FlowGraph, start::Integer)
     isnothing(g._backward) && _build_backward!(g)
     n       = length(g.forward)
     visited = falses(n)
