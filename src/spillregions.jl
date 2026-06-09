@@ -298,7 +298,10 @@ function _process_domain!(regions::Matrix{Int64},
     for c in directed_culverts
         p1, p2 = LI[c[1]], LI[c[2]]
         # identify any edges flowing out from p1
-        push!(edges_to_remove, filter(e->e[1] == p1, edges)...)
+        existing_edges = filter(e->e[1] == p1, edges)
+        if !isempty(existing_edges)
+            push!(edges_to_remove, existing_edges...)             
+        end
         # add edge from p1 to p2
         push!(edges, (p1, p2))
 
