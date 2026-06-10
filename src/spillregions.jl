@@ -295,8 +295,10 @@ function _process_domain!(regions::Matrix{Int64},
     # (p2) elevation, and remove any edges flowing out from p1.
     LI = LinearIndices(size(spilldomain))
     edges_to_remove = Set{Tuple{Int, Int}}()
+    @assert gdomain != nothing || isempty(directed_culverts) "Culverts only supported if grid is present, since we need to identify the direction of flow through the culvert"
     for c in directed_culverts
         p1, p2 = LI[c[1]], LI[c[2]]
+
         # identify any edges flowing out from p1
         existing_edges = filter(e->e[1] == p1, edges)
         if !isempty(existing_edges)
@@ -305,10 +307,15 @@ function _process_domain!(regions::Matrix{Int64},
         # add edge from p1 to p2
         push!(edges, (p1, p2))
 
-        if spillfield[p1] == -1
+        # a sloping culvert can serve as a leak edge.  A completely flat
+        # culvert should not be considered a leak edge, since this may cause loops
+        # in the flowgraph when leak points are connected below.
+        sloping = (gdomain[c[1]] != gdomain[c[2]]) 
+        if spillfield[p1] == -1 && sloping
             push!(leak_edges, (p1, p1)) # map directy to top (not bottom!) of culvert
         end
     end
+    
     setdiff!(edges, edges_to_remove)
 
     # identify regions connected by streamlines
