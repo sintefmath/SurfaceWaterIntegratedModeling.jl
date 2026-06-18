@@ -20,6 +20,7 @@ include("fill_sequence/flow.jl")
 include("fill_sequence/fill_sequence.jl")
 # ----------------------------------------------------------------------------
 include("watercourses.jl")
+include("dynamics/elements.jl")
 include("utils.jl")
 # ----------------------------------------------------------------------------
 include("IOandplot.jl") 

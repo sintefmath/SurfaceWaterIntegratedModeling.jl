@@ -1,6 +1,6 @@
 import Graphs
 
-export DynObject, DynFlowPath, DynTrap, DynCulvert
+export DynObject, DynFlowPath, DynTrap, DynCulvert, DynNetwork, setup_network
 
 # Make generic baseclass for dynamic objects
 abstract type DynObject end
@@ -295,7 +295,10 @@ function _path_components(all_paths, all_traps)
     parent = collect(1:n)
 
     find_root(x) = (while parent[x] != x; parent[x] = parent[parent[x]]; x = parent[x]; end; x)
-    unite!(x, y) = (rx, ry = find_root(x), find_root(y); rx != ry && (parent[rx] = ry))
+    function unite!(x, y)
+        rx, ry = find_root(x), find_root(y)
+        rx != ry && (parent[rx] = ry)
+    end
 
     for pi in 1:n
         for mp in all_paths[pi].merges
