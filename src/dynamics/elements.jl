@@ -321,20 +321,29 @@ function _topological_order(global_path_ids, global_trap_ids, all_paths, all_tra
     np = length(global_path_ids)
     path_node = Dict(gpi => i      for (i, gpi) in enumerate(global_path_ids))
     trap_node = Dict(gti => np + i for (i, gti) in enumerate(global_trap_ids))
-    path_set  = Set(global_path_ids)
-    trap_set  = Set(global_trap_ids)
 
+    # Every path/trap referenced from within this component is itself part of the
+    # component: _path_components unions paths via their merges and via
+    # path→trap→spill_path, and _build_component collects every target trap.  So a
+    # nonzero reference is guaranteed to resolve here (asserted, not tested).
     g = Graphs.SimpleDiGraph(np + length(global_trap_ids))
     for (li, gpi) in enumerate(global_path_ids)
         p = all_paths[gpi]
-        p.target_trap ∈ trap_set && Graphs.add_edge!(g, li, trap_node[p.target_trap])
+        if p.target_trap > 0
+            @assert haskey(trap_node, p.target_trap)
+            Graphs.add_edge!(g, li, trap_node[p.target_trap])
+        end
         for m in p.merges
-            m ∈ path_set && Graphs.add_edge!(g, path_node[m], li)
+            @assert haskey(path_node, m)
+            Graphs.add_edge!(g, path_node[m], li)
         end
     end
     for (li, gti) in enumerate(global_trap_ids)
         sp = all_traps[gti].spill_path
-        sp ∈ path_set && Graphs.add_edge!(g, np + li, path_node[sp])
+        if sp > 0
+            @assert haskey(path_node, sp)
+            Graphs.add_edge!(g, np + li, path_node[sp])
+        end
     end
 
     # The flow graph is assumed acyclic (water flows strictly downstream); a cycle
