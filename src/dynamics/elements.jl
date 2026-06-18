@@ -137,56 +137,92 @@ Create a simple line-like network associated with the complete flow path from a
 point in the terrain.
 """
 function _subnetwork(tstruct, coord::CartesianIndex, full_traps)
-    CI = CartesianIndices(tstruct.topography)
     LI = LinearIndices(tstruct.topography)
-    dyn_paths = Vector{DynFlowPath}()
-    dyn_traps = Vector{DynTrap}()
 
-    paths, downstream_full_traps = flow_path_from(tstruct, LI[coord]; full_traps=full_traps)
-    @assert length(paths) == length(downstream_full_traps) ||
-            length(paths) == length(downstream_full_traps) + 1
+    paths, ftraps = flow_path_from(tstruct, LI[coord]; full_traps=full_traps)
+    @assert abs(length(paths) - length(ftraps)) <= 1
 
-    # Add path-trap pairs for all filled traps encountered along the way
-    for i in 1:length(downstream_full_traps)
-        if length(paths[i]) > 0
-            push!(dyn_paths, DynFlowPath([CI[k] for k in paths[i]], length(dyn_traps) + 1))
-        else
-            @assert i == 1 "Only first path from flow_path_from can be empty"
-        end
-        next_path_ix = i < length(paths) ? length(dyn_paths) + 1 : 0
-        push!(dyn_traps, DynTrap(downstream_full_traps[i], next_path_ix))
+    # The result is a single chain alternating between path segments and traps in
+    # downstream order.  It begins with a trap when the start point lies inside the
+    # first full trap (which then spills into the first path); this is detected by
+    # checking whether the first path segment emanates from that trap's spill point.
+    starts_with_trap = !isempty(ftraps) &&
+        (isempty(paths) ||
+         paths[1][1] == tstruct.spillpoints[ftraps[1]].downstream_region_cell)
+
+    chain = _build_chain(paths, ftraps, starts_with_trap)
+
+    # If the chain ends in a path, that path may still discharge into an unfilled
+    # trap downstream; append it as the chain terminus.
+    if !isempty(chain) && chain[end][1] == :path
+        tix = _unfilled_trap_at(tstruct, chain[end][2][end], full_traps)
+        tix > 0 && push!(chain, (:trap, tix))
     end
 
-    # Add the final path segment (if any), with target_trap set only if an
-    # unfilled trap is found at its end — including the case where the path
-    # exits the domain entirely (in which case no trap is pushed and target_trap=0)
-    if length(paths) > length(downstream_full_traps)
-        final_path = paths[end]
-        traps_before = length(dyn_traps)
-        _push_unfilled_trap!(dyn_traps, tstruct, CI[final_path[end]], full_traps)
-        target_trap = length(dyn_traps) > traps_before ? length(dyn_traps) : 0
-        length(final_path) > 0 &&
-            push!(dyn_paths, DynFlowPath([CI[k] for k in final_path], target_trap))
+    return _chain_to_network(chain, tstruct)
+end
+
+# Interleave path segments and full traps into a single downstream-ordered chain
+# of (kind, payload) elements, where payload is the cell vector for a :path and
+# the trap index for a :trap.
+function _build_chain(paths, ftraps, starts_with_trap)
+    (k1, s1), (k2, s2) = starts_with_trap ? ((:trap, ftraps), (:path, paths)) :
+                                            ((:path, paths), (:trap, ftraps))
+    chain = Tuple{Symbol, Any}[]
+    for i in 1:max(length(s1), length(s2))
+        i <= length(s1) && push!(chain, (k1, s1[i]))
+        i <= length(s2) && push!(chain, (k2, s2[i]))
+    end
+    return chain
+end
+
+# Return the index of the uppermost unfilled trap that `cell` drains into, or 0 if
+# the cell drains out of the domain or only into already-full traps.
+function _unfilled_trap_at(tstruct, cell::Int, full_traps)
+    cur_reg = tstruct.regions[cell]
+    cur_reg <= 0 && return 0
+    unfilled = filter(x -> x ∉ full_traps, tstruct.supertraps_of[cur_reg])
+    isempty(unfilled) ? 0 : minimum(unfilled)
+end
+
+# Convert a downstream-ordered chain into a DynNetwork, wiring each element to its
+# successor: a path's target_trap and a trap's spill_path point to the next element.
+function _chain_to_network(chain, tstruct)
+    CI = CartesianIndices(tstruct.topography)
+
+    # local position of each element within dyn_paths / dyn_traps (in chain order)
+    positions = Vector{Int}(undef, length(chain))
+    np = nt = 0
+    for (j, (kind, _)) in enumerate(chain)
+        if kind == :path
+            np += 1; positions[j] = np
+        else
+            nt += 1; positions[j] = nt
+        end
+    end
+
+    dyn_paths = Vector{DynFlowPath}(undef, np)
+    dyn_traps = Vector{DynTrap}(undef, nt)
+    for (j, (kind, payload)) in enumerate(chain)
+        succ = j < length(chain) ? positions[j + 1] : 0
+        if kind == :path
+            dyn_paths[positions[j]] = DynFlowPath([CI[k] for k in payload], succ)
+        else
+            dyn_traps[positions[j]] = DynTrap(payload, succ)
+        end
     end
 
     return DynNetwork(dyn_paths, dyn_traps, DynCulvert[])
-end
-
-function _push_unfilled_trap!(dyn_traps, tstruct, last_cell::CartesianIndex, full_traps)
-    cur_reg = tstruct.regions[last_cell]
-    cur_reg <= 0 && return
-    unfilled = filter(x -> x ∉ full_traps, tstruct.supertraps_of[cur_reg])
-    isempty(unfilled) || push!(dyn_traps, DynTrap(minimum(unfilled), 0))
 end
 
 """
         _merge_networks(networks)
 
 Given a vector of flow path networks, merge any that overlap into a single one.
-Return a vector of disjoint networks.  Intersecting flow paths should be
-properly merged and truncated, so that no grid cell is shared by multiple flow
-paths, and traps at the end of truncated paths are connected to the remaining
-path instead.
+Return a vector of disjoint networks.  Where flow paths share grid cells, the
+later path is truncated at the shared cell and registered as a tributary (a
+"merge") of the path it runs into, so that no grid cell is shared by multiple
+flow paths.
 
 """
 function _merge_networks(networks::Vector{DynNetwork})
@@ -195,8 +231,8 @@ function _merge_networks(networks::Vector{DynNetwork})
     # flatten into one pool with globally unique indices
     all_paths, all_traps, all_culverts = _combine_networks(networks)
 
-    # truncate paths that share cells, registering merges and redirecting traps
-    _resolve_cell_overlaps!(all_paths, all_traps, all_culverts)
+    # truncate paths that share cells, registering each truncated path as a tributary
+    _resolve_cell_overlaps!(all_paths, all_culverts)
 
     # reconstruct each component as a self-contained DynNetwork
     return [_build_component(all_paths, all_traps, all_culverts, ids)
@@ -239,9 +275,10 @@ function _combine_networks(networks::Vector{DynNetwork})
 end
 
 # Truncate any flow path whose cells overlap with a previously-processed path.
-# The truncated path is registered as a tributary of the primary (earlier) path,
-# and the trap it was feeding has its spill_path redirected to the primary.
-function _resolve_cell_overlaps!(all_paths, all_traps, all_culverts)
+# The truncated path is registered as a tributary (a "merge") of the primary
+# (earlier) path that owns the shared cell, and culverts beyond the truncation
+# point are dropped.  Trap connectivity is left untouched.
+function _resolve_cell_overlaps!(all_paths, all_culverts)
     cell_owner = Dict{CartesianIndex, Int}()  # grid cell → owning path index
 
     for pi in 1:length(all_paths)
