@@ -334,10 +334,17 @@ end
 function _build_component(all_paths, all_traps, all_culverts, global_path_ids)
     path_set = Set(global_path_ids)
 
+    # Collect traps targeted by paths in this component (the normal case), plus
+    # leaf traps that no path flows into but which spill into a path here —
+    # this arises when the starting point falls inside a full trap's footprint,
+    # leaving that trap with no upstream flow path but a spill_path into the network.
     global_trap_ids = Int[]
     for gpi in global_path_ids
         t = all_paths[gpi].target_trap
         t > 0 && t ∉ global_trap_ids && push!(global_trap_ids, t)
+    end
+    for (ti, trap) in enumerate(all_traps)
+        ti ∉ global_trap_ids && trap.spill_path ∈ path_set && push!(global_trap_ids, ti)
     end
 
     global_path_ids, global_trap_ids =
