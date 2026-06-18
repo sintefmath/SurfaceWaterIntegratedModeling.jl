@@ -8,23 +8,16 @@ const SWIM = SurfaceWaterIntegratedModeling
 
 c(i, j) = CartesianIndex(i, j)
 
-# a DynCulvert with the given inlet/outlet and dummy hydraulic parameters
-dummy_culvert(inlet, outlet) = DynCulvert(inlet, outlet, 0.5, 0.6, 0.5, 0.02, 1.7)
-
-# every internal reference (trap/path/culvert index) is 0 or a valid local index
+# every internal reference (trap/path index) is 0 or a valid local index
 function valid_network(net)
-    np, nt, nc = length(net.flow_paths), length(net.traps), length(net.culverts)
+    np, nt = length(net.flow_paths), length(net.traps)
     ok = true
     for p in net.flow_paths
         ok &= 0 <= p.target_trap <= nt
         ok &= all(1 .<= p.merges .<= np)
-        ok &= all(1 .<= p.culvert_inlets .<= nc)
-        ok &= all(1 .<= p.culvert_outlets .<= nc)
     end
     for t in net.traps
         ok &= 0 <= t.spill_path <= np
-        ok &= all(1 .<= t.culvert_inlets .<= nc)
-        ok &= all(1 .<= t.culvert_outlets .<= nc)
     end
     return ok
 end
@@ -86,24 +79,18 @@ end
 # ---------------------------------------------------------------------------
 
 @testset "_combine_networks: index remapping" begin
-    nA = DynNetwork([DynFlowPath([c(1,1)], 1, [1], Int[], Int[])],
-                    [DynTrap(100, 1)],
-                    [dummy_culvert(c(1,1), c(9,9))])
-    nB = DynNetwork([DynFlowPath([c(5,5)], 0, [1], Int[], Int[])],
-                    [DynTrap(200, 0)],
-                    [dummy_culvert(c(5,5), c(9,9))])
+    nA = DynNetwork([DynFlowPath([c(1,1)], 1)], [DynTrap(100, 0)], DynCulvert[])
+    nB = DynNetwork([DynFlowPath([c(5,5)], 1)], [DynTrap(200, 1)], DynCulvert[])
 
-    paths, traps, culverts = SWIM._combine_networks([nA, nB])
+    paths, traps, _ = SWIM._combine_networks([nA, nB])
 
-    @test length(paths) == 2 && length(traps) == 2 && length(culverts) == 2
-    # network A's references are unchanged
+    @test length(paths) == 2 && length(traps) == 2
+    # network A's references keep their values (zero offset)
     @test paths[1].target_trap == 1
-    @test paths[1].culvert_inlets == [1]
-    @test traps[1].spill_path == 1
+    @test traps[1].spill_path == 0           # 0 stays 0
     # network B's references are shifted by the per-type offsets
-    @test paths[2].target_trap == 0          # 0 stays 0
-    @test paths[2].culvert_inlets == [2]      # culvert offset applied
-    @test traps[2].spill_path == 0
+    @test paths[2].target_trap == 2
+    @test traps[2].spill_path == 2
 end
 
 @testset "_path_components" begin
@@ -134,17 +121,6 @@ end
     @test paths[2].cells == [c(2,1)]        # truncated before the shared cell
     @test paths[2].target_trap == 0         # truncated path no longer targets a trap
     @test disjoint_cells([DynNetwork(paths, DynTrap[], DynCulvert[])])
-end
-
-@testset "_resolve_cell_overlaps!: culvert dropping" begin
-    # culvert 1 sits beyond the cut (at (1,3)); culvert 2 within the kept part (1,1)
-    culverts = [dummy_culvert(c(1,3), c(9,9)), dummy_culvert(c(1,1), c(9,9))]
-    paths = [DynFlowPath([c(1,2)], 0),
-             DynFlowPath([c(1,1), c(1,2), c(1,3)], 0, [1, 2], Int[], Int[])]
-    SWIM._resolve_cell_overlaps!(paths, culverts)
-
-    @test paths[2].cells == [c(1,1)]        # truncated at the shared cell (1,2)
-    @test paths[2].culvert_inlets == [2]    # culvert 1 dropped, culvert 2 kept
 end
 
 @testset "_topological_order" begin
