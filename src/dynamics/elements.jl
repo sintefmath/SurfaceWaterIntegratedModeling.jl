@@ -161,20 +161,7 @@ function _subnetwork(tstruct, coord::CartesianIndex, full_traps)
         tix > 0 && push!(traps, tix)
     end
 
-    chain = _build_chain(paths, traps, starts_with_trap)
-    return _chain_to_network(chain, starts_with_trap, tstruct)
-end
-
-# Interleave path segments (cell vectors) and traps (indices) into a single
-# downstream-ordered chain.  When starts_with_trap, the chain begins with a trap.
-function _build_chain(paths, traps, starts_with_trap)
-    first_seq, second_seq = starts_with_trap ? (traps, paths) : (paths, traps)
-    chain = Any[]
-    for i in 1:max(length(first_seq), length(second_seq))
-        i <= length(first_seq)  && push!(chain, first_seq[i])
-        i <= length(second_seq) && push!(chain, second_seq[i])
-    end
-    return chain
+    return _build_network(paths, traps, starts_with_trap, tstruct)
 end
 
 # Return the index of the uppermost unfilled trap that `cell` drains into, or 0 if
@@ -186,38 +173,20 @@ function _unfilled_trap_at(tstruct, cell::Int, full_traps)
     isempty(unfilled) ? 0 : minimum(unfilled)
 end
 
-# Convert a downstream-ordered chain into a DynNetwork, wiring each element to its
-# successor: a path's target_trap and a trap's spill_path point to the next element.
-# The chain alternates strictly, so each element's kind follows from its position,
-# starting from `starts_with_trap`.
-function _chain_to_network(chain, starts_with_trap, tstruct)
+# Build the DynNetwork from the alternating path/trap chain.  Both vectors are
+# already in downstream order, so their local indices are simply 1:length, and
+# `starts_with_trap` fixes the offset between a path and the trap it flows into:
+# when the chain starts with a trap, path i flows into trap i+1 and trap i spills
+# into path i; otherwise path i flows into trap i and trap i spills into path i+1.
+function _build_network(paths, traps, starts_with_trap, tstruct)
     CI = CartesianIndices(tstruct.topography)
+    link(i, off, n) = i + off <= n ? i + off : 0
+    pt = starts_with_trap ? 1 : 0  # offset from a path to the trap it flows into
 
-    # local position of each element within dyn_paths / dyn_traps (in chain order)
-    positions = Vector{Int}(undef, length(chain))
-    np = nt = 0
-    is_trap = starts_with_trap
-    for j in 1:length(chain)
-        if is_trap
-            nt += 1; positions[j] = nt
-        else
-            np += 1; positions[j] = np
-        end
-        is_trap = !is_trap
-    end
-
-    dyn_paths = Vector{DynFlowPath}(undef, np)
-    dyn_traps = Vector{DynTrap}(undef, nt)
-    is_trap = starts_with_trap
-    for j in 1:length(chain)
-        succ = j < length(chain) ? positions[j + 1] : 0
-        if is_trap
-            dyn_traps[positions[j]] = DynTrap(chain[j], succ)
-        else
-            dyn_paths[positions[j]] = DynFlowPath([CI[k] for k in chain[j]], succ)
-        end
-        is_trap = !is_trap
-    end
+    dyn_paths = [DynFlowPath([CI[k] for k in paths[i]], link(i, pt, length(traps)))
+                 for i in eachindex(paths)]
+    dyn_traps = [DynTrap(traps[i], link(i, 1 - pt, length(paths)))
+                 for i in eachindex(traps)]
 
     return DynNetwork(dyn_paths, dyn_traps, DynCulvert[])
 end
