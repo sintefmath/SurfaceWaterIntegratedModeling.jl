@@ -210,9 +210,9 @@ function _merge_networks(networks::Vector{DynNetwork})
     # truncate paths that share cells, registering each truncated path as a tributary
     _resolve_cell_overlaps!(all_paths, all_culverts)
 
-    # reconstruct each component as a self-contained DynNetwork
+    # _build_component: reconstruct each component as a self-contained DynNetwork
+    # _path_components: group paths into disjoint connected components
     return [_build_component(all_paths, all_traps, all_culverts, ids)
-            # group paths into disjoint connected components
             for ids in _path_components(all_paths, all_traps)]     
 end
 
