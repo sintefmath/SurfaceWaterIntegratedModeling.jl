@@ -142,36 +142,37 @@ function _subnetwork(tstruct, coord::CartesianIndex, full_traps)
     paths, ftraps = flow_path_from(tstruct, LI[coord]; full_traps=full_traps)
     @assert abs(length(paths) - length(ftraps)) <= 1
 
-    # The result is a single chain alternating between path segments and traps in
-    # downstream order.  It begins with a trap when the start point lies inside the
-    # first full trap (which then spills into the first path); this is detected by
-    # checking whether the first path segment emanates from that trap's spill point.
+    # The result is a single chain that strictly alternates between path segments
+    # and traps in downstream order.  It begins with a trap when the start point
+    # lies inside the first full trap (which then spills into the first path); this
+    # is detected by checking whether the first path segment emanates from that
+    # trap's spill point.
     starts_with_trap = !isempty(ftraps) &&
         (isempty(paths) ||
          paths[1][1] == tstruct.spillpoints[ftraps[1]].downstream_region_cell)
 
-    chain = _build_chain(paths, ftraps, starts_with_trap)
-
-    # If the chain ends in a path, that path may still discharge into an unfilled
-    # trap downstream; append it as the chain terminus.
-    if !isempty(chain) && chain[end][1] == :path
-        tix = _unfilled_trap_at(tstruct, chain[end][2][end], full_traps)
-        tix > 0 && push!(chain, (:trap, tix))
+    # When the chain ends on a path, that path may still discharge into an unfilled
+    # trap downstream; include it as the terminating trap.
+    traps = collect(ftraps)
+    ends_with_path = length(paths) > length(ftraps) ||
+                     (starts_with_trap && length(paths) == length(ftraps))
+    if ends_with_path
+        tix = _unfilled_trap_at(tstruct, paths[end][end], full_traps)
+        tix > 0 && push!(traps, tix)
     end
 
-    return _chain_to_network(chain, tstruct)
+    chain = _build_chain(paths, traps, starts_with_trap)
+    return _chain_to_network(chain, starts_with_trap, tstruct)
 end
 
-# Interleave path segments and full traps into a single downstream-ordered chain
-# of (kind, payload) elements, where payload is the cell vector for a :path and
-# the trap index for a :trap.
-function _build_chain(paths, ftraps, starts_with_trap)
-    (k1, s1), (k2, s2) = starts_with_trap ? ((:trap, ftraps), (:path, paths)) :
-                                            ((:path, paths), (:trap, ftraps))
-    chain = Tuple{Symbol, Any}[]
-    for i in 1:max(length(s1), length(s2))
-        i <= length(s1) && push!(chain, (k1, s1[i]))
-        i <= length(s2) && push!(chain, (k2, s2[i]))
+# Interleave path segments (cell vectors) and traps (indices) into a single
+# downstream-ordered chain.  When starts_with_trap, the chain begins with a trap.
+function _build_chain(paths, traps, starts_with_trap)
+    first_seq, second_seq = starts_with_trap ? (traps, paths) : (paths, traps)
+    chain = Any[]
+    for i in 1:max(length(first_seq), length(second_seq))
+        i <= length(first_seq)  && push!(chain, first_seq[i])
+        i <= length(second_seq) && push!(chain, second_seq[i])
     end
     return chain
 end
@@ -187,29 +188,35 @@ end
 
 # Convert a downstream-ordered chain into a DynNetwork, wiring each element to its
 # successor: a path's target_trap and a trap's spill_path point to the next element.
-function _chain_to_network(chain, tstruct)
+# The chain alternates strictly, so each element's kind follows from its position,
+# starting from `starts_with_trap`.
+function _chain_to_network(chain, starts_with_trap, tstruct)
     CI = CartesianIndices(tstruct.topography)
 
     # local position of each element within dyn_paths / dyn_traps (in chain order)
     positions = Vector{Int}(undef, length(chain))
     np = nt = 0
-    for (j, (kind, _)) in enumerate(chain)
-        if kind == :path
-            np += 1; positions[j] = np
-        else
+    is_trap = starts_with_trap
+    for j in 1:length(chain)
+        if is_trap
             nt += 1; positions[j] = nt
+        else
+            np += 1; positions[j] = np
         end
+        is_trap = !is_trap
     end
 
     dyn_paths = Vector{DynFlowPath}(undef, np)
     dyn_traps = Vector{DynTrap}(undef, nt)
-    for (j, (kind, payload)) in enumerate(chain)
+    is_trap = starts_with_trap
+    for j in 1:length(chain)
         succ = j < length(chain) ? positions[j + 1] : 0
-        if kind == :path
-            dyn_paths[positions[j]] = DynFlowPath([CI[k] for k in payload], succ)
+        if is_trap
+            dyn_traps[positions[j]] = DynTrap(chain[j], succ)
         else
-            dyn_traps[positions[j]] = DynTrap(payload, succ)
+            dyn_paths[positions[j]] = DynFlowPath([CI[k] for k in chain[j]], succ)
         end
+        is_trap = !is_trap
     end
 
     return DynNetwork(dyn_paths, dyn_traps, DynCulvert[])
