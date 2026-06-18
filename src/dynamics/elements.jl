@@ -249,10 +249,9 @@ function _resolve_cell_overlaps!(all_paths, all_traps, all_culverts)
         merge_pos = findfirst(cell -> haskey(cell_owner, cell), path.cells)
 
         if merge_pos !== nothing
-            merge_into  = cell_owner[path.cells[merge_pos]]
-            kept        = path.cells[1:merge_pos-1]
-            kept_set    = Set(kept)
-            old_target  = path.target_trap
+            merge_into = cell_owner[path.cells[merge_pos]]
+            kept       = path.cells[1:merge_pos-1]
+            kept_set   = Set(kept)
 
             # Drop culverts whose cell falls beyond the truncation point
             inlets  = filter(c -> all_culverts[c].inlet  ∈ kept_set, path.culvert_inlets)
@@ -263,12 +262,6 @@ function _resolve_cell_overlaps!(all_paths, all_traps, all_culverts)
             primary = all_paths[merge_into]
             all_paths[merge_into] = DynFlowPath(primary.cells, primary.target_trap,
                 primary.culvert_inlets, primary.culvert_outlets, [primary.merges; pi])
-
-            if old_target > 0
-                t = all_traps[old_target]
-                all_traps[old_target] = DynTrap(t.trap_ix, merge_into,
-                    t.culvert_inlets, t.culvert_outlets)
-            end
 
             for cell in kept
                 cell_owner[cell] = pi
