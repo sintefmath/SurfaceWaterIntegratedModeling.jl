@@ -1,4 +1,4 @@
-using Test, SurfaceWaterIntegratedModeling
+using Test, SurfaceWaterIntegratedModeling, LazyArtifacts
 
 const SWIM = SurfaceWaterIntegratedModeling
 
@@ -162,4 +162,44 @@ end
     @test length(merges) == 1
 
     @test isempty(SWIM._merge_networks(DynNetwork[]))
+end
+
+# ---------------------------------------------------------------------------
+# Tier 3: integration tests against a real TrapStructure (mini.txt artifact)
+# ---------------------------------------------------------------------------
+
+# number of traps that no flow path leads into; such a "source" trap sits at the
+# top of the chain, which happens only when the start point is inside that trap
+source_traps(net) = count(ti -> all(p -> p.target_trap != ti, net.flow_paths),
+                          1:length(net.traps))
+
+@testset "setup_network on mini.txt" begin
+    grid = loadgrid(joinpath(artifact"swim_testdata", "data", "small", "mini.txt"))
+    ts = spillanalysis(grid, usediags=true)
+    allfull = collect(1:numtraps(ts))   # valid (downward-closed) fill: all traps full
+
+    # a high start whose chain threads many traps -> a single nontrivial network
+    long = setup_network(ts, [CartesianIndex(7, 119)], allfull)
+    @test length(long) == 1
+    @test valid_network(long[1])
+    @test disjoint_cells(long)
+    @test length(long[1].traps) > 20            # long spill path (58 traps in practice)
+
+    # start inside a full trap -> chain begins with a source trap (no path feeds it)
+    @test source_traps(long[1]) == 1
+    # start on a slope -> every trap is fed by a path, so there is no source trap
+    slope = setup_network(ts, [CartesianIndex(1, 1)], allfull)
+    @test source_traps(slope[1]) == 0
+
+    # two starts whose paths converge -> a single merged network
+    merged = setup_network(ts, [CartesianIndex(193, 8), CartesianIndex(190, 9)], allfull)
+    @test length(merged) == 1
+    @test valid_network(merged[1])
+    @test disjoint_cells(merged)
+
+    # two starts that drain independently -> two disjoint networks
+    separate = setup_network(ts, [CartesianIndex(195, 7), CartesianIndex(179, 37)], allfull)
+    @test length(separate) == 2
+    @test all(valid_network, separate)
+    @test disjoint_cells(separate)
 end
