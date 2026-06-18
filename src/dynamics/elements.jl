@@ -190,11 +190,18 @@ path instead.
 
 """
 function _merge_networks(networks::Vector{DynNetwork})
-    isempty(networks) && return networks                            # nothing to merge
-    all_paths, all_traps, all_culverts = _combine_networks(networks) # flatten into one pool with globally unique indices
-    _resolve_cell_overlaps!(all_paths, all_traps)                  # truncate paths that share cells, registering merges and redirecting traps
-    return [_build_component(all_paths, all_traps, all_culverts, ids) # reconstruct each component as a self-contained DynNetwork
-            for ids in _path_components(all_paths, all_traps)]     # group paths into disjoint connected components
+    isempty(networks) && return networks
+
+    # flatten into one pool with globally unique indices
+    all_paths, all_traps, all_culverts = _combine_networks(networks)
+
+    # truncate paths that share cells, registering merges and redirecting traps
+    _resolve_cell_overlaps!(all_paths, all_traps)
+
+    # reconstruct each component as a self-contained DynNetwork
+    return [_build_component(all_paths, all_traps, all_culverts, ids)
+            # group paths into disjoint connected components
+            for ids in _path_components(all_paths, all_traps)]     
 end
 
 # Merge all networks into a single flat pool with globally unique indices
@@ -213,13 +220,17 @@ function _combine_networks(networks::Vector{DynNetwork})
     for (ni, net) in enumerate(networks)
         poff, toff, coff = path_offsets[ni], trap_offsets[ni], culvert_offsets[ni]
         for p in net.flow_paths
-            push!(all_paths, DynFlowPath(copy(p.cells), remap(p.target_trap, toff),
-                remap_vec(p.culvert_inlets, coff), remap_vec(p.culvert_outlets, coff),
-                remap_vec(p.merges, poff)))
+            push!(all_paths, DynFlowPath(copy(p.cells),
+                                         remap(p.target_trap, toff),
+                                         remap_vec(p.culvert_inlets, coff),
+                                         remap_vec(p.culvert_outlets, coff),
+                                         remap_vec(p.merges, poff)))
         end
         for t in net.traps
-            push!(all_traps, DynTrap(t.trap_ix, remap(t.spill_path, poff),
-                remap_vec(t.culvert_inlets, coff), remap_vec(t.culvert_outlets, coff)))
+            push!(all_traps, DynTrap(t.trap_ix,
+                                     remap(t.spill_path, poff),
+                                     remap_vec(t.culvert_inlets, coff),
+                                     remap_vec(t.culvert_outlets, coff)))
         end
         append!(all_culverts, net.culverts)
     end
