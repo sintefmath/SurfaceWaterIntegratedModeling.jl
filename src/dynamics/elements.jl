@@ -1,3 +1,5 @@
+import Graphs
+
 export DynObject, DynFlowPath, DynTrap, DynCulvert
 
 # Make generic baseclass for dynamic objects
@@ -292,6 +294,33 @@ function _path_components(all_paths, all_traps)
     return collect(values(components))
 end
 
+# Return (sorted_path_ids, sorted_trap_ids) in upstream-to-downstream order,
+# using a joint topological sort of the path/trap DAG via Graphs.
+function _topological_order(global_path_ids, global_trap_ids, all_paths, all_traps)
+    np = length(global_path_ids)
+    path_node = Dict(gpi => i      for (i, gpi) in enumerate(global_path_ids))
+    trap_node = Dict(gti => np + i for (i, gti) in enumerate(global_trap_ids))
+    path_set  = Set(global_path_ids)
+    trap_set  = Set(global_trap_ids)
+
+    g = Graphs.SimpleDiGraph(np + length(global_trap_ids))
+    for (li, gpi) in enumerate(global_path_ids)
+        p = all_paths[gpi]
+        p.target_trap ∈ trap_set && Graphs.add_edge!(g, li, trap_node[p.target_trap])
+        for m in p.merges
+            m ∈ path_set && Graphs.add_edge!(g, path_node[m], li)
+        end
+    end
+    for (li, gti) in enumerate(global_trap_ids)
+        sp = all_traps[gti].spill_path
+        sp ∈ path_set && Graphs.add_edge!(g, np + li, path_node[sp])
+    end
+
+    order = Graphs.topological_sort_by_dfs(g)
+    return ([global_path_ids[i]      for i in order if i <= np],
+            [global_trap_ids[i - np] for i in order if i >  np])
+end
+
 # Reconstruct one DynNetwork from a set of global path indices, remapping all
 # internal references to local (1-based) indices.
 function _build_component(all_paths, all_traps, all_culverts, global_path_ids)
@@ -307,6 +336,9 @@ function _build_component(all_paths, all_traps, all_culverts, global_path_ids)
     for (ti, trap) in enumerate(all_traps)
         ti ∉ global_trap_ids && trap.spill_path ∈ path_set && push!(global_trap_ids, ti)
     end
+
+    global_path_ids, global_trap_ids =
+        _topological_order(global_path_ids, global_trap_ids, all_paths, all_traps)
 
     global_culvert_ids = unique(vcat(
         [c for gpi in global_path_ids
