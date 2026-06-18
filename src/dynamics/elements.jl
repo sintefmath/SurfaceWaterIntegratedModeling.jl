@@ -18,7 +18,7 @@ The infiltration capacity of each cell in the path is represented externally.
 
 """
 struct DynFlowPath <: DynObject
-    cells::Vector{CartesianIndex} # cells along the flow path
+    cells::Vector{CartesianIndex{2}} # cells along the flow path
 
     # Target trap index (0 for out-of-domain or intersection with another flow path)
     target_trap::Int
@@ -76,8 +76,8 @@ culvert depends on the water levels at the inlet and outlet.
 
 """
 struct DynCulvert <: DynObject
-    inlet::CartesianIndex  # grid cell index of the culvert inlet
-    outlet::CartesianIndex # grid cell index of the culvert outlet
+    inlet::CartesianIndex{2}  # grid cell index of the culvert inlet
+    outlet::CartesianIndex{2} # grid cell index of the culvert outlet
 
     r::Float64  # radius of the culvert
     Cd::Float64 # discharge coefficient of the culvert
@@ -279,7 +279,7 @@ end
 # (earlier) path that owns the shared cell, and culverts beyond the truncation
 # point are dropped.  Trap connectivity is left untouched.
 function _resolve_cell_overlaps!(all_paths, all_culverts)
-    cell_owner = Dict{CartesianIndex, Int}()  # grid cell → owning path index
+    cell_owner = Dict{CartesianIndex{2}, Int}()  # grid cell → owning path index
 
     for pi in 1:length(all_paths)
         path = all_paths[pi]
