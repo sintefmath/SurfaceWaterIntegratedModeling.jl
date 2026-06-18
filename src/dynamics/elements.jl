@@ -334,15 +334,10 @@ end
 function _build_component(all_paths, all_traps, all_culverts, global_path_ids)
     path_set = Set(global_path_ids)
 
-    # Traps: those targeted by paths in this component, plus any that were
-    # redirected to spill into a path here after a truncation
     global_trap_ids = Int[]
     for gpi in global_path_ids
         t = all_paths[gpi].target_trap
         t > 0 && t ∉ global_trap_ids && push!(global_trap_ids, t)
-    end
-    for (ti, trap) in enumerate(all_traps)
-        ti ∉ global_trap_ids && trap.spill_path ∈ path_set && push!(global_trap_ids, ti)
     end
 
     global_path_ids, global_trap_ids =
