@@ -281,8 +281,8 @@ function _path_components(all_paths, all_traps)
     n      = length(all_paths)
     parent = collect(1:n)
 
-    find(x) = (while parent[x] != x; parent[x] = parent[parent[x]]; x = parent[x]; end; x)
-    unite!(x, y) = (rx, ry = find(x), find(y); rx != ry && (parent[rx] = ry))
+    find_root(x) = (while parent[x] != x; parent[x] = parent[parent[x]]; x = parent[x]; end; x)
+    unite!(x, y) = (rx, ry = find_root(x), find_root(y); rx != ry && (parent[rx] = ry))
 
     for pi in 1:n
         for mp in all_paths[pi].merges
@@ -297,7 +297,7 @@ function _path_components(all_paths, all_traps)
 
     components = Dict{Int, Vector{Int}}()
     for pi in 1:n
-        push!(get!(components, find(pi), Int[]), pi)
+        push!(get!(components, find_root(pi), Int[]), pi)
     end
     return collect(values(components))
 end
