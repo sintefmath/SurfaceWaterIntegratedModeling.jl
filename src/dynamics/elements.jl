@@ -190,11 +190,11 @@ path instead.
 
 """
 function _merge_networks(networks::Vector{DynNetwork})
-    isempty(networks) && return networks
-    all_paths, all_traps, all_culverts = _combine_networks(networks)
-    _resolve_cell_overlaps!(all_paths, all_traps)
-    return [_build_component(all_paths, all_traps, all_culverts, ids)
-            for ids in _path_components(all_paths, all_traps)]
+    isempty(networks) && return networks                            # nothing to merge
+    all_paths, all_traps, all_culverts = _combine_networks(networks) # flatten into one pool with globally unique indices
+    _resolve_cell_overlaps!(all_paths, all_traps)                  # truncate paths that share cells, registering merges and redirecting traps
+    return [_build_component(all_paths, all_traps, all_culverts, ids) # reconstruct each component as a self-contained DynNetwork
+            for ids in _path_components(all_paths, all_traps)]     # group paths into disjoint connected components
 end
 
 # Merge all networks into a single flat pool with globally unique indices
