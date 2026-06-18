@@ -196,7 +196,7 @@ function _merge_networks(networks::Vector{DynNetwork})
     all_paths, all_traps, all_culverts = _combine_networks(networks)
 
     # truncate paths that share cells, registering merges and redirecting traps
-    _resolve_cell_overlaps!(all_paths, all_traps)
+    _resolve_cell_overlaps!(all_paths, all_traps, all_culverts)
 
     # reconstruct each component as a self-contained DynNetwork
     return [_build_component(all_paths, all_traps, all_culverts, ids)
@@ -241,7 +241,7 @@ end
 # Truncate any flow path whose cells overlap with a previously-processed path.
 # The truncated path is registered as a tributary of the primary (earlier) path,
 # and the trap it was feeding has its spill_path redirected to the primary.
-function _resolve_cell_overlaps!(all_paths, all_traps)
+function _resolve_cell_overlaps!(all_paths, all_traps, all_culverts)
     cell_owner = Dict{CartesianIndex, Int}()  # grid cell → owning path index
 
     for pi in 1:length(all_paths)
@@ -251,10 +251,14 @@ function _resolve_cell_overlaps!(all_paths, all_traps)
         if merge_pos !== nothing
             merge_into  = cell_owner[path.cells[merge_pos]]
             kept        = path.cells[1:merge_pos-1]
+            kept_set    = Set(kept)
             old_target  = path.target_trap
 
-            all_paths[pi] = DynFlowPath(kept, 0,
-                path.culvert_inlets, path.culvert_outlets, path.merges)
+            # Drop culverts whose cell falls beyond the truncation point
+            inlets  = filter(c -> all_culverts[c].inlet  ∈ kept_set, path.culvert_inlets)
+            outlets = filter(c -> all_culverts[c].outlet ∈ kept_set, path.culvert_outlets)
+
+            all_paths[pi] = DynFlowPath(kept, 0, inlets, outlets, path.merges)
 
             primary = all_paths[merge_into]
             all_paths[merge_into] = DynFlowPath(primary.cells, primary.target_trap,
