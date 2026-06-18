@@ -143,13 +143,11 @@ function _subnetwork(tstruct, coord::CartesianIndex, full_traps)
     @assert abs(length(paths) - length(ftraps)) <= 1
 
     # The result is a single chain that strictly alternates between path segments
-    # and traps in downstream order.  It begins with a trap when the start point
-    # lies inside the first full trap (which then spills into the first path); this
-    # is detected by checking whether the first path segment emanates from that
-    # trap's spill point.
-    starts_with_trap = !isempty(ftraps) &&
-        (isempty(paths) ||
-         paths[1][1] == tstruct.spillpoints[ftraps[1]].downstream_region_cell)
+    # and traps in downstream order (a path may be a zero-length connector where one
+    # full trap spills directly into the next).  The chain begins with a trap when
+    # the start point lies inside the first full trap — i.e. when the start cell is
+    # within that trap's footprint.
+    starts_with_trap = !isempty(ftraps) && LI[coord] ∈ tstruct.footprints[ftraps[1]]
 
     # When the chain ends on a path, that path may still discharge into an unfilled
     # trap downstream; include it as the terminating trap.

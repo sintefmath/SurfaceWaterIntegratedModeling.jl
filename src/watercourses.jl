@@ -170,7 +170,8 @@ function flow_path_from(tstruct::TrapStructure{<:Real},
     cur_node = start_node
     paths = Vector{Vector{Int64}}() # list of paths traced downstream from start_node
     downstream_filled_traps = Vector{Int64}() # list of filled traps downstream of start_node
-    while cur_node > 0 
+    first_segment = true # the leading segment (traced from start_node)
+    while cur_node > 0
         push!(paths, _trace_path(cur_node))
 
         cur_reg = tstruct.regions[paths[end][end]] # region where we ended up
@@ -200,7 +201,11 @@ function flow_path_from(tstruct::TrapStructure{<:Real},
             # remove any cells in the last path that are covered by the
             # footprint of this trap, since we are now spilling into the trap
             paths[end] = setdiff(paths[end], tstruct.footprints[largest_full_supertrap])
-            if isempty(paths[end])
+            # An emptied intermediate segment means one full trap spills directly
+            # into the next; keep it as a zero-length connector so the path/trap
+            # sequence stays alternating.  Only a leading empty segment (the start
+            # point lying inside the first full trap) is dropped.
+            if isempty(paths[end]) && first_segment
                 pop!(paths)
             end
 
@@ -212,6 +217,7 @@ function flow_path_from(tstruct::TrapStructure{<:Real},
                 break
             end
         end
+        first_segment = false
     end
 
     return paths, downstream_filled_traps
