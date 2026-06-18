@@ -361,6 +361,8 @@ function _topological_order(global_path_ids, global_trap_ids, all_paths, all_tra
         sp ∈ path_set && Graphs.add_edge!(g, np + li, path_node[sp])
     end
 
+    # The flow graph is assumed acyclic (water flows strictly downstream); a cycle
+    # is a programming error, and topological_sort_by_dfs throws if one is present.
     order = Graphs.topological_sort_by_dfs(g)
     return ([global_path_ids[i]      for i in order if i <= np],
             [global_trap_ids[i - np] for i in order if i >  np])
