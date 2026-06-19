@@ -120,7 +120,9 @@ end
 
 # Ready-made scenario when run as a script (mirrors the Tier-3 "long" case).
 if abspath(PROGRAM_FILE) == @__FILE__
-    fig, = verify_dynamic_network([CartesianIndex(7, 119)])
+    fig, = verify_dynamic_network([CartesianIndex(7, 119)], heightfac=0.2)
+    #fig, = verify_dynamic_network([CartesianIndex(6,66), CartesianIndex(6, 162)], heightfac=0.2)
+    #fig, = verify_dynamic_network([CartesianIndex(6, 6), CartesianIndex(6, 102), CartesianIndex(6,162)], heightfac=0.2)
     GLMakie.display(fig)
     GLMakie.wait(GLMakie.Screen())  # keep the window open
 end
