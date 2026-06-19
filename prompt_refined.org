@@ -1,0 +1,198 @@
+Similar to how and NBS network can be 'solved' in SUrbArea, I want to implement corresponding functionality for 'solving' a DynNetwork.  (In fact, in the longer run, I plan to integrate both culverts and NBS elements as components in a DynNetwork).
+
+Here, "solving" will mean evolving the elements' state (i.e. water content) until an "event" happens.  A *leaf node* is a lake at the bottom of the flow path: an unfilled trap that currently terminates the flow because it neither spills nor drains.  An "event" is one of:
+- a leaf node filling up to its capacity and starting to spill, or
+- a currently-spilling (full) lake going from spilling to no longer spilling, because its net inflow has dropped below its losses (infiltration and, later, culvert drainage).
+Either kind of event changes the network topology, so it ends the current solve.  An outer loop (outside the scope of this task) would then rebuild the network and continue.
+
+Water is lost through direct infiltration to the ground.  Infiltration is specified as a grid where impermeable (or completely saturated) gridcells are attributed the value 0, whereas cells with infiltration will be given a positive infiltration rate value.
+
+To start with, we will stick to just lakes and rivers, but it should be possible to expand scope to culverts and NBS elements later.
+
+I will describe the necessary implementation work as an org-mode tree below.  Work described in a given heading will depend on work described in subheadings, so these would need to be added first.  If things are ambiguous, inspiration could be found in the SUrbArea project's NBS.jl implementation.
+
+All the code should go in a new file under the /src/dynamics directory, called 'networksolver.jl'.
+
+* Design clarifications (resolved in discussion)
+These resolve ambiguities in the prose above and in the task tree below.  The
+implementation should follow them.
+
+** Inflow model
+- Inflow is *constant in time*.  The caller supplies a constant rate per trap
+  (and later per NBSSystem).  There is no time-varying hyetograph; this keeps
+  the dynamics simple enough that steady state is meaningful (see Events).
+- Inflow is *additive*.  A trap's total inflow is the caller-specified inflow
+  for that trap *plus* whatever the flow paths route into it from upstream
+  (spill from upstream traps, less throughput-capped infiltration in transit).
+  Flow paths transport water between traps but never originate any.
+- Because inflow is constant, a network reaching steady state without any trap
+  overflowing is a definitive indication that no further event will ever occur.
+  In that case the returned event time is ∞ (no ~tspan~ argument is needed).
+
+** State vector
+- The state is each trap's stored water *volume*, net of its subtraps' volume
+  (the quantity ~waterheight~ expects).  Capacity = ~trapvolumes[t] -
+  subvolumes[t]~ for a top-level trap (or ~trapvolumes[t]~ for a region).
+- The state vector indexes *only* the traps present in the ~DynNetwork~, in the
+  order of ~DynNetwork.traps~.
+- Volume, not elevation: water level z is *derived* from volume via the z↔V
+  tables (see Reuse).
+
+** Units
+- For now, units are gridcells × height, assuming each gridcell is 1 m and
+  height is in m.  This may be revisited later.
+- Consequently, infiltration grid values are directly subtractable volume-rates
+  (the same convention as ~_update_runoff!~ and the fill_sequence code); no
+  separate cell-area factor is applied.
+
+** Infiltration through wetted area
+- A trap infiltrates only through its *wetted area*: infiltration is the sum of
+  the infiltration grid over the cells currently submerged (those whose terrain
+  bottom lies below the current water level z).
+- z is obtained from the stored volume via the per-trap volume↔level
+  relationship.  This is exactly the ~infilfun(trap_bottom .<= z)~ pattern in
+  ~_setup_dvdt~ / ~fill_trap_until~.  A full trap is submerged over its whole
+  footprint.
+- The infiltration grid is *static* between solves for now (a cell is 0 when
+  impermeable or fully saturated).  A future extension may let saturation evolve,
+  making it dynamic; the geometry helpers keep infiltration as a per-solve input
+  to leave room for that.
+
+** Performance / build-vs-solve cost
+- Networks are built and solved frequently (the outer loop rebuilds after every
+  event), so per-solve setup cost matters.  For now we deliberately keep the
+  geometry code simple (rebuilt per solve) rather than caching.
+- If setup becomes a bottleneck, the intended optimisation is to split the
+  structure-invariant per-trap geometry (capacity, footprint, bottom, volume↔
+  level table — all functions of ~tstruct~ alone) into a cache built once for the
+  whole simulation, and have each solve merely select the relevant entries; the
+  costly volume↔level table is only actually needed by traps that evolve.  Revisit
+  only if measured to matter.
+
+** Leaf vs. non-leaf traps
+- Do *not* hardcode "non-leaf ⟺ full".  A trap accumulates (evolves) whenever
+  its active outflows do not yet balance its inflow; this emerges from the rate
+  expression rather than from a topological label.
+- In the current lakes-and-rivers scope every non-leaf trap is full and
+  spilling, so only leaf traps evolve.  Once culverts/NBS are added, a non-leaf
+  trap may be below capacity (discharging downstream through a culvert), and the
+  same rate expression already covers it.
+
+** Events
+The solve integrates forward and stops at the *first* event.  With the unified
+per-trap rate
+
+    dV/dt = inflow − infiltration(wetted area) − drainage − spill
+
+(drainage = 0 for now, state-dependent later; spill active only when V ≥
+capacity), the event set is:
+
+| Event                          | Condition                                  | Live now?            |
+|--------------------------------+--------------------------------------------+----------------------|
+| fill / start spilling (type-1) | V reaches capacity                         | yes                  |
+| steady state (no event, t=∞)   | net rate decays to 0 with 0 < V < capacity | yes                  |
+| empty / expose subtraps        | own water content V reaches 0              | dormant (needs drain)|
+| stop spilling (type-2)         | a full trap's spill rate falls to 0        | dormant (needs drain)|
+| culvert outlet threshold       | water level z crosses a culvert outlet     | dormant (needs culv) |
+
+- With constant inflow and lakes only, the live outcomes are exactly "fill" vs.
+  "steady-state ∞" — the same fill/empty/stagnation taxonomy already used by
+  ~fill_trap_until~'s ~VectorContinuousCallback~.
+- The remaining events are *scaffolded* into the same callback vector so they
+  activate when drainage/culverts arrive.
+- Out-of-domain components (terminal path ~target_trap = 0~) are *not*
+  special-cased.  Today they fall out as steady-state (∞) via the stagnation
+  condition; later, the dormant stop-spill / expose-subtraps callbacks remain
+  wired for them too.  No early ∞ return.
+
+** Return values
+~solveDynNetwork~ returns:
+- the event time (∞ if steady state / no event),
+- the trap ID (index into the ~TrapStructure~) where the event occurred
+  (0 if no event),
+- the nature of the event (e.g. ~:fill~, ~:unspill~, ~:empty~, ~:none~),
+- the network state (volume vector) at the event time.
+
+** Reuse existing machinery
+Build on what already exists rather than duplicating it:
+- ~_compute_z_vol_tables~ — per-trap volume↔level tables.
+- the ~infilfun(trap_bottom .<= z)~ wetted-area infiltration pattern from
+  ~_setup_dvdt~.
+- ~waterheight~ — volume → water level.
+- ~_update_runoff!~ — throughput-capped infiltration routing along flow paths.
+- the ~VectorContinuousCallback~ [full, empty, stagnation] event pattern from
+  ~fill_trap_until~.
+
+* DONE Implement the function ~solveDynNetwork()~
+The function takes the following input:
+- a ~TrapStructure~ (~tstruct~).  The ~DynNetwork~ only carries topology, so the geometry it refers to must be supplied here: trap capacities/volumes, footprints, spillpoint elevations, and (for partially-filled leaf lakes) the relationship between stored volume and wetted area / water elevation.
+- a ~DynNetwork~
+- an "infiltration" grid showing which cells have an infiltration rate (impermeable or fully saturated cells are 0; cells that infiltrate have a positive rate)
+- An 'inflow' (which may be positive or zero) of water into each lake (and later: into each NBSSystem - but that is for later)
+- A current state, expressing the amount of water in each lake.  The state vector indexes *only* the traps present in the ~DynNetwork~ (not every trap in the ~TrapStructure~).  For a situation without culverts, every lake that is not a leaf node must be full, since it can only be part of the network by spilling.  When culverts are implemented later, lakes with culverts may also be non-leaf parts of the network, since they would transmit water to other parts of the network even when not spilling over.
+
+Only lakes have evolving state (and, later, NBSSystems).  Flow paths ("rivers") are *not* stateful: they route water downstream instantaneously.  They may, however, be lossy: if a path cell has an associated infiltration value, that water is lost in transit (capped by the amount of water actually passing through that cell).
+
+A full, non-leaf lake is no longer accumulating water (dV/dt = 0).  By conservation of mass, whatever flows into it must leave again as infiltration, as drainage to culverts (not implemented yet), or as overflow into its spill path.  A leaf lake, by contrast, accumulates its net inflow (inflow minus infiltration) and its state evolves, until it fills to capacity and begins to spill.
+
+The function will run a forward ODE to compute the evolution of the state, and will stop at the *first* 'event' that happens, as previously explained.  It will then return:
+- the timing of the event,
+- the trap ID (index into the ~TrapStructure~) of the lake at which the event occurred,
+- the nature of the event: whether that lake just filled up (started to spill) or just stopped overflowing,
+- the state of the network at that time.
+
+The problem will be solved internally as an ~ODEProblem~ from the ~DifferentialEquations~ package, unless there are good reasons to use something else.
+
+To support the ODE integration, a function is needed to give the updated rates: ~dynNetworkRateFunction!()~.   This should behave in much the same way as the ~NBSNetworkRateFunction!~ from the SUrbArea NBS.jl implementation.
+
+Naming convention: objects use CamelCase (e.g. ~DynNetwork~), functions use lowercase (e.g. ~solveDynNetwork~, ~dynNetworkRateFunction!~), matching ~solveNBSNetwork~ in NBS.jl.
+
+Nesting expresses dependency: a task depends on the sub-tasks nested under it,
+and tasks that share a level are intended to be addressable independently of one
+another.  The ~solveDynNetwork~ body is itself the driver — it precomputes the
+per-trap geometry once, builds an ~ODEProblem~ around ~dynNetworkRateFunction!~,
+attaches the event-detection callback, solves it (mirroring ~solveNBSNetwork~'s
+use of ~ODEProblem~ + ~solve~; no ~tspan~ horizon is required), and maps the
+triggered condition to the return tuple.  Its two sub-tasks are the rate function
+and the callback.
+
+** DONE Implement ~dynNetworkRateFunction!()~
+In-place network rate ~dynNetworkRateFunction!(dV, V, p, t)~, analogous to
+~NBSNetworkRateFunction!~ in NBS.jl.  It joins its two (independent) sub-tasks:
+route inflow+spill downstream (flow routing), then set each trap's
+dV = inflow − wetted-area infiltration − drainage − spill.  Full pass-through
+traps net to dV ≈ 0; evolving traps get their net rate.  ~p~ carries the
+precomputed geometry/topology so the closure stays allocation-light.
+
+*** DONE Geometry helpers: volume ↔ level and wetted-area infiltration
+- Reuse ~_compute_z_vol_tables(tstruct)~ for per-trap volume↔level tables.
+- Per-trap wetted-area infiltration: from stored volume derive z (via the table),
+  select the submerged footprint cells (~trap_bottom .<= z~), and sum the
+  infiltration grid over them — the ~infilfun~ pattern from ~_setup_dvdt~.  A full
+  trap uses its whole footprint.
+- Also expose capacity per trap (~trapvolumes - subvolumes~), footprints, and
+  trap bottoms.  Pure per-trap geometry; independent of network topology.
+
+*** DONE Flow routing through the network (lossy paths)
+- Sweep the ~DynNetwork~ traps in topological order (components arrive already
+  ordered upstream→downstream from ~_topological_order~).
+- For each *full* trap, output spill = total inflow − footprint infiltration,
+  routed down its ~spill_path~ to the target trap with throughput-capped per-cell
+  infiltration in transit (the ~_update_runoff!~ logic), accounting for
+  ~DynFlowPath.merges~ tributaries.  Add delivered flow to the downstream trap's
+  inflow.
+- Leaf / not-yet-full traps receive inflow but do not pass it on.  Out-of-domain
+  spill (~target_trap = 0~) leaves the system.  Pure topology/routing; full traps
+  use whole-footprint infiltration, so this is independent of the volume↔level
+  geometry helper.
+
+** DONE Implement the event-detection callback
+- A ~VectorContinuousCallback~ (cf. ~fill_trap_until~) over the trap-volume state
+  and its time derivative.  Live conditions: fill (V reaches capacity), empty
+  (V reaches 0), and stagnation (derivative reaches zero → steady state → t=∞).
+- Scaffold dormant entries for stop-spilling and culvert-outlet thresholds in the
+  same vector so they activate once drainage/culverts exist.
+- ~affect!~ terminates on the first triggered condition and records which one,
+  for the driver to map to (event time, trap ID, event nature, state).
+- Operates on the integrator's state and derivative plus precomputed capacities,
+  so it can be specified independently of the rate function's internals.

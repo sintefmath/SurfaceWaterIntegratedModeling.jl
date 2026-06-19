@@ -203,3 +203,108 @@ source_traps(net) = count(ti -> all(p -> p.target_trap != ti, net.flow_paths),
     @test all(valid_network, separate)
     @test disjoint_cells(separate)
 end
+
+# ---------------------------------------------------------------------------
+# networksolver.jl
+# ---------------------------------------------------------------------------
+
+@testset "networksolver: flow routing (pure topology)" begin
+    T(ix, sp) = DynTrap(ix, sp)
+    rf = SWIM._route_flow
+
+    # chain  A(full) -> path -> B(leaf)
+    net = DynNetwork([DynFlowPath([c(1,1)], 2)], [T(10,1), T(20,0)], DynCulvert[])
+    @test rf(net, [10.0,0.0], Bool[true,false], [0.0,0.0], [0.0]) ≈ [10.0,10.0]   # no loss
+    @test rf(net, [10.0,0.0], Bool[true,false], [0.0,0.0], [3.0]) ≈ [10.0,7.0]    # path loss
+    @test rf(net, [10.0,0.0], Bool[true,false], [4.0,0.0], [0.0]) ≈ [10.0,6.0]    # footprint loss
+    @test rf(net, [10.0,0.0], Bool[false,false], [0.0,0.0], [0.0]) ≈ [10.0,0.0]   # leaf doesn't spill
+    @test rf(net, [5.0,0.0],  Bool[true,false], [0.0,0.0], [8.0]) ≈ [5.0,0.0]     # loss floored at 0
+
+    # tributary merge: path1(A)->trap2(C,leaf), path2(B) merges into A; A,B fed by full traps
+    net2 = DynNetwork([DynFlowPath([c(1,1)], 2, Int[], Int[], [2]),
+                       DynFlowPath([c(5,5)], 0)],
+                      [T(10,1), T(20,0), T(30,2)], DynCulvert[])
+    # B: max(20-2,0)=18 joins A head; A: max((10+18)-1,0)=27 -> C
+    @test rf(net2, [10.0,0.0,20.0], Bool[true,false,true], [0.0,0.0,0.0], [1.0,2.0]) ≈ [10.0,27.0,20.0]
+
+    # spill exits the domain
+    net3 = DynNetwork([DynFlowPath([c(1,1)], 0)], [T(10,1)], DynCulvert[])
+    @test rf(net3, [10.0], Bool[true], [0.0], [2.0]) ≈ [10.0]
+end
+
+@testset "networksolver: geometry / rate / solve on mini.txt" begin
+    grid = loadgrid(joinpath(artifact"swim_testdata", "data", "small", "mini.txt"))
+    ts   = spillanalysis(grid, usediags=true)
+    net  = setup_network(ts, [CartesianIndex(7, 119)], collect(1:numtraps(ts)))[1]
+    nt   = length(net.traps)
+
+    @testset "geometry helpers (wetted-area infiltration)" begin
+        infil = fill(0.5, size(ts.topography))
+        geom  = SWIM._build_trap_geometry(ts, net, infil)
+        @test length(geom) == nt
+        for g in geom
+            g.capacity <= 0 && continue
+            nfp = length(g.footprint)
+            # empty: level at bottom; full: level Inf and whole footprint wetted
+            @test SWIM.water_level(g, 0.0) == g.zmin
+            @test isinf(SWIM.water_level(g, g.capacity))
+            @test SWIM.wetted_infiltration(g, g.capacity) ≈ 0.5 * nfp
+            # half-full: level within the trap, infiltration monotone in fill
+            Vh = g.capacity / 2
+            @test g.zmin <= SWIM.water_level(g, Vh) <= ts.spillpoints[g.trap_ix].elevation + 1e-9
+            @test SWIM.wetted_infiltration(g, 0.0) <=
+                  SWIM.wetted_infiltration(g, Vh)  <=
+                  SWIM.wetted_infiltration(g, g.capacity) + 1e-9
+            # table-based level agrees with the Roots-based waterheight
+            @test isapprox(SWIM.water_level(g, Vh), SWIM.waterheight(ts, g.trap_ix, Vh);
+                           rtol=1e-3, atol=1e-3)
+        end
+    end
+
+    @testset "rate function dV/dt" begin
+        # zero infiltration: full traps are steady pass-throughs, leaf accumulates
+        pA = SWIM._build_rate_params(ts, net, zeros(size(ts.topography)), fill(1.0, nt))
+        caps = [g.capacity for g in pA.geom]
+        VA = copy(caps); VA[end] = 0.0
+        dV = similar(VA); dynNetworkRateFunction!(dV, VA, pA, 0.0)
+        spilling = [VA[i] >= caps[i] for i in 1:nt]
+        @test all(abs.(dV[findall(spilling)]) .< 1e-9)   # full traps dV ~ 0
+        @test dV[end] > 0                                 # leaf fills
+
+        # starved (no inflow, only infiltration): every full trap drains
+        pC = SWIM._build_rate_params(ts, net, fill(0.1, size(ts.topography)), zeros(nt))
+        VC = [g.capacity for g in pC.geom]
+        dVC = similar(VC); dynNetworkRateFunction!(dVC, VC, pC, 0.0)
+        @test all(dVC .< 0)
+        @test dVC ≈ -pC.footprint_infil
+    end
+
+    @testset "solveDynNetwork events" begin
+        caps = [g.capacity for g in SWIM._build_trap_geometry(ts, net, zeros(size(ts.topography)))]
+        leaf = nt
+
+        # FILL: zero infiltration, uniform inflow, leaf empty -> fills and spills
+        V0 = copy(caps); V0[leaf] = 0.0
+        res = solveDynNetwork(ts, net, zeros(size(ts.topography)), fill(1.0, nt), V0)
+        @test res.kind == :fill
+        @test res.trap == net.traps[leaf].trap_ix
+        @test isfinite(res.time) && res.time > 0
+        @test isapprox(res.state[leaf], caps[leaf]; rtol=1e-3)
+        @test length(res.state) == nt
+
+        # STAGNATION -> Inf: only the leaf is fed, infiltration only on its footprint,
+        # so it reaches a steady level below capacity (no further event)
+        infil = zeros(size(ts.topography))
+        infil[ts.footprints[net.traps[leaf].trap_ix]] .= 0.3
+        inflow = zeros(nt); inflow[leaf] = 0.5
+        res2 = solveDynNetwork(ts, net, infil, inflow, V0)
+        @test res2.kind == :none
+        @test res2.trap == 0
+        @test res2.time == Inf
+        @test res2.state[leaf] < caps[leaf]
+
+        # NO EVOLVING: every trap already full -> immediate steady state
+        res3 = solveDynNetwork(ts, net, zeros(size(ts.topography)), zeros(nt), copy(caps))
+        @test res3.time == Inf && res3.trap == 0 && res3.kind == :none
+    end
+end
