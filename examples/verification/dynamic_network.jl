@@ -11,10 +11,12 @@
 #   * orange lines        : tributary paths that merge into another path
 #   * green discs         : the start cells handed to setup_network
 #
-# Run from the repo root:
+# Run from the repo root, either picking a named scenario on the command line:
+#   julia --project=examples examples/verification/dynamic_network.jl mixed
+# (omit the name for the default :long scenario), or interactively from the REPL:
 #   using Pkg; Pkg.activate("examples")
 #   include("examples/verification/dynamic_network.jl")
-#   fig = verify_dynamic_network([CartesianIndex(7, 119)])
+#   fig = verify_dynamic_network(SCENARIOS[:mixed])   # or any CartesianIndex vector
 
 using SurfaceWaterIntegratedModeling
 using Pkg.Artifacts
@@ -118,11 +120,28 @@ function verify_dynamic_network(starts; ts=_mini_trapstructure(), full_traps=:al
     return fig, surf, scene
 end
 
-# Ready-made scenario when run as a script (mirrors the Tier-3 "long" case).
+# Ready-made demo scenarios (start cells), all on the mini.txt grid with every
+# trap full. Pick one by name on the command line, or index SCENARIOS in the REPL.
+const SCENARIOS = Dict(
+    # one long spill path threading many traps (mirrors the Tier-3 "long" case)
+    :long     => [CartesianIndex(7, 119)],
+    # two balanced tributaries (~140 independent cells each) -> one merged network
+    :pair     => [CartesianIndex(6, 66), CartesianIndex(6, 162)],
+    # three balanced tributaries -> one merged network
+    :triple   => [CartesianIndex(6, 6), CartesianIndex(6, 102), CartesianIndex(6, 162)],
+    # a start inside a lake + a start on open terrain -> one merged network
+    :mixed    => [CartesianIndex(38, 182), CartesianIndex(6, 38)],
+    # two starts that drain independently -> two disjoint networks
+    :separate => [CartesianIndex(195, 7), CartesianIndex(179, 37)],
+)
+
 if abspath(PROGRAM_FILE) == @__FILE__
-    fig, = verify_dynamic_network([CartesianIndex(7, 119)], heightfac=0.2)
-    #fig, = verify_dynamic_network([CartesianIndex(6,66), CartesianIndex(6, 162)], heightfac=0.2)
-    #fig, = verify_dynamic_network([CartesianIndex(6, 6), CartesianIndex(6, 102), CartesianIndex(6,162)], heightfac=0.2)
+    name = isempty(ARGS) ? :long : Symbol(ARGS[1])
+    haskey(SCENARIOS, name) ||
+        error("unknown scenario \"$name\"; choose one of: " *
+              join(sort(string.(keys(SCENARIOS))), ", "))
+    @info "scenario: $name"
+    fig, = verify_dynamic_network(SCENARIOS[name], heightfac=0.2)
     GLMakie.display(fig)
     GLMakie.wait(GLMakie.Screen())  # keep the window open
 end
