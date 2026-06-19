@@ -85,9 +85,9 @@ function _network_texture(ts, nets, starts; path_width=0)
         end
     end
 
-    # start cells last, so they sit on top of everything
+    # start cells last, so they sit on top of everything (single cell, like paths)
     for s in starts
-        _paint!(tex, s, START_COLOR; width=1)
+        _paint!(tex, s, START_COLOR; width=0)
     end
     return tex
 end
