@@ -6,12 +6,12 @@
 # relief:
 #
 #   * grey                : terrain (shading conveys relief)
-#   * cool-coloured blobs : trap footprints, one "water" hue per network
+#   * blue blobs          : trap footprints (lakes)
 #   * red lines           : main flow paths (water routes)
 #   * orange lines        : tributary paths that merge into another path
 #   * green discs         : the start cells handed to setup_network
 #
-# The lake palette is kept clear of red/orange/green so a lake is never drawn in
+# The lake colour is kept clear of red/orange/green so a lake is never drawn in
 # a colour that would read as a path or a start point.
 #
 # Run from the repo root, either picking a named scenario on the command line:
@@ -28,32 +28,20 @@ import GLMakie, Images
 const SWIM = SurfaceWaterIntegratedModeling
 const RGBf = Images.RGB{Float64}
 
-# reserved colour constants for the semantic overlays
+# colour constants. A single "water" blue for all lakes — separate networks are
+# clear from the geometry, so the lake colour just needs to stay clear of the
+# reserved red/orange/green used for paths and start cells.
 const BG_COLOR    = RGBf(0.82, 0.82, 0.82)
 const PATH_COLOR  = RGBf(0.85, 0.10, 0.10)   # main flow paths
 const MERGE_COLOR = RGBf(1.00, 0.55, 0.00)   # tributary (merging) paths
 const START_COLOR = RGBf(0.00, 0.70, 0.00)   # start cells
-
-# Per-network trap-footprint hues. Deliberately cool "water" colours, kept clear
-# of the reserved red/orange/green above so a lake is never confused with a path
-# or a start cell (which is what tab10 — orange #2, green #3, red #4 — caused).
-const LAKE_COLORS = [
-    RGBf(0.20, 0.45, 0.85),   # blue
-    RGBf(0.55, 0.30, 0.75),   # purple
-    RGBf(0.15, 0.60, 0.60),   # teal
-    RGBf(0.85, 0.35, 0.70),   # magenta
-    RGBf(0.40, 0.35, 0.25),   # brown
-    RGBf(0.30, 0.35, 0.55),   # slate
-]
+const LAKE_COLOR  = RGBf(0.20, 0.45, 0.85)   # trap footprints (all networks)
 
 # load the mini.txt artifact grid and its trap structure
 function _mini_trapstructure()
     grid = loadgrid(joinpath(datapath_testdata(), "data", "small", "mini.txt"))
     return spillanalysis(grid, usediags=true)
 end
-
-# a distinct "water" hue per network for the trap footprints
-_net_color(i) = LAKE_COLORS[mod1(i, length(LAKE_COLORS))]
 
 # paint a cell, optionally widening to a (2*width+1)-square so paths read as lines
 function _paint!(tex, cell::CartesianIndex, color; width=0)
@@ -91,12 +79,9 @@ function _network_texture(ts, nets, starts; path_width=0)
         end
     end
 
-    # trap footprints on top, one vivid hue per network
-    for (i, net) in enumerate(nets)
-        col = _net_color(i)
-        for t in net.traps
-            tex[CI[ts.footprints[t.trap_ix]]] .= col
-        end
+    # trap footprints on top, all in the same lake colour
+    for net in nets, t in net.traps
+        tex[CI[ts.footprints[t.trap_ix]]] .= LAKE_COLOR
     end
 
     # start cells last, so they sit on top of everything (single cell, like paths)
