@@ -35,17 +35,15 @@ function _mini_trapstructure()
     return spillanalysis(grid, usediags=true)
 end
 
-# a light, distinct hue per network (footprints), blended toward white so the
-# red/orange path lines stay legible on top
-_net_color(i) = _blend(RGBf(ColorSchemes.tab10[mod1(i, 10)]), RGBf(1, 1, 1), 0.55)
+# a vivid, distinct hue per network for the trap footprints
+_net_color(i) = _blend(RGBf(ColorSchemes.tab10[mod1(i, 10)]), RGBf(1, 1, 1), 0.10)
 _blend(a, b, t) = RGBf((1 - t) * a.r + t * b.r,
                        (1 - t) * a.g + t * b.g,
                        (1 - t) * a.b + t * b.b)
 
-# paint a single cell and its 8-neighbours (so 1px paths read as lines)
-function _paint!(tex, cell::CartesianIndex, color; thick=true)
-    rng = thick ? (-1:1) : (0:0)
-    for di in rng, dj in rng
+# paint a cell, optionally widening to a (2*width+1)-square so paths read as lines
+function _paint!(tex, cell::CartesianIndex, color; width=0)
+    for di in -width:width, dj in -width:width
         c = cell + CartesianIndex(di, dj)
         checkbounds(Bool, tex, c) && (tex[c] = color)
     end
@@ -60,12 +58,26 @@ function _tributary_paths(net)
     return trib
 end
 
-# build the drape texture (grid-shaped Matrix{RGB}) from the networks
-function _network_texture(ts, nets, starts)
+# build the drape texture (grid-shaped Matrix{RGB}) from the networks.
+# Paths are drawn first and the (vivid) trap footprints painted on top, so the
+# lakes read as solid blobs and the thin path lines show in the connectors
+# between them rather than drowning the lakes.
+function _network_texture(ts, nets, starts; path_width=0)
     CI = CartesianIndices(ts.topography)
     tex = fill(BG_COLOR, size(ts.topography))
 
-    # trap footprints first (broad blobs), one hue per network
+    # flow paths first, tributaries highlighted
+    for net in nets
+        trib = _tributary_paths(net)
+        for (k, p) in enumerate(net.flow_paths)
+            color = k in trib ? MERGE_COLOR : PATH_COLOR
+            for cell in p.cells
+                _paint!(tex, cell, color; width=path_width)
+            end
+        end
+    end
+
+    # trap footprints on top, one vivid hue per network
     for (i, net) in enumerate(nets)
         col = _net_color(i)
         for t in net.traps
@@ -73,27 +85,16 @@ function _network_texture(ts, nets, starts)
         end
     end
 
-    # flow paths on top, tributaries highlighted
-    for net in nets
-        trib = _tributary_paths(net)
-        for (k, p) in enumerate(net.flow_paths)
-            color = k in trib ? MERGE_COLOR : PATH_COLOR
-            for cell in p.cells
-                _paint!(tex, cell, color)
-            end
-        end
-    end
-
     # start cells last, so they sit on top of everything
     for s in starts
-        _paint!(tex, s, START_COLOR)
+        _paint!(tex, s, START_COLOR; width=1)
     end
     return tex
 end
 
 """
     verify_dynamic_network(starts; ts=_mini_trapstructure(), full_traps=:all,
-                           heightfac=3.0, downsamplefac=1.0)
+                           heightfac=3.0, downsamplefac=1.0, path_width=0)
 
 Run `setup_network(ts, starts, full_traps)` and drape the resulting network(s) on
 the 3D terrain. `starts` is a vector of `CartesianIndex` start cells. Returns the
@@ -101,16 +102,17 @@ GLMakie figure (the surface and scene are also returned, as `(fig, surf, scene)`
 
 `full_traps=:all` (default) fills every trap — a valid downward-closed fill — or
 pass your own vector of filled trap indices. `heightfac` exaggerates the relief.
+`path_width` widens flow-path lines to a (2*path_width+1)-cell band (0 = 1 cell).
 """
 function verify_dynamic_network(starts; ts=_mini_trapstructure(), full_traps=:all,
-                                heightfac=3.0, downsamplefac=1.0)
+                                heightfac=3.0, downsamplefac=1.0, path_width=0)
     ftraps = full_traps === :all ? collect(1:numtraps(ts)) : full_traps
     nets = setup_network(ts, starts, ftraps)
     @info "setup_network produced $(length(nets)) network(s)" *
           " with $(sum(n -> length(n.traps), nets; init=0)) trap(s)" *
           " and $(sum(n -> length(n.flow_paths), nets; init=0)) flow path(s)"
 
-    tex = _network_texture(ts, nets, starts)
+    tex = _network_texture(ts, nets, starts; path_width=path_width)
     surf, fig, scene = plotgrid(ts.topography; texture=tex,
                                 heightfac=heightfac, downsamplefac=downsamplefac)
     return fig, surf, scene
