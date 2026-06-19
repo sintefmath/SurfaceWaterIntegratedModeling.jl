@@ -6,10 +6,13 @@
 # relief:
 #
 #   * grey                : terrain (shading conveys relief)
-#   * coloured blobs      : trap footprints, one hue per network
+#   * cool-coloured blobs : trap footprints, one "water" hue per network
 #   * red lines           : main flow paths (water routes)
 #   * orange lines        : tributary paths that merge into another path
 #   * green discs         : the start cells handed to setup_network
+#
+# The lake palette is kept clear of red/orange/green so a lake is never drawn in
+# a colour that would read as a path or a start point.
 #
 # Run from the repo root, either picking a named scenario on the command line:
 #   julia --project=examples examples/verification/dynamic_network.jl mixed
@@ -20,16 +23,28 @@
 
 using SurfaceWaterIntegratedModeling
 using Pkg.Artifacts
-import GLMakie, Images, ColorSchemes
+import GLMakie, Images
 
 const SWIM = SurfaceWaterIntegratedModeling
 const RGBf = Images.RGB{Float64}
 
-# colour constants
+# reserved colour constants for the semantic overlays
 const BG_COLOR    = RGBf(0.82, 0.82, 0.82)
 const PATH_COLOR  = RGBf(0.85, 0.10, 0.10)   # main flow paths
 const MERGE_COLOR = RGBf(1.00, 0.55, 0.00)   # tributary (merging) paths
 const START_COLOR = RGBf(0.00, 0.70, 0.00)   # start cells
+
+# Per-network trap-footprint hues. Deliberately cool "water" colours, kept clear
+# of the reserved red/orange/green above so a lake is never confused with a path
+# or a start cell (which is what tab10 — orange #2, green #3, red #4 — caused).
+const LAKE_COLORS = [
+    RGBf(0.20, 0.45, 0.85),   # blue
+    RGBf(0.55, 0.30, 0.75),   # purple
+    RGBf(0.15, 0.60, 0.60),   # teal
+    RGBf(0.85, 0.35, 0.70),   # magenta
+    RGBf(0.40, 0.35, 0.25),   # brown
+    RGBf(0.30, 0.35, 0.55),   # slate
+]
 
 # load the mini.txt artifact grid and its trap structure
 function _mini_trapstructure()
@@ -37,11 +52,8 @@ function _mini_trapstructure()
     return spillanalysis(grid, usediags=true)
 end
 
-# a vivid, distinct hue per network for the trap footprints
-_net_color(i) = _blend(RGBf(ColorSchemes.tab10[mod1(i, 10)]), RGBf(1, 1, 1), 0.10)
-_blend(a, b, t) = RGBf((1 - t) * a.r + t * b.r,
-                       (1 - t) * a.g + t * b.g,
-                       (1 - t) * a.b + t * b.b)
+# a distinct "water" hue per network for the trap footprints
+_net_color(i) = LAKE_COLORS[mod1(i, length(LAKE_COLORS))]
 
 # paint a cell, optionally widening to a (2*width+1)-square so paths read as lines
 function _paint!(tex, cell::CartesianIndex, color; width=0)
