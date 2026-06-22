@@ -114,6 +114,9 @@ function verify_solver(scenario::Symbol=:long; inflow=1.0, infiltration=0.0)
 
     @info "Scenario :$scenario — $nt traps, $np flow paths"
 
+    geom = SWIM._build_trap_geometry(ts, net, fill(infiltration, size(ts.topography)))
+    caps = [g.capacity for g in geom]
+
     times, fracs, events = run_cascade(ts, net; inflow=inflow, infiltration=infiltration)
 
     nfill  = count(e -> e.kind == :fill,  events)
@@ -121,26 +124,53 @@ function verify_solver(scenario::Symbol=:long; inflow=1.0, infiltration=0.0)
     @info "Simulation complete: $nfill fill, $nempty empty events" *
           "  t_final = $(round(times[end]; digits=3))"
 
-    fig = GLMakie.Figure(size=(960, 500))
-    ax  = GLMakie.Axis(fig[1, 1];
+    fig = GLMakie.Figure(size=(960, 850))
+    cmap = GLMakie.cgrad(:RdYlBu, nt; categorical=false, rev=true)
+
+    # --- top panel: fill-fraction time series ---
+    ax_ts = GLMakie.Axis(fig[1, 1];
         title   = "Fill cascade — :$scenario   $nt traps   " *
                   "inflow=$inflow/trap   infiltration=$infiltration/cell",
         xlabel  = "cumulative time",
         ylabel  = "fill fraction  V / capacity",
         limits  = (nothing, (-0.04, 1.12)))
 
-    # one line per trap, coloured by position in topological order (upstream=blue, downstream=red)
-    cmap = GLMakie.cgrad(:RdYlBu, nt; categorical=false, rev=true)
     for i in 1:nt
-        GLMakie.lines!(ax, times, fracs[i, :]; color=cmap[i], linewidth=1.2)
+        GLMakie.lines!(ax_ts, times, fracs[i, :]; color=cmap[i], linewidth=1.2)
     end
 
-    # faint vertical ticks at fill events
     fill_ts = [e.t for e in events if e.kind == :fill]
     isempty(fill_ts) ||
-        GLMakie.vlines!(ax, fill_ts; color=(:black, 0.12), linewidth=0.7)
+        GLMakie.vlines!(ax_ts, fill_ts; color=(:black, 0.12), linewidth=0.7)
 
     GLMakie.Colorbar(fig[1, 2]; colormap=GLMakie.cgrad(:RdYlBu; rev=true),
+                     limits=(1, nt),
+                     label="trap index  (upstream → downstream)",
+                     flipaxis=false)
+
+    # --- bottom panel: capacity vs fill time, connected in fill order ---
+    fill_events = filter(e -> e.kind == :fill, events)
+    sc_li   = [findfirst(t -> t.trap_ix == e.trap, net.traps) for e in fill_events]
+    sc_cap  = [caps[li] for li in sc_li]
+    sc_time = [e.t for e in fill_events]
+
+    ax_sc = GLMakie.Axis(fig[2, 1];
+        title   = "Capacity vs fill time  (connected in fill order)",
+        xlabel  = "trap capacity  (volume)",
+        ylabel  = "fill time  (cumulative)")
+
+    # connecting line in fill order (grey), dots coloured by topological position
+    for k in 1:length(fill_events)-1
+        GLMakie.lines!(ax_sc, sc_cap[k:k+1], sc_time[k:k+1];
+                       color=(:grey, 0.4), linewidth=1.0)
+    end
+    GLMakie.scatter!(ax_sc, sc_cap, sc_time;
+                     color = sc_li, colormap = GLMakie.cgrad(:RdYlBu; rev=true),
+                     colorrange = (1, nt),
+                     markersize = 8, strokewidth = 0.5,
+                     strokecolor = :black)
+
+    GLMakie.Colorbar(fig[2, 2]; colormap=GLMakie.cgrad(:RdYlBu; rev=true),
                      limits=(1, nt),
                      label="trap index  (upstream → downstream)",
                      flipaxis=false)
