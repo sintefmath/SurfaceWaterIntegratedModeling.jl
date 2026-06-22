@@ -610,6 +610,16 @@ function solveDynNetwork(tstruct::TrapStructure,
     if event.kind == :stagnation || event.kind == :none
         return (time = Inf, trap = 0, kind = :none, state = final)
     end
+
+    # Clamp the triggering trap to its exact threshold so the next call does not
+    # re-trigger the same event due to floating-point residual at the crossing.
+    final = copy(final)
+    if event.kind == :fill
+        final[event.trap] = p.geom[event.trap].capacity
+    elseif event.kind == :empty
+        final[event.trap] = 0.0
+    end
+
     return (time  = sol.t[end],
             trap  = net.traps[event.trap].trap_ix,
             kind  = event.kind,

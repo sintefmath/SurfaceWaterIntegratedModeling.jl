@@ -115,7 +115,7 @@ function verify_solver(; inflow=1.0, infiltration=0.0)
         limits  = (nothing, (-0.04, 1.12)))
 
     # one line per trap, upstream (blue) -> downstream (red)
-    cmap = GLMakie.cgrad(:RdYlBu_r, nt; categorical=false)
+    cmap = GLMakie.cgrad(:RdYlBu, nt; categorical=false, rev=true)
     for i in 1:nt
         GLMakie.lines!(ax, times, fracs[i, :];
                        color=cmap[i], linewidth=1.2)
@@ -126,7 +126,7 @@ function verify_solver(; inflow=1.0, infiltration=0.0)
     isempty(fill_ts) ||
         GLMakie.vlines!(ax, fill_ts; color=(:black, 0.12), linewidth=0.7)
 
-    GLMakie.Colorbar(fig[1, 2]; colormap=:RdYlBu_r,
+    GLMakie.Colorbar(fig[1, 2]; colormap=GLMakie.cgrad(:RdYlBu; rev=true),
                      limits=(1, nt),
                      label="trap index  (upstream → downstream)",
                      flipaxis=false)
