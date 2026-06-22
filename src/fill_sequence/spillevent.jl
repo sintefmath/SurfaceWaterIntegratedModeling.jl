@@ -57,7 +57,7 @@ moment in time when the trap passes from one to the other.
       water inflow to each trap, presented either as a vector with the individual
       values of each and every trap, or as a set of incremental updates representing
       the change since the last registered SpillEvent.  Inflow is a combination of
-      direct presipitation, runoff from the trap's watershed or spillover from 
+      direct precipitation, runoff from the trap's watershed or spillover from 
       upstream overflowing traps.
 
 - `rain_rate::Union{Matrix{Float64}, Float64, Nothing}`: 
