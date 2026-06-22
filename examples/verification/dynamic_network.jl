@@ -54,7 +54,7 @@ end
 # indices of paths that are tributaries (registered in some other path's merges)
 function _tributary_paths(net)
     trib = Set{Int}()
-    for p in net.flow_paths, m in p.merges
+    for p in net.flow_paths, (m, _) in p.merges
         push!(trib, m)
     end
     return trib
