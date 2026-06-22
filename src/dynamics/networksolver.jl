@@ -56,7 +56,7 @@ end
 
 # ----------------------------------------------------------------------------
 """
-    _build_trap_geometry(tstruct, net, infiltration) -> Vector{TrapGeometry}
+    _build_trap_geometry(tstruct, net, infiltration; zvt=nothing) -> Vector{TrapGeometry}
 
 Precompute a [`TrapGeometry`](@ref) for every trap in the [`DynNetwork`](@ref)
 `net`, in the same order as `net.traps` (i.e. indexed by the network-local trap
@@ -64,14 +64,19 @@ index, not the global trap index).
 
 `infiltration` is a grid the same shape as `tstruct.topography`, giving a
 per-cell infiltration rate (0 for impermeable / fully saturated cells).
+
+`zvt` is the pre-computed volume↔level table from [`_compute_z_vol_tables`](@ref).
+If `nothing` (default) it is computed here; pass a cached value when calling
+repeatedly for the same [`TrapStructure`](@ref) to avoid redundant work.
 """
 function _build_trap_geometry(tstruct::TrapStructure,
                               net::DynNetwork,
-                              infiltration::AbstractMatrix{<:Real})
+                              infiltration::AbstractMatrix{<:Real};
+                              zvt = nothing)
 
     # Reuse the existing per-trap volume<->level tables.  These are computed for
     # every trap in the structure; we only index the ones present in `net`.
-    zvt  = _compute_z_vol_tables(tstruct)
+    zvt === nothing && (zvt = _compute_z_vol_tables(tstruct))
     nreg = numregions(tstruct)
 
     geom = Vector{TrapGeometry}(undef, length(net.traps))
@@ -207,15 +212,18 @@ end
 
 # ----------------------------------------------------------------------------
 """
-    _route_flow(net, external_inflow, spilling, footprint_infil, path_infil) -> Vector{Float64}
+    _route_flow(net, external_inflow, spilling, footprint_infil, path_infil;
+                path_inflow=zeros(np)) -> Vector{Float64}
 
 Total inflow arriving at each trap of `net` (in `net.traps` order): the caller-
-supplied `external_inflow` plus everything routed in from upstream.
+supplied `external_inflow` (per trap) and `path_inflow` (per path) plus everything
+routed in from upstream.
 
 Each *spilling* trap (`spilling[i] == true`) emits `max(inflow - footprint_infil[i],
 0)` into its spill path; non-spilling traps pass nothing on.  Flow travelling down
-a path loses `path_infil[p]` to infiltration (floored at zero), then is delivered
-to the path's `target_trap`, or into the path it merges into, or out of the domain.
+a path is seeded with the path's `path_inflow`, loses `path_infil[p]` to
+infiltration (floored at zero), then is delivered to the path's `target_trap`, or
+into the path it merges into, or out of the domain.
 
 `footprint_infil[i]` is trap `i`'s whole-footprint infiltration (a full trap is
 submerged over its entire footprint) and `path_infil[p]` is path `p`'s total
@@ -233,10 +241,11 @@ function _route_flow(net::DynNetwork,
                      external_inflow::AbstractVector{<:Real},
                      spilling::AbstractVector{Bool},
                      footprint_infil::AbstractVector{<:Real},
-                     path_infil::AbstractVector{<:Real})
+                     path_infil::AbstractVector{<:Real};
+                     path_inflow = zeros(length(net.flow_paths)))
     order, _ = _network_order(net)
     return _route_flow(net, external_inflow, spilling, footprint_infil, path_infil,
-                       order, _merge_targets(net))
+                       path_inflow, order, _merge_targets(net))
 end
 
 # Core router with the routing plan (`order` from [`_network_order`](@ref) and
@@ -248,33 +257,34 @@ function _route_flow(net::DynNetwork,
                      spilling::AbstractVector{Bool},
                      footprint_infil::AbstractVector{<:Real},
                      path_infil::AbstractVector{<:Real},
+                     external_path_inflow::AbstractVector{<:Real},
                      order::AbstractVector{<:Integer},
                      merge_target::AbstractVector{<:Integer})
 
     np = length(net.flow_paths)
     nt = length(net.traps)
     @assert length(external_inflow) == length(spilling) == length(footprint_infil) == nt
-    @assert length(path_infil) == length(merge_target) == np
+    @assert length(path_infil) == length(merge_target) == length(external_path_inflow) == np
 
-    trap_inflow = Float64.(external_inflow)   # accumulator, seeded with external inflow
-    path_inflow = zeros(Float64, np)          # flow entering each path's head
+    trap_inflow = Float64.(external_inflow)        # accumulator, seeded with external trap inflow
+    path_flow   = Float64.(external_path_inflow)   # accumulator, seeded with external path inflow
 
     for node in order
         if node <= np                                   # a flow path
             p = node
-            delivered = max(path_inflow[p] - path_infil[p], 0.0)
+            delivered = max(path_flow[p] - path_infil[p], 0.0)
             tt = net.flow_paths[p].target_trap
             if tt > 0
                 trap_inflow[tt] += delivered            # into the downstream trap
             elseif merge_target[p] > 0
-                path_inflow[merge_target[p]] += delivered   # into the path it merges into
+                path_flow[merge_target[p]] += delivered # into the path it merges into
             end                                          # else: leaves the domain
         else                                            # a trap
             i = node - np
             if spilling[i]
                 spill = max(trap_inflow[i] - footprint_infil[i], 0.0)
                 sp = net.traps[i].spill_path
-                sp > 0 && (path_inflow[sp] += spill)     # sp == 0: spills out of domain
+                sp > 0 && (path_flow[sp] += spill)      # sp == 0: spills out of domain
             end
         end
     end
@@ -329,6 +339,8 @@ parameter.  Indexed network-locally (same order as `net.traps` / `net.flow_paths
 - `net`: the [`DynNetwork`](@ref) being solved
 - `geom`: per-trap [`TrapGeometry`](@ref) (capacity + wetted-area infiltration)
 - `external_inflow`: caller-supplied constant inflow per trap
+- `external_path_inflow`: caller-supplied constant inflow directly onto each flow
+  path (e.g. rainfall on path cells); added at the path head before infiltration
 - `footprint_infil`: whole-footprint infiltration per trap
 - `path_infil`: total infiltration capacity per flow path
 - `order`, `merge_target`: the static routing plan (see [`_network_order`](@ref),
@@ -338,6 +350,7 @@ struct DynNetworkRateParams
     net::DynNetwork
     geom::Vector{TrapGeometry}
     external_inflow::Vector{Float64}
+    external_path_inflow::Vector{Float64}
     footprint_infil::Vector{Float64}
     path_infil::Vector{Float64}
     order::Vector{Int}
@@ -346,20 +359,34 @@ end
 
 # ----------------------------------------------------------------------------
 """
-    _build_rate_params(tstruct, net, infiltration, external_inflow) -> DynNetworkRateParams
+    _build_rate_params(tstruct, net, infiltration, external_inflow;
+                       path_inflow=nothing, zvt=nothing) -> DynNetworkRateParams
 
 Precompute the static [`DynNetworkRateParams`](@ref) for a solve: the per-trap
 geometry, the footprint/path infiltration sums, and the routing plan.
+
+`path_inflow` is the constant external inflow per flow path (e.g. rainfall on path
+cells).  Defaults to zeros if `nothing`.
+
+`zvt` is a pre-computed volume↔level table (see [`_build_trap_geometry`](@ref)).
+Pass a cached value when solving many networks over the same [`TrapStructure`](@ref).
 """
 function _build_rate_params(tstruct::TrapStructure,
                             net::DynNetwork,
                             infiltration::AbstractMatrix{<:Real},
-                            external_inflow::AbstractVector{<:Real})
-    @assert length(external_inflow) == length(net.traps)
+                            external_inflow::AbstractVector{<:Real};
+                            path_inflow = nothing,
+                            zvt = nothing)
+    nt = length(net.traps)
+    np = length(net.flow_paths)
+    @assert length(external_inflow) == nt
+    path_inflow_vec = path_inflow === nothing ? zeros(Float64, np) : Float64.(path_inflow)
+    @assert length(path_inflow_vec) == np
     order, _ = _network_order(net)
     return DynNetworkRateParams(net,
-                                _build_trap_geometry(tstruct, net, infiltration),
+                                _build_trap_geometry(tstruct, net, infiltration; zvt=zvt),
                                 Float64.(external_inflow),
+                                path_inflow_vec,
                                 _footprint_infiltration(tstruct, net, infiltration),
                                 _path_infiltration(net, infiltration),
                                 order,
@@ -399,7 +426,8 @@ function dynNetworkRateFunction!(dV, V, p::DynNetworkRateParams, t = 0.0)
     end
 
     inflow = _route_flow(p.net, p.external_inflow, spilling,
-                         p.footprint_infil, p.path_infil, p.order, p.merge_target)
+                         p.footprint_infil, p.path_infil, p.external_path_inflow,
+                         p.order, p.merge_target)
 
     @inbounds for i in 1:nt
         if spilling[i]
@@ -544,7 +572,7 @@ end
 
 """
     solveDynNetwork(tstruct, net, infiltration, inflow, state;
-                    abstol=1e-8, reltol=1e-8)
+                    path_inflow=nothing, abstol=1e-8, reltol=1e-8, zvt=nothing)
         -> (; time, trap, kind, state)
 
 Evolve the water content of the lakes (traps) of a [`DynNetwork`](@ref) forward in
@@ -560,15 +588,24 @@ time until the first *event* that changes the network topology, and return it.
   `net.traps`.  Non-leaf traps must be full (at capacity); leaf traps may be
   partially filled.
 
+# Keyword arguments
+- `path_inflow`: constant inflow rate directly onto each flow path (e.g. rainfall
+  on path cells), indexed as `net.flow_paths`.  Defaults to zeros if `nothing`.
+  Added at the path head before infiltration losses are applied.
+- `zvt`: pre-computed volume↔level tables from [`_compute_z_vol_tables`](@ref).
+  Pass a cached value when solving many networks over the same [`TrapStructure`](@ref)
+  to avoid recomputing these static tables on every call.
+- `abstol`, `reltol`: ODE solver tolerances.
+
 # Returns
 A named tuple:
 - `time`: time of the event, or `Inf` if the network reaches steady state with no
   further event
 - `trap`: global trap index (into `tstruct`) where the event occurred, or `0`
   for the steady-state / no-event case
-- `kind`: `:fill` (a leaf filled and began spilling), `:empty` (a trap emptied,
-  exposing its subtraps), or `:none` (steady state).  `:unspill` and culvert
-  events are scaffolded but dormant in the current lakes-and-rivers scope.
+- `kind`: `:fill` (a trap filled and started spilling), `:empty` (a trap emptied),
+  `:unspill` (a full trap's losses exceed its inflow and it immediately begins
+  draining), or `:none` (steady state)
 - `state`: the trap-volume state at `time`
 
 The problem is integrated as an `ODEProblem` with [`dynNetworkRateFunction!`](@ref)
@@ -580,21 +617,40 @@ function solveDynNetwork(tstruct::TrapStructure,
                          infiltration::AbstractMatrix{<:Real},
                          inflow::AbstractVector{<:Real},
                          state::AbstractVector{<:Real};
-                         abstol = 1e-8, reltol = 1e-8)
+                         path_inflow = nothing,
+                         abstol = 1e-8, reltol = 1e-8,
+                         zvt = nothing)
 
     nt = length(net.traps)
     @assert length(state) == nt "state must have one entry per trap in net.traps"
 
-    p  = _build_rate_params(tstruct, net, infiltration, inflow)
+    p  = _build_rate_params(tstruct, net, infiltration, inflow;
+                            path_inflow=path_inflow, zvt=zvt)
     V0 = Float64.(state)
 
-    # Traps that evolve: those below their capacity.  Full traps are held steady
-    # (dV ~ 0) and would trigger :fill spuriously, so they are not monitored.
+    # Compute initial rates once; used for both the :unspill check and the stagnation check.
+    du0 = similar(V0, Float64)
+    dynNetworkRateFunction!(du0, V0, p, 0.0)
+
+    # A full trap whose losses exceed its inflow (du0 < 0) begins draining immediately.
+    # Return an :unspill event at t=0 and clamp all such traps to just below capacity
+    # so the next call treats them as evolving rather than re-triggering the same event.
+    unspilling = [i for i in 1:nt if V0[i] >= p.geom[i].capacity && du0[i] < -abstol]
+    if !isempty(unspilling)
+        worst = unspilling[argmin(du0[unspilling])]
+        final = copy(V0)
+        for i in unspilling
+            final[i] = prevfloat(p.geom[i].capacity)
+        end
+        return (time = 0.0, trap = net.traps[worst].trap_ix, kind = :unspill, state = final)
+    end
+
+    # Traps that evolve: those below their capacity.  Full traps with non-negative net
+    # (handled above) are steady (dV ~ 0) and would trigger :fill spuriously.
     evolving = [i for i in 1:nt if V0[i] < p.geom[i].capacity]
 
     # Nothing evolves, or everything that could is already at rest: steady state.
     isempty(evolving) && return (time = Inf, trap = 0, kind = :none, state = V0)
-    du0 = similar(V0); dynNetworkRateFunction!(du0, V0, p, 0.0)
     all(abs(du0[i]) <= abstol for i in evolving) &&
         return (time = Inf, trap = 0, kind = :none, state = V0)
 

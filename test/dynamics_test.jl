@@ -220,12 +220,23 @@ end
     @test rf(net, [10.0,0.0], Bool[false,false], [0.0,0.0], [0.0]) ≈ [10.0,0.0]   # leaf doesn't spill
     @test rf(net, [5.0,0.0],  Bool[true,false], [0.0,0.0], [8.0]) ≈ [5.0,0.0]     # loss floored at 0
 
+    # path_inflow: direct inflow onto a leaf path reaches the downstream trap (after path loss)
+    @test rf(net, [0.0,0.0], Bool[false,false], [0.0,0.0], [0.0];
+             path_inflow=[5.0]) ≈ [0.0, 5.0]                                       # no path loss
+    @test rf(net, [0.0,0.0], Bool[false,false], [0.0,0.0], [3.0];
+             path_inflow=[5.0]) ≈ [0.0, 2.0]                                       # path loss applied
+    @test rf(net, [0.0,0.0], Bool[false,false], [0.0,0.0], [8.0];
+             path_inflow=[5.0]) ≈ [0.0, 0.0]                                       # loss exceeds inflow
+
     # tributary merge: path1(A)->trap2(C,leaf), path2(B) merges into A; A,B fed by full traps
     net2 = DynNetwork([DynFlowPath([c(1,1)], 2, Int[], Int[], [2]),
                        DynFlowPath([c(5,5)], 0)],
                       [T(10,1), T(20,0), T(30,2)], DynCulvert[])
     # B: max(20-2,0)=18 joins A head; A: max((10+18)-1,0)=27 -> C
     @test rf(net2, [10.0,0.0,20.0], Bool[true,false,true], [0.0,0.0,0.0], [1.0,2.0]) ≈ [10.0,27.0,20.0]
+    # path_inflow onto tributary path2: flows through path1 infiltration before reaching trap C
+    @test rf(net2, [0.0,0.0,0.0], Bool[false,false,false], [0.0,0.0,0.0], [1.0,2.0];
+             path_inflow=[0.0,7.0]) ≈ [0.0, max(7.0-2.0-1.0, 0.0), 0.0]           # 7-2(path2)-1(path1)=4
 
     # spill exits the domain
     net3 = DynNetwork([DynFlowPath([c(1,1)], 0)], [T(10,1)], DynCulvert[])
@@ -242,6 +253,13 @@ end
         infil = fill(0.5, size(ts.topography))
         geom  = SWIM._build_trap_geometry(ts, net, infil)
         @test length(geom) == nt
+        # zvt caching: pre-computed tables must give identical geometry
+        zvt_cached = SWIM._compute_z_vol_tables(ts)
+        geom2 = SWIM._build_trap_geometry(ts, net, infil; zvt=zvt_cached)
+        @test length(geom2) == nt
+        for (g, g2) in zip(geom, geom2)
+            @test g.capacity == g2.capacity && g.zmin == g2.zmin
+        end
         for g in geom
             g.capacity <= 0 && continue
             nfp = length(g.footprint)
@@ -292,6 +310,24 @@ end
         @test isapprox(res.state[leaf], caps[leaf]; rtol=1e-3)
         @test length(res.state) == nt
 
+        # zvt caching: pre-computed tables give the same fill result
+        zvt_cached = SWIM._compute_z_vol_tables(ts)
+        res_zvt = solveDynNetwork(ts, net, zeros(size(ts.topography)), fill(1.0, nt), V0;
+                                  zvt=zvt_cached)
+        @test res_zvt.kind == res.kind && res_zvt.trap == res.trap
+        @test isapprox(res_zvt.time, res.time; rtol=1e-6)
+
+        # path_inflow: leaf fed only via path inflow (no trap inflow), still fills
+        V0_pi = copy(caps); V0_pi[leaf] = 0.0
+        path_qi = zeros(length(net.flow_paths))
+        # find the spill path of the last full trap, which feeds into the leaf
+        spill_p = net.traps[leaf-1].spill_path
+        spill_p > 0 && (path_qi[spill_p] = 1.0)
+        res_pi = solveDynNetwork(ts, net, zeros(size(ts.topography)), zeros(nt), V0_pi;
+                                 path_inflow=path_qi)
+        @test res_pi.kind == :fill && res_pi.trap == net.traps[leaf].trap_ix
+        @test isfinite(res_pi.time) && res_pi.time > 0
+
         # STAGNATION -> Inf: only the leaf is fed, infiltration only on its footprint,
         # so it reaches a steady level below capacity (no further event)
         infil = zeros(size(ts.topography))
@@ -303,7 +339,16 @@ end
         @test res2.time == Inf
         @test res2.state[leaf] < caps[leaf]
 
-        # NO EVOLVING: every trap already full -> immediate steady state
+        # UNSPILL: all traps full, infiltration exceeds inflow -> immediately draining
+        VC = copy(caps)
+        res_us = solveDynNetwork(ts, net, fill(0.1, size(ts.topography)), zeros(nt), VC)
+        @test res_us.kind == :unspill
+        @test res_us.time == 0.0
+        @test res_us.trap > 0
+        @test all(res_us.state .<= caps)               # no state above capacity
+        @test any(res_us.state .< caps)                # at least one trap below full
+
+        # NO EVOLVING: every trap already full, zero infiltration -> steady state
         res3 = solveDynNetwork(ts, net, zeros(size(ts.topography)), zeros(nt), copy(caps))
         @test res3.time == Inf && res3.trap == 0 && res3.kind == :none
     end
