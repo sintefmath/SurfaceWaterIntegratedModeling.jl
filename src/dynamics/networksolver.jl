@@ -186,7 +186,7 @@ function _network_order(net::DynNetwork)
 
     for (p, path) in enumerate(net.flow_paths)
         path.target_trap > 0 && Graphs.add_edge!(g, p, np + path.target_trap)
-        for m in path.merges
+        for (m, _) in path.merges
             Graphs.add_edge!(g, m, p)            # tributary m feeds path p
         end
     end
@@ -204,7 +204,7 @@ end
 # well defined.
 function _merge_targets(net::DynNetwork)
     merge_target = zeros(Int, length(net.flow_paths))
-    for (a, path) in enumerate(net.flow_paths), m in path.merges
+    for (a, path) in enumerate(net.flow_paths), (m, _) in path.merges
         merge_target[m] = a
     end
     return merge_target
@@ -212,79 +212,93 @@ end
 
 # ----------------------------------------------------------------------------
 """
-    _route_flow(net, external_inflow, spilling, footprint_infil, path_infil;
+    _route_flow(net, external_inflow, spilling, footprint_infil, path_cell_infil;
                 path_inflow=zeros(np)) -> Vector{Float64}
 
 Total inflow arriving at each trap of `net` (in `net.traps` order): the caller-
-supplied `external_inflow` (per trap) and `path_inflow` (per path) plus everything
-routed in from upstream.
+supplied `external_inflow` (per trap) and `path_inflow` (per path, entering at
+each path's inlet) plus everything routed in from upstream.
 
-Each *spilling* trap (`spilling[i] == true`) emits `max(inflow - footprint_infil[i],
-0)` into its spill path; non-spilling traps pass nothing on.  Flow travelling down
-a path is seeded with the path's `path_inflow`, loses `path_infil[p]` to
-infiltration (floored at zero), then is delivered to the path's `target_trap`, or
-into the path it merges into, or out of the domain.
+Each *spilling* trap emits `max(inflow - footprint_infil[i], 0)` into its spill
+path.  Flow along a path is routed in segments between tributary junctions: the
+head flow (from trap spills and `path_inflow`) travels through the pre-junction
+cells losing infiltration, then each tributary's delivered flow is added at its
+exact junction position, and the combined flow continues through the remaining
+cells.  This gives each tributary the correct post-junction infiltration charge.
 
-`footprint_infil[i]` is trap `i`'s whole-footprint infiltration (a full trap is
-submerged over its entire footprint) and `path_infil[p]` is path `p`'s total
-infiltration capacity; both are passed in so this routine stays pure topology and
-is testable on a hand-built network.  See [`_footprint_infiltration`](@ref) and
-[`_path_infiltration`](@ref) for computing them from a `TrapStructure`.
-
-!!! note "Merge approximation"
-    A tributary's delivered flow is added at the head of the path it merges into,
-    so it is charged that path's full infiltration capacity rather than only the
-    portion below the junction (the junction cell is not retained when paths are
-    truncated).  Exact without merges; a slight over-infiltration with them.
+`path_cell_infil[p]` is a vector of per-cell infiltration rates for path `p`
+(in cell order); both are passed in so this routine stays pure topology and
+is testable on a hand-built network.  See [`_path_cell_infiltration`](@ref)
+and [`_footprint_infiltration`](@ref) for computing them from a `TrapStructure`.
 """
 function _route_flow(net::DynNetwork,
                      external_inflow::AbstractVector{<:Real},
                      spilling::AbstractVector{Bool},
                      footprint_infil::AbstractVector{<:Real},
-                     path_infil::AbstractVector{<:Real};
+                     path_cell_infil::AbstractVector{<:AbstractVector{<:Real}};
                      path_inflow = zeros(length(net.flow_paths)))
-    order, _ = _network_order(net)
-    return _route_flow(net, external_inflow, spilling, footprint_infil, path_infil,
-                       path_inflow, order, _merge_targets(net))
+    order, _      = _network_order(net)
+    prefix        = [_infil_prefix(ci) for ci in path_cell_infil]
+    sorted_tribs  = [sort([(j, m) for (m, j) in fp.merges]) for fp in net.flow_paths]
+    return _route_flow(net, external_inflow, spilling, footprint_infil,
+                       prefix, path_inflow, sorted_tribs, order, _merge_targets(net))
 end
 
-# Core router with the routing plan (`order` from [`_network_order`](@ref) and
-# `merge_target` from [`_merge_targets`](@ref)) supplied.  Both are static for a
-# given network, so the rate function precomputes them once rather than rebuilding
-# the graph and topological sort on every ODE step.
+# Core router with all static routing data pre-supplied.  Tributaries are handled
+# via segmented routing: flow is charged infiltration only over the path cells it
+# actually travels through, so a tributary joining at junction j is not charged
+# the pre-junction infiltration of the main path.  With no tributaries the loop
+# over `sorted_tribs[p]` is empty and the result is identical to a simple lump
+# deduction — one code path for both cases.
 function _route_flow(net::DynNetwork,
                      external_inflow::AbstractVector{<:Real},
                      spilling::AbstractVector{Bool},
                      footprint_infil::AbstractVector{<:Real},
-                     path_infil::AbstractVector{<:Real},
+                     path_infil_prefix::AbstractVector{<:AbstractVector{<:Real}},
                      external_path_inflow::AbstractVector{<:Real},
+                     sorted_trib_info::AbstractVector{<:AbstractVector},
                      order::AbstractVector{<:Integer},
                      merge_target::AbstractVector{<:Integer})
 
     np = length(net.flow_paths)
     nt = length(net.traps)
     @assert length(external_inflow) == length(spilling) == length(footprint_infil) == nt
-    @assert length(path_infil) == length(merge_target) == length(external_path_inflow) == np
+    @assert length(path_infil_prefix) == length(merge_target) ==
+            length(external_path_inflow) == length(sorted_trib_info) == np
 
     trap_inflow = Float64.(external_inflow)        # accumulator, seeded with external trap inflow
-    path_flow   = Float64.(external_path_inflow)   # accumulator, seeded with external path inflow
+    path_flow   = Float64.(external_path_inflow)   # head inflow per path (trap spills + path_inflow)
+    trib_output = zeros(Float64, np)               # delivered output of each tributary path
 
     for node in order
-        if node <= np                                   # a flow path
-            p = node
-            delivered = max(path_flow[p] - path_infil[p], 0.0)
+        if node <= np                               # a flow path
+            p      = node
+            prefix = path_infil_prefix[p]
+            tribs  = sorted_trib_info[p]
+
+            # Segmented routing: process each inter-junction segment in order,
+            # adding each tributary's delivered flow at its junction position.
+            current  = path_flow[p]
+            prev_pfx = 0.0
+            for (junc, m) in tribs
+                current  = max(current - (prefix[junc] - prev_pfx), 0.0)
+                current += trib_output[m]
+                prev_pfx = prefix[junc]
+            end
+            delivered = max(current - (prefix[end] - prev_pfx), 0.0)
+
             tt = net.flow_paths[p].target_trap
             if tt > 0
-                trap_inflow[tt] += delivered            # into the downstream trap
+                trap_inflow[tt] += delivered        # into the downstream trap
             elseif merge_target[p] > 0
-                path_flow[merge_target[p]] += delivered # into the path it merges into
-            end                                          # else: leaves the domain
-        else                                            # a trap
+                trib_output[p] = delivered          # buffer for main path's segmented routing
+            end                                      # else: exits the domain
+        else                                        # a trap
             i = node - np
             if spilling[i]
                 spill = max(trap_inflow[i] - footprint_infil[i], 0.0)
                 sp = net.traps[i].spill_path
-                sp > 0 && (path_flow[sp] += spill)      # sp == 0: spills out of domain
+                sp > 0 && (path_flow[sp] += spill)  # sp == 0: spills out of domain
             end
         end
     end
@@ -307,15 +321,27 @@ end
 
 # ----------------------------------------------------------------------------
 """
-    _path_infiltration(net, infiltration) -> Vector{Float64}
+    _path_cell_infiltration(net, infiltration) -> Vector{Vector{Float64}}
 
-Total infiltration capacity of each flow path in `net` (in `net.flow_paths`
-order): the infiltration grid summed over the path's cells.  Used by
-[`_route_flow`](@ref) as the in-transit loss along the path.
+Per-cell infiltration rate of each flow path in `net` (in `net.flow_paths` order):
+the infiltration grid evaluated at each cell along the path, preserving cell order.
+Used by [`_build_rate_params`](@ref) to compute prefix sums for [`_route_flow`](@ref).
 """
-function _path_infiltration(net::DynNetwork, infiltration::AbstractMatrix{<:Real})
-    return [isempty(p.cells) ? 0.0 : sum(infiltration[c] for c in p.cells)
+function _path_cell_infiltration(net::DynNetwork, infiltration::AbstractMatrix{<:Real})
+    return [isempty(p.cells) ? Float64[] : Float64[infiltration[c] for c in p.cells]
             for p in net.flow_paths]
+end
+
+# Prefix sum of a per-cell infiltration vector: prefix[k] = sum of cells 1..k-1,
+# so prefix[1]=0 and prefix[end]=total.  Used for O(1) segment-infil lookups.
+function _infil_prefix(cell_infil::AbstractVector{<:Real})
+    n      = length(cell_infil)
+    prefix = Vector{Float64}(undef, n + 1)
+    prefix[1] = 0.0
+    for k in 1:n
+        prefix[k+1] = prefix[k] + cell_infil[k]
+    end
+    return prefix
 end
 
 # ============================================================================
@@ -342,7 +368,11 @@ parameter.  Indexed network-locally (same order as `net.traps` / `net.flow_paths
 - `external_path_inflow`: caller-supplied constant inflow directly onto each flow
   path (e.g. rainfall on path cells); added at the path head before infiltration
 - `footprint_infil`: whole-footprint infiltration per trap
-- `path_infil`: total infiltration capacity per flow path
+- `path_infil_prefix`: per-path prefix sums of per-cell infiltration
+  (`prefix[k]` = sum of cell infiltrations 1..k-1, so `prefix[1]=0` and
+  `prefix[end]` = total path infiltration)
+- `sorted_trib_info`: per-path list of `(junction_cell_index, tributary_path_index)`
+  sorted by junction position; empty for paths with no tributaries
 - `order`, `merge_target`: the static routing plan (see [`_network_order`](@ref),
   [`_merge_targets`](@ref))
 """
@@ -352,7 +382,8 @@ struct DynNetworkRateParams
     external_inflow::Vector{Float64}
     external_path_inflow::Vector{Float64}
     footprint_infil::Vector{Float64}
-    path_infil::Vector{Float64}
+    path_infil_prefix::Vector{Vector{Float64}}
+    sorted_trib_info::Vector{Vector{Tuple{Int,Int}}}
     order::Vector{Int}
     merge_target::Vector{Int}
 end
@@ -382,13 +413,17 @@ function _build_rate_params(tstruct::TrapStructure,
     @assert length(external_inflow) == nt
     path_inflow_vec = path_inflow === nothing ? zeros(Float64, np) : Float64.(path_inflow)
     @assert length(path_inflow_vec) == np
-    order, _ = _network_order(net)
+    order, _        = _network_order(net)
+    cell_infil      = _path_cell_infiltration(net, infiltration)
+    prefix          = [_infil_prefix(ci) for ci in cell_infil]
+    sorted_tribs    = [sort([(j, m) for (m, j) in fp.merges]) for fp in net.flow_paths]
     return DynNetworkRateParams(net,
                                 _build_trap_geometry(tstruct, net, infiltration; zvt=zvt),
                                 Float64.(external_inflow),
                                 path_inflow_vec,
                                 _footprint_infiltration(tstruct, net, infiltration),
-                                _path_infiltration(net, infiltration),
+                                prefix,
+                                sorted_tribs,
                                 order,
                                 _merge_targets(net))
 end
@@ -426,8 +461,8 @@ function dynNetworkRateFunction!(dV, V, p::DynNetworkRateParams, t = 0.0)
     end
 
     inflow = _route_flow(p.net, p.external_inflow, spilling,
-                         p.footprint_infil, p.path_infil, p.external_path_inflow,
-                         p.order, p.merge_target)
+                         p.footprint_infil, p.path_infil_prefix, p.external_path_inflow,
+                         p.sorted_trib_info, p.order, p.merge_target)
 
     @inbounds for i in 1:nt
         if spilling[i]

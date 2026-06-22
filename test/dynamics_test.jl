@@ -14,7 +14,7 @@ function valid_network(net)
     ok = true
     for p in net.flow_paths
         ok &= 0 <= p.target_trap <= nt
-        ok &= all(1 .<= p.merges .<= np)
+        ok &= all(1 <= m <= np for (m, _) in p.merges)
     end
     for t in net.traps
         ok &= 0 <= t.spill_path <= np
@@ -103,9 +103,9 @@ end
     @test length(comps) == 2
     @test Set(map(Set, comps)) == Set([Set([1, 2]), Set([3])])
 
-    # connection purely via a merge
-    paths = [DynFlowPath([c(1,1)], 0),
-             DynFlowPath([c(2,2)], 0, Int[], Int[], [1])]  # path2 merges into path1
+    # connection purely via a merge (junction position = 1 since path1 has 1 cell)
+    paths = [DynFlowPath([c(1,1)], 0, Int[], Int[], [(2, 1)]),   # path1 is main; trib=path2 at pos 1
+             DynFlowPath([c(2,2)], 0)]
     comps = SWIM._path_components(paths, DynTrap[])
     @test length(comps) == 1
     @test Set(comps[1]) == Set([1, 2])
@@ -117,7 +117,7 @@ end
              DynFlowPath([c(2,1), c(1,2), c(1,3)], 2)]
     SWIM._resolve_cell_overlaps!(paths, DynCulvert[])
 
-    @test paths[1].merges == [2]            # path2 registered as tributary of path1
+    @test paths[1].merges == [(2, 2)]        # path2 is trib of path1; junction at cell index 2 (c(1,2))
     @test paths[2].cells == [c(2,1)]        # truncated before the shared cell
     @test paths[2].target_trap == 0         # truncated path no longer targets a trap
     @test disjoint_cells([DynNetwork(paths, DynTrap[], DynCulvert[])])
@@ -212,35 +212,47 @@ end
     T(ix, sp) = DynTrap(ix, sp)
     rf = SWIM._route_flow
 
+    # path_cell_infil is per-cell; for single-cell paths it is a 1-element vector.
     # chain  A(full) -> path -> B(leaf)
     net = DynNetwork([DynFlowPath([c(1,1)], 2)], [T(10,1), T(20,0)], DynCulvert[])
-    @test rf(net, [10.0,0.0], Bool[true,false], [0.0,0.0], [0.0]) ≈ [10.0,10.0]   # no loss
-    @test rf(net, [10.0,0.0], Bool[true,false], [0.0,0.0], [3.0]) ≈ [10.0,7.0]    # path loss
-    @test rf(net, [10.0,0.0], Bool[true,false], [4.0,0.0], [0.0]) ≈ [10.0,6.0]    # footprint loss
-    @test rf(net, [10.0,0.0], Bool[false,false], [0.0,0.0], [0.0]) ≈ [10.0,0.0]   # leaf doesn't spill
-    @test rf(net, [5.0,0.0],  Bool[true,false], [0.0,0.0], [8.0]) ≈ [5.0,0.0]     # loss floored at 0
+    @test rf(net, [10.0,0.0], Bool[true,false], [0.0,0.0], [[0.0]]) ≈ [10.0,10.0]   # no loss
+    @test rf(net, [10.0,0.0], Bool[true,false], [0.0,0.0], [[3.0]]) ≈ [10.0,7.0]    # path loss
+    @test rf(net, [10.0,0.0], Bool[true,false], [4.0,0.0], [[0.0]]) ≈ [10.0,6.0]    # footprint loss
+    @test rf(net, [10.0,0.0], Bool[false,false], [0.0,0.0], [[0.0]]) ≈ [10.0,0.0]   # leaf doesn't spill
+    @test rf(net, [5.0,0.0],  Bool[true,false], [0.0,0.0], [[8.0]]) ≈ [5.0,0.0]     # loss floored at 0
 
     # path_inflow: direct inflow onto a leaf path reaches the downstream trap (after path loss)
-    @test rf(net, [0.0,0.0], Bool[false,false], [0.0,0.0], [0.0];
-             path_inflow=[5.0]) ≈ [0.0, 5.0]                                       # no path loss
-    @test rf(net, [0.0,0.0], Bool[false,false], [0.0,0.0], [3.0];
-             path_inflow=[5.0]) ≈ [0.0, 2.0]                                       # path loss applied
-    @test rf(net, [0.0,0.0], Bool[false,false], [0.0,0.0], [8.0];
-             path_inflow=[5.0]) ≈ [0.0, 0.0]                                       # loss exceeds inflow
+    @test rf(net, [0.0,0.0], Bool[false,false], [0.0,0.0], [[0.0]];
+             path_inflow=[5.0]) ≈ [0.0, 5.0]                                         # no path loss
+    @test rf(net, [0.0,0.0], Bool[false,false], [0.0,0.0], [[3.0]];
+             path_inflow=[5.0]) ≈ [0.0, 2.0]                                         # path loss applied
+    @test rf(net, [0.0,0.0], Bool[false,false], [0.0,0.0], [[8.0]];
+             path_inflow=[5.0]) ≈ [0.0, 0.0]                                         # loss exceeds inflow
 
-    # tributary merge: path1(A)->trap2(C,leaf), path2(B) merges into A; A,B fed by full traps
-    net2 = DynNetwork([DynFlowPath([c(1,1)], 2, Int[], Int[], [2]),
+    # tributary merge: path1(A)->trap2(C,leaf), path2(B) merges into A at pos 1 (only cell)
+    net2 = DynNetwork([DynFlowPath([c(1,1)], 2, Int[], Int[], [(2, 1)]),
                        DynFlowPath([c(5,5)], 0)],
                       [T(10,1), T(20,0), T(30,2)], DynCulvert[])
-    # B: max(20-2,0)=18 joins A head; A: max((10+18)-1,0)=27 -> C
-    @test rf(net2, [10.0,0.0,20.0], Bool[true,false,true], [0.0,0.0,0.0], [1.0,2.0]) ≈ [10.0,27.0,20.0]
-    # path_inflow onto tributary path2: flows through path1 infiltration before reaching trap C
-    @test rf(net2, [0.0,0.0,0.0], Bool[false,false,false], [0.0,0.0,0.0], [1.0,2.0];
-             path_inflow=[0.0,7.0]) ≈ [0.0, max(7.0-2.0-1.0, 0.0), 0.0]           # 7-2(path2)-1(path1)=4
+    # B: max(20-2,0)=18 joins A at pos 1 (no pre-junc infil); A: max((10+18)-1,0)=27 -> C
+    @test rf(net2, [10.0,0.0,20.0], Bool[true,false,true], [0.0,0.0,0.0], [[1.0],[2.0]]) ≈ [10.0,27.0,20.0]
+    # path_inflow onto tributary path2: flows through path2 then path1 infiltration
+    @test rf(net2, [0.0,0.0,0.0], Bool[false,false,false], [0.0,0.0,0.0], [[1.0],[2.0]];
+             path_inflow=[0.0,7.0]) ≈ [0.0, max(7.0-2.0-1.0, 0.0), 0.0]             # 7-2(p2)-1(p1)=4
+
+    # merge-fix: trib joins a 2-cell main path at junction 2 (not at head)
+    # main path cells: [c(1,1), c(1,2)], infil=[1.0, 3.0]; trib at junction 2 → post-infil=3.0
+    # head=0.5 (path_inflow[1]), trib delivers 5.0 (path_inflow[2], trib infil=0.0)
+    # correct:  max(0.5-1.0,0)=0  + 5.0 = 5.0;  max(5.0-3.0,0)=2.0
+    # old approx would give: max(0.5+5.0-4.0,0)=1.5  (wrong)
+    net_mf = DynNetwork([DynFlowPath([c(1,1), c(1,2)], 2, Int[], Int[], [(2, 2)]),
+                         DynFlowPath([c(5,5)], 0)],
+                        [T(10,1), T(20,0)], DynCulvert[])
+    @test rf(net_mf, [0.0,0.0], Bool[false,false], [0.0,0.0], [[1.0,3.0],[0.0]];
+             path_inflow=[0.5, 5.0]) ≈ [0.0, 2.0]
 
     # spill exits the domain
     net3 = DynNetwork([DynFlowPath([c(1,1)], 0)], [T(10,1)], DynCulvert[])
-    @test rf(net3, [10.0], Bool[true], [0.0], [2.0]) ≈ [10.0]
+    @test rf(net3, [10.0], Bool[true], [0.0], [[2.0]]) ≈ [10.0]
 end
 
 @testset "networksolver: geometry / rate / solve on mini.txt" begin

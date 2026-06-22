@@ -27,12 +27,13 @@ struct DynFlowPath <: DynObject
     culvert_inlets::Vector{Int}
     culvert_outlets::Vector{Int}
 
-    # other flow paths that merge into this one
-    merges::Vector{Int}
+    # tributary paths that merge into this one: (tributary_path_index, junction_cell_index)
+    # where junction_cell_index is the 1-based index of the junction cell in *this* path's cells.
+    merges::Vector{Tuple{Int,Int}}
 end
 
-DynFlowPath(cells, target_trap) = DynFlowPath(cells, target_trap, Int[], Int[], Int[])
-DynFlowPath(cells) = DynFlowPath(cells, 0, Int[], Int[], Int[])
+DynFlowPath(cells, target_trap) = DynFlowPath(cells, target_trap, Int[], Int[], Tuple{Int,Int}[])
+DynFlowPath(cells) = DynFlowPath(cells, 0, Int[], Int[], Tuple{Int,Int}[])
 
 """
         DynTrap(trap_ix, spill_path, culvert_inlets, culvert_outlets)
@@ -220,8 +221,9 @@ function _combine_networks(networks::Vector{DynNetwork})
     trap_offsets    = [0; cumsum([length(n.traps)      for n in networks])[1:end-1]]
     culvert_offsets = [0; cumsum([length(n.culverts)   for n in networks])[1:end-1]]
 
-    remap(idx, off)   = idx == 0 ? 0 : idx + off
-    remap_vec(v, off) = isempty(v) ? copy(v) : v .+ off
+    remap(idx, off)        = idx == 0 ? 0 : idx + off
+    remap_vec(v, off)      = isempty(v) ? copy(v) : v .+ off
+    remap_merges(v, off)   = [(m + off, j) for (m, j) in v]
 
     all_paths    = DynFlowPath[]
     all_traps    = DynTrap[]
@@ -234,7 +236,7 @@ function _combine_networks(networks::Vector{DynNetwork})
                                          remap(p.target_trap, toff),
                                          remap_vec(p.culvert_inlets, coff),
                                          remap_vec(p.culvert_outlets, coff),
-                                         remap_vec(p.merges, poff)))
+                                         remap_merges(p.merges, poff)))
         end
         for t in net.traps
             push!(all_traps, DynTrap(t.trap_ix,
@@ -270,9 +272,11 @@ function _resolve_cell_overlaps!(all_paths, all_culverts)
 
             all_paths[pi] = DynFlowPath(kept, 0, inlets, outlets, path.merges)
 
-            primary = all_paths[merge_into]
+            primary      = all_paths[merge_into]
+            junction_pos = findfirst(==(path.cells[merge_pos]), primary.cells)
             all_paths[merge_into] = DynFlowPath(primary.cells, primary.target_trap,
-                primary.culvert_inlets, primary.culvert_outlets, [primary.merges; pi])
+                primary.culvert_inlets, primary.culvert_outlets,
+                [primary.merges; (pi, junction_pos)])
 
             for cell in kept
                 cell_owner[cell] = pi
@@ -299,7 +303,7 @@ function _path_components(all_paths, all_traps)
     end
 
     for pi in 1:n
-        for mp in all_paths[pi].merges
+        for (mp, _) in all_paths[pi].merges
             unite!(pi, mp)
         end
         t = all_paths[pi].target_trap
@@ -334,7 +338,7 @@ function _topological_order(global_path_ids, global_trap_ids, all_paths, all_tra
             @assert haskey(trap_node, p.target_trap)
             Graphs.add_edge!(g, li, trap_node[p.target_trap])
         end
-        for m in p.merges
+        for (m, _) in p.merges
             @assert haskey(path_node, m)
             Graphs.add_edge!(g, path_node[m], li)
         end
@@ -390,7 +394,7 @@ function _build_component(all_paths, all_traps, all_culverts, global_path_ids)
         get(trap_map, all_paths[gpi].target_trap, 0),
         [culvert_map[c] for c in all_paths[gpi].culvert_inlets],
         [culvert_map[c] for c in all_paths[gpi].culvert_outlets],
-        [path_map[m] for m in all_paths[gpi].merges if m ∈ path_set]
+        [(path_map[m], j) for (m, j) in all_paths[gpi].merges if m ∈ path_set]
     ) for gpi in global_path_ids]
 
     local_traps = [DynTrap(
