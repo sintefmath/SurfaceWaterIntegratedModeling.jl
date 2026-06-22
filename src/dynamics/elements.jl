@@ -115,20 +115,72 @@ end
 
 DynNetwork() = DynNetwork(DynFlowPath[], DynTrap[], DynCulvert[])
 
-# todo: inclusion of culverts as separate argument
 """
-      setup_network(tstruct, dyn_coords, full_traps)
+      setup_network(tstruct, dyn_coords, full_traps; culverts=DynCulvert[])
 
 Given a spillanalysis structure, a set of coordinates representing dynamic points
 in the terrain, and a set of traps that are currently filled, build a network
-of dynamic flow paths and traps that represent the flow of water through the terrain.  The flow paths are built starting from the dynamic points, and are connected
-to traps as they lead into them.
+of dynamic flow paths and traps that represent the flow of water through the
+terrain.  The flow paths are built starting from the dynamic points, and are
+connected to traps as they lead into them.
 
-TODO: For the moment, culverts are not supported. They will be included in a future update.
+`culverts` is an optional vector of [`DynCulvert`](@ref)s.  A culvert is included
+in the network when either its inlet or its outlet falls on a cell already in the
+network (a trap footprint cell or a flow-path cell).  Including a culvert expands
+the network to cover the downstream structure of *both* its endpoints (so the
+outlet's onward route, and the path the inlet sits on, are present), which may in
+turn bring further culverts into the network.  Culverts may connect what would
+otherwise be disjoint networks; such networks are merged into one.
 
+Do not pass the (infinite-rate) culverts stored in the `TrapStructure` here —
+those are a different concept; `culverts` must be dynamic [`DynCulvert`](@ref)s.
 """
-function setup_network(tstruct, dyn_coords, full_traps)
-    _merge_networks([_subnetwork(tstruct, c, full_traps) for c in dyn_coords])
+function setup_network(tstruct, dyn_coords, full_traps; culverts::Vector{DynCulvert}=DynCulvert[])
+    subnets = DynNetwork[_subnetwork(tstruct, c, full_traps) for c in dyn_coords]
+    isempty(culverts) && return _merge_networks(subnets)
+
+    subnets, included = _expand_with_culverts(tstruct, subnets, culverts, full_traps)
+    return _merge_networks(subnets, DynCulvert[culverts[ci] for ci in included], tstruct)
+end
+
+# All grid cells currently covered by the given subnetworks: every flow-path cell
+# and every trap-footprint cell.  Used to decide which culverts touch the network.
+function _occupied_cells(tstruct, subnets)
+    CI    = CartesianIndices(tstruct.topography)
+    cells = Set{CartesianIndex{2}}()
+    for net in subnets
+        for p in net.flow_paths, c in p.cells
+            push!(cells, c)
+        end
+        for t in net.traps, k in tstruct.footprints[t.trap_ix]
+            push!(cells, CI[k])
+        end
+    end
+    return cells
+end
+
+# Grow the set of subnetworks by pulling in every culvert that touches the network,
+# tracing a fresh downstream subnetwork from *both* endpoints of each included
+# culvert (so the outlet's onward route and the inlet's host path/trap are present).
+# Iterates to a fixpoint, since a culvert's expansion may expose another culvert.
+# Returns the expanded subnetworks and the sorted indices of the included culverts.
+function _expand_with_culverts(tstruct, subnets, culverts, full_traps)
+    included = Int[]
+    incl_set = Set{Int}()
+    changed  = true
+    while changed
+        changed = false
+        occ = _occupied_cells(tstruct, subnets)
+        for (ci, cv) in enumerate(culverts)
+            ci in incl_set && continue
+            if cv.inlet in occ || cv.outlet in occ
+                push!(included, ci); push!(incl_set, ci); changed = true
+                push!(subnets, _subnetwork(tstruct, cv.inlet,  full_traps))
+                push!(subnets, _subnetwork(tstruct, cv.outlet, full_traps))
+            end
+        end
+    end
+    return subnets, sort(included)
 end
 
 """
@@ -200,19 +252,87 @@ later path is truncated at the shared cell and registered as a tributary (a
 flow paths.
 
 """
-function _merge_networks(networks::Vector{DynNetwork})
+_merge_networks(networks::Vector{DynNetwork}) =
+    _merge_networks(networks, DynCulvert[], nothing)
+
+function _merge_networks(networks::Vector{DynNetwork}, cv_objs::Vector{DynCulvert}, tstruct)
     isempty(networks) && return networks
 
     # flatten into one pool with globally unique indices
-    all_paths, all_traps, all_culverts = _combine_networks(networks)
+    all_paths, all_traps, _ = _combine_networks(networks)
 
     # truncate paths that share cells, registering each truncated path as a tributary
-    _resolve_cell_overlaps!(all_paths, all_culverts)
+    _resolve_cell_overlaps!(all_paths, DynCulvert[])
 
-    # _build_component: reconstruct each component as a self-contained DynNetwork
-    # _path_components: group paths into disjoint connected components
-    return [_build_component(all_paths, all_traps, all_culverts, ids)
-            for ids in _path_components(all_paths, all_traps)]     
+    # collapse duplicate trap entries (the same physical trap reached from several
+    # subnetworks), so each trap_ix appears once with merged connectivity
+    all_paths, all_traps = _dedup_traps(all_paths, all_traps)
+
+    # resolve each culvert's inlet/outlet to its owning path or trap
+    inlet_owner, outlet_owner = _culvert_owners(tstruct, all_paths, all_traps, cv_objs)
+
+    # _components: group paths+traps into disjoint connected components (culverts
+    # link the components of their two endpoints); _build_component: rebuild each.
+    return [_build_component(all_paths, all_traps, cv_objs, inlet_owner, outlet_owner, pids, tids)
+            for (pids, tids) in _components(all_paths, all_traps, inlet_owner, outlet_owner)]
+end
+
+# Collapse duplicate trap entries (same `trap_ix` reached from several subnetworks)
+# into one.  The surviving entry keeps a non-zero spill_path if any duplicate had
+# one, and the union of their culvert lists.  Path `target_trap` references are
+# remapped to the surviving index; path/spill_path (path references) are untouched.
+function _dedup_traps(all_paths, all_traps)
+    canon     = Dict{Int,Int}()              # trap_ix -> surviving index in new_traps
+    new_traps = DynTrap[]
+    remap     = zeros(Int, length(all_traps)) # old trap index -> new trap index
+
+    for (ti, t) in enumerate(all_traps)
+        if haskey(canon, t.trap_ix)
+            ni  = canon[t.trap_ix]
+            old = new_traps[ni]
+            new_traps[ni] = DynTrap(t.trap_ix,
+                old.spill_path == 0 ? t.spill_path : old.spill_path,
+                unique([old.culvert_inlets;  t.culvert_inlets]),
+                unique([old.culvert_outlets; t.culvert_outlets]))
+            remap[ti] = ni
+        else
+            push!(new_traps, t)
+            canon[t.trap_ix] = length(new_traps)
+            remap[ti]        = length(new_traps)
+        end
+    end
+
+    new_paths = [DynFlowPath(p.cells,
+                             p.target_trap == 0 ? 0 : remap[p.target_trap],
+                             p.culvert_inlets, p.culvert_outlets, p.merges)
+                 for p in all_paths]
+    return new_paths, new_traps
+end
+
+# For each culvert (in `cv_objs` order), resolve its inlet and outlet cell to the
+# path or trap that owns it, as a `(:path|:trap, global_index)` pair.  A trap
+# footprint cell wins over a flow-path cell (footprints are the trap interior).
+# Returns two parallel vectors (inlet owners, outlet owners).  Empty when there
+# are no culverts (and then `tstruct` may be `nothing`).
+function _culvert_owners(tstruct, all_paths, all_traps, cv_objs)
+    isempty(cv_objs) && return (Tuple{Symbol,Int}[], Tuple{Symbol,Int}[])
+
+    CI        = CartesianIndices(tstruct.topography)
+    trap_cell = Dict{CartesianIndex{2},Int}()
+    for (ti, t) in enumerate(all_traps), k in tstruct.footprints[t.trap_ix]
+        trap_cell[CI[k]] = ti
+    end
+    path_cell = Dict{CartesianIndex{2},Int}()
+    for (pi, p) in enumerate(all_paths), c in p.cells
+        path_cell[c] = pi
+    end
+    owner(cell) = haskey(trap_cell, cell) ? (:trap, trap_cell[cell]) :
+                  haskey(path_cell, cell) ? (:path, path_cell[cell]) :
+                  (:none, 0)
+
+    inlet_owner  = [owner(cv.inlet)  for cv in cv_objs]
+    outlet_owner = [owner(cv.outlet) for cv in cv_objs]
+    return inlet_owner, outlet_owner
 end
 
 # Merge all networks into a single flat pool with globally unique indices
@@ -289,35 +409,50 @@ function _resolve_cell_overlaps!(all_paths, all_culverts)
     end
 end
 
-# Group path indices into disjoint connected components using union-find.
-# Two paths are in the same component if one merges into the other, or if
-# they are connected through a shared trap (path → trap → spill_path).
-function _path_components(all_paths, all_traps)
-    n      = length(all_paths)
-    parent = collect(1:n)
+# Group paths and traps into disjoint connected components using union-find over a
+# unified node set: paths are nodes 1:np, traps are nodes np+1:np+nt.  Nodes are
+# connected when a path targets a trap, a trap spills into a path, a tributary
+# merges into a path, or a culvert links its inlet owner to its outlet owner.
+# Returns a vector of `(path_ids, trap_ids)` tuples (global indices per component).
+# A trap with no connections forms its own singleton component (a lone terminal
+# trap, e.g. reached only via a culvert), which is preserved rather than dropped.
+function _components(all_paths, all_traps, inlet_owner, outlet_owner)
+    np, nt = length(all_paths), length(all_traps)
+    parent = collect(1:(np + nt))
 
     find_root(x) = (while parent[x] != x; parent[x] = parent[parent[x]]; x = parent[x]; end; x)
     function unite!(x, y)
         rx, ry = find_root(x), find_root(y)
         rx != ry && (parent[rx] = ry)
     end
+    node((kind, id)) = kind == :path ? id : np + id
 
-    for pi in 1:n
-        for (mp, _) in all_paths[pi].merges
-            unite!(pi, mp)
-        end
-        t = all_paths[pi].target_trap
-        if t > 0
-            sp = all_traps[t].spill_path
-            sp > 0 && unite!(pi, sp)
+    for (pi, p) in enumerate(all_paths)
+        p.target_trap > 0 && unite!(pi, np + p.target_trap)
+        for (m, _) in p.merges
+            unite!(m, pi)
         end
     end
-
-    components = Dict{Int, Vector{Int}}()
-    for pi in 1:n
-        push!(get!(components, find_root(pi), Int[]), pi)
+    for (ti, t) in enumerate(all_traps)
+        t.spill_path > 0 && unite!(np + ti, t.spill_path)
     end
-    return collect(values(components))
+    for k in eachindex(inlet_owner)
+        io, oo = inlet_owner[k], outlet_owner[k]
+        (io[1] == :none || oo[1] == :none) && continue
+        unite!(node(io), node(oo))
+    end
+
+    paths_of = Dict{Int, Vector{Int}}()
+    traps_of = Dict{Int, Vector{Int}}()
+    for pi in 1:np
+        push!(get!(paths_of, find_root(pi), Int[]), pi)
+    end
+    for ti in 1:nt
+        push!(get!(traps_of, find_root(np + ti), Int[]), ti)
+    end
+
+    roots = union(keys(paths_of), keys(traps_of))
+    return [(get(paths_of, r, Int[]), get(traps_of, r, Int[])) for r in roots]
 end
 
 # Return (sorted_path_ids, sorted_trap_ids) in upstream-to-downstream order,
@@ -328,9 +463,9 @@ function _topological_order(global_path_ids, global_trap_ids, all_paths, all_tra
     trap_node = Dict(gti => np + i for (i, gti) in enumerate(global_trap_ids))
 
     # Every path/trap referenced from within this component is itself part of the
-    # component: _path_components unions paths via their merges and via
-    # path→trap→spill_path, and _build_component collects every target trap.  So a
-    # nonzero reference is guaranteed to resolve here (asserted, not tested).
+    # component: _components unions paths and traps via merges, path→trap targets,
+    # trap→spill_path, and culvert endpoint links.  So a nonzero reference is
+    # guaranteed to resolve here (asserted, not tested).
     g = Graphs.SimpleDiGraph(np + length(global_trap_ids))
     for (li, gpi) in enumerate(global_path_ids)
         p = all_paths[gpi]
@@ -358,51 +493,53 @@ function _topological_order(global_path_ids, global_trap_ids, all_paths, all_tra
             [global_trap_ids[i - np] for i in order if i >  np])
 end
 
-# Reconstruct one DynNetwork from a set of global path indices, remapping all
-# internal references to local (1-based) indices.
-function _build_component(all_paths, all_traps, all_culverts, global_path_ids)
+# Reconstruct one DynNetwork from this component's global path and trap indices,
+# remapping all internal references (including culverts) to local 1-based indices.
+# Culverts whose inlet/outlet owners lie in this component are attached to the
+# owning local path or trap via its culvert_inlets / culvert_outlets list.
+function _build_component(all_paths, all_traps, cv_objs, inlet_owner, outlet_owner,
+                          global_path_ids, global_trap_ids)
     path_set = Set(global_path_ids)
-
-    # Collect traps targeted by paths in this component (the normal case), plus
-    # leaf traps that no path flows into but which spill into a path here —
-    # this arises when the starting point falls inside a full trap's footprint,
-    # leaving that trap with no upstream flow path but a spill_path into the network.
-    global_trap_ids = Int[]
-    for gpi in global_path_ids
-        t = all_paths[gpi].target_trap
-        t > 0 && t ∉ global_trap_ids && push!(global_trap_ids, t)
-    end
-    for (ti, trap) in enumerate(all_traps)
-        ti ∉ global_trap_ids && trap.spill_path ∈ path_set && push!(global_trap_ids, ti)
-    end
 
     global_path_ids, global_trap_ids =
         _topological_order(global_path_ids, global_trap_ids, all_paths, all_traps)
 
-    global_culvert_ids = unique(vcat(
-        [c for gpi in global_path_ids
-           for c in vcat(all_paths[gpi].culvert_inlets, all_paths[gpi].culvert_outlets)],
-        [c for gti in global_trap_ids
-           for c in vcat(all_traps[gti].culvert_inlets,  all_traps[gti].culvert_outlets)]))
+    path_map = Dict(gpi => lpi for (lpi, gpi) in enumerate(global_path_ids))
+    trap_map = Dict(gti => lti for (lti, gti) in enumerate(global_trap_ids))
 
-    path_map    = Dict(gpi => lpi for (lpi, gpi) in enumerate(global_path_ids))
-    trap_map    = Dict(gti => lti for (lti, gti) in enumerate(global_trap_ids))
-    culvert_map = Dict(gci => lci for (lci, gci) in enumerate(global_culvert_ids))
+    # Culverts belonging to this component: both endpoints' owners are necessarily
+    # in the same component (the culvert unites them), so testing the inlet owner
+    # suffices.  Build the local culvert list and, per owner, its inlet/outlet hits.
+    in_comp((kind, id)) = kind == :path ? (id in path_set) :
+                          kind == :trap ? (id in keys(trap_map)) : false
+
+    comp_cv      = [ci for ci in eachindex(cv_objs) if in_comp(inlet_owner[ci])]
+    culvert_map  = Dict(gci => lci for (lci, gci) in enumerate(comp_cv))
+    path_inlets  = Dict{Int,Vector{Int}}();  path_outlets = Dict{Int,Vector{Int}}()
+    trap_inlets  = Dict{Int,Vector{Int}}();  trap_outlets = Dict{Int,Vector{Int}}()
+    register!(d, owner_id, lc) = push!(get!(d, owner_id, Int[]), lc)
+    for gci in comp_cv
+        lc = culvert_map[gci]
+        ik, iid = inlet_owner[gci]
+        ok, oid = outlet_owner[gci]
+        register!(ik == :path ? path_inlets  : trap_inlets,  iid, lc)
+        register!(ok == :path ? path_outlets : trap_outlets, oid, lc)
+    end
 
     local_paths = [DynFlowPath(
         all_paths[gpi].cells,
         get(trap_map, all_paths[gpi].target_trap, 0),
-        [culvert_map[c] for c in all_paths[gpi].culvert_inlets],
-        [culvert_map[c] for c in all_paths[gpi].culvert_outlets],
+        get(path_inlets,  gpi, Int[]),
+        get(path_outlets, gpi, Int[]),
         [(path_map[m], j) for (m, j) in all_paths[gpi].merges if m ∈ path_set]
     ) for gpi in global_path_ids]
 
     local_traps = [DynTrap(
         all_traps[gti].trap_ix,
         get(path_map, all_traps[gti].spill_path, 0),
-        [culvert_map[c] for c in all_traps[gti].culvert_inlets],
-        [culvert_map[c] for c in all_traps[gti].culvert_outlets]
+        get(trap_inlets,  gti, Int[]),
+        get(trap_outlets, gti, Int[])
     ) for gti in global_trap_ids]
 
-    return DynNetwork(local_paths, local_traps, [all_culverts[gci] for gci in global_culvert_ids])
+    return DynNetwork(local_paths, local_traps, [cv_objs[gci] for gci in comp_cv])
 end

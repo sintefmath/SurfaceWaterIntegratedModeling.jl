@@ -93,22 +93,41 @@ end
     @test traps[2].spill_path == 2
 end
 
-@testset "_path_components" begin
+@testset "_components" begin
+    nocv = (Tuple{Symbol,Int}[], Tuple{Symbol,Int}[])
+    pathsets(comps) = Set(Set(p) for (p, _) in comps)
+
     # path1 -> trap1 -> path2 (connected); path3 standalone
     paths = [DynFlowPath([c(1,1)], 1),
              DynFlowPath([c(2,2)], 0),
              DynFlowPath([c(3,3)], 0)]
     traps = [DynTrap(100, 2)]               # trap1 spills into path2
-    comps = SWIM._path_components(paths, traps)
+    comps = SWIM._components(paths, traps, nocv...)
     @test length(comps) == 2
-    @test Set(map(Set, comps)) == Set([Set([1, 2]), Set([3])])
+    @test pathsets(comps) == Set([Set([1, 2]), Set([3])])
+    # trap1 lives in the {1,2} component
+    comp12 = comps[findfirst(((p, _),) -> Set(p) == Set([1, 2]), comps)]
+    @test comp12[2] == [1]
 
     # connection purely via a merge (junction position = 1 since path1 has 1 cell)
     paths = [DynFlowPath([c(1,1)], 0, Int[], Int[], [(2, 1)]),   # path1 is main; trib=path2 at pos 1
              DynFlowPath([c(2,2)], 0)]
-    comps = SWIM._path_components(paths, DynTrap[])
+    comps = SWIM._components(paths, DynTrap[], nocv...)
     @test length(comps) == 1
-    @test Set(comps[1]) == Set([1, 2])
+    @test Set(comps[1][1]) == Set([1, 2])
+
+    # a culvert links two otherwise-disjoint single-path components into one
+    paths = [DynFlowPath([c(1,1)], 0), DynFlowPath([c(9,9)], 0)]
+    inlet_owner  = [(:path, 1)]
+    outlet_owner = [(:path, 2)]
+    comps = SWIM._components(paths, DynTrap[], inlet_owner, outlet_owner)
+    @test length(comps) == 1
+    @test Set(comps[1][1]) == Set([1, 2])
+
+    # a lone trap (no path) survives as its own component
+    comps = SWIM._components(DynFlowPath[], [DynTrap(100, 0)], nocv...)
+    @test length(comps) == 1
+    @test comps[1] == (Int[], [1])
 end
 
 @testset "_resolve_cell_overlaps!: truncation and merge" begin
