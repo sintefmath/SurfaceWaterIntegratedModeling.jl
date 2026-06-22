@@ -17,10 +17,12 @@
 #
 # Run from the repo root:
 #   julia --project=examples examples/verification/solve_dynamic_network.jl
+#   julia --project=examples examples/verification/solve_dynamic_network.jl pair
 # or from the REPL (with the examples environment active):
 #   include("examples/verification/solve_dynamic_network.jl")
-#   fig = verify_solver()                      # default: inflow=1.0, no infiltration
-#   fig = verify_solver(infiltration=0.3)      # partial-fill / stagnation scenario
+#   fig = verify_solver()                      # default :long scenario
+#   fig = verify_solver(:pair)                 # branched (two tributaries)
+#   fig = verify_solver(:long, infiltration=0.3)  # partial-fill / stagnation
 
 using SurfaceWaterIntegratedModeling, LazyArtifacts
 import GLMakie
@@ -80,24 +82,37 @@ end
 
 # ---------------------------------------------------------------------------
 
+# Named scenarios (start cells on mini.txt, all traps assumed full for topology).
+# Branched scenarios (:pair, :triple) produce a single merged network with tributaries.
+const SCENARIOS = Dict(
+    :long     => [CartesianIndex(7, 119)],                                          # single chain
+    :pair     => [CartesianIndex(6, 66),  CartesianIndex(6, 162)],                  # two tributaries
+    :triple   => [CartesianIndex(6, 6),   CartesianIndex(6, 102), CartesianIndex(6, 162)],  # three
+    :mixed    => [CartesianIndex(38, 182), CartesianIndex(6, 38)],                  # lake + slope start
+)
+
 """
-    verify_solver(; inflow=1.0, infiltration=0.0)
+    verify_solver(scenario=:long; inflow=1.0, infiltration=0.0)
 
-Build the long single-chain network on mini.txt, run the fill cascade, and
-plot the fill-fraction time series.  Returns the GLMakie figure.
+Build the named `scenario` network on mini.txt, run the fill cascade, and plot
+the fill-fraction time series.  Returns the GLMakie figure.
 
-With `infiltration=0` every trap fills completely and the plot shows a fan of
-lines converging to 1 (downstream traps, red, fill faster once the cascade
-reaches them).  Set `infiltration` high enough that some traps stagnate below
-full to see lines plateau below 1.
+Branched scenarios (`:pair`, `:triple`) produce a merged network with tributaries;
+the plot colour-codes traps by their index in the topologically-sorted network
+(upstream=blue, downstream=red) so tributary branches show as interleaved colours.
+
+With `infiltration=0` every trap fills completely.  Set `infiltration` high enough
+relative to `inflow` for some traps to stagnate below full.
 """
-function verify_solver(; inflow=1.0, infiltration=0.0)
-    ts   = _mini_trapstructure()
-    nets = setup_network(ts, [CartesianIndex(7, 119)], collect(1:numtraps(ts)))
-    net  = only(nets)
-    nt   = length(net.traps)
+function verify_solver(scenario::Symbol=:long; inflow=1.0, infiltration=0.0)
+    ts    = _mini_trapstructure()
+    starts = SCENARIOS[scenario]
+    nets  = setup_network(ts, starts, collect(1:numtraps(ts)))
+    net   = only(nets)   # all built-in scenarios produce a single connected network
+    nt    = length(net.traps)
+    np    = length(net.flow_paths)
 
-    @info "Network: $nt traps, $(length(net.flow_paths)) flow paths"
+    @info "Scenario :$scenario — $nt traps, $np flow paths"
 
     times, fracs, events = run_cascade(ts, net; inflow=inflow, infiltration=infiltration)
 
@@ -108,17 +123,16 @@ function verify_solver(; inflow=1.0, infiltration=0.0)
 
     fig = GLMakie.Figure(size=(960, 500))
     ax  = GLMakie.Axis(fig[1, 1];
-        title   = "Fill cascade — $nt traps   " *
-                  "inflow=$(inflow)/trap   infiltration=$(infiltration)/cell",
+        title   = "Fill cascade — :$scenario   $nt traps   " *
+                  "inflow=$inflow/trap   infiltration=$infiltration/cell",
         xlabel  = "cumulative time",
         ylabel  = "fill fraction  V / capacity",
         limits  = (nothing, (-0.04, 1.12)))
 
-    # one line per trap, upstream (blue) -> downstream (red)
+    # one line per trap, coloured by position in topological order (upstream=blue, downstream=red)
     cmap = GLMakie.cgrad(:RdYlBu, nt; categorical=false, rev=true)
     for i in 1:nt
-        GLMakie.lines!(ax, times, fracs[i, :];
-                       color=cmap[i], linewidth=1.2)
+        GLMakie.lines!(ax, times, fracs[i, :]; color=cmap[i], linewidth=1.2)
     end
 
     # faint vertical ticks at fill events
@@ -137,7 +151,11 @@ end
 # ---------------------------------------------------------------------------
 
 if abspath(PROGRAM_FILE) == @__FILE__
-    fig = verify_solver()
+    name = isempty(ARGS) ? :long : Symbol(ARGS[1])
+    haskey(SCENARIOS, name) ||
+        error("unknown scenario \"$name\"; choose one of: " *
+              join(sort(string.(keys(SCENARIOS))), ", "))
+    fig = verify_solver(name)
     GLMakie.display(fig)
     GLMakie.wait(GLMakie.Screen())
 end
