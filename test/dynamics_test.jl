@@ -8,16 +8,23 @@ const SWIM = SurfaceWaterIntegratedModeling
 
 c(i, j) = CartesianIndex(i, j)
 
-# every internal reference (trap/path index) is 0 or a valid local index
+# a DynCulvert with arbitrary (unused-for-topology) hydraulic parameters
+cvlt(inlet, outlet) = DynCulvert(inlet, outlet, 0.5, 0.6, 0.5, 0.02, 1.7)
+
+# every internal reference (trap/path/culvert index) is 0 or a valid local index
 function valid_network(net)
-    np, nt = length(net.flow_paths), length(net.traps)
+    np, nt, nc = length(net.flow_paths), length(net.traps), length(net.culverts)
     ok = true
     for p in net.flow_paths
         ok &= 0 <= p.target_trap <= nt
         ok &= all(1 <= m <= np for (m, _) in p.merges)
+        ok &= all(1 <= ci <= nc for ci in p.culvert_inlets)
+        ok &= all(1 <= ci <= nc for ci in p.culvert_outlets)
     end
     for t in net.traps
         ok &= 0 <= t.spill_path <= np
+        ok &= all(1 <= ci <= nc for ci in t.culvert_inlets)
+        ok &= all(1 <= ci <= nc for ci in t.culvert_outlets)
     end
     return ok
 end
@@ -130,11 +137,29 @@ end
     @test comps[1] == (Int[], [1])
 end
 
+@testset "_culvert_owners: trap footprint wins over flow path" begin
+    # 3x3 grid; trap 1's footprint is the single cell (1,1) (linear index 1).  A path
+    # runs through (1,1) and (2,2), so (1,1) is claimed by both -> the trap must win.
+    mock  = (topography = zeros(3, 3), footprints = [[1]])
+    paths = [DynFlowPath([c(1,1), c(2,2)], 0)]
+    traps = [DynTrap(1, 0)]
+    cvs   = [cvlt(c(1,1), c(2,2)),    # inlet on the shared cell; outlet path-only
+             cvlt(c(3,3), c(1,1))]    # inlet off-network; outlet on the shared cell
+    io, oo = SWIM._culvert_owners(mock, paths, traps, cvs)
+    @test io[1] == (:trap, 1)        # shared cell resolves to the trap, not the path
+    @test oo[1] == (:path, 1)
+    @test io[2] == (:none, 0)        # (3,3) belongs to nothing
+    @test oo[2] == (:trap, 1)
+    # no culverts -> empty owner vectors (tstruct is allowed to be `nothing`)
+    @test SWIM._culvert_owners(nothing, paths, traps, DynCulvert[]) ==
+          (Tuple{Symbol,Int}[], Tuple{Symbol,Int}[])
+end
+
 @testset "_resolve_cell_overlaps!: truncation and merge" begin
     # path2 shares cell (1,2) with path1 -> truncated there, becomes a tributary
     paths = [DynFlowPath([c(1,1), c(1,2), c(1,3)], 1),
              DynFlowPath([c(2,1), c(1,2), c(1,3)], 2)]
-    SWIM._resolve_cell_overlaps!(paths, DynCulvert[])
+    SWIM._resolve_cell_overlaps!(paths)
 
     @test paths[1].merges == [(2, 2)]        # path2 is trib of path1; junction at cell index 2 (c(1,2))
     @test paths[2].cells == [c(2,1)]        # truncated before the shared cell
@@ -221,6 +246,146 @@ source_traps(net) = count(ti -> all(p -> p.target_trap != ti, net.flow_paths),
     @test length(separate) == 2
     @test all(valid_network, separate)
     @test disjoint_cells(separate)
+end
+
+@testset "setup_network culverts on mini.txt" begin
+    grid = loadgrid(joinpath(artifact"swim_testdata", "data", "small", "mini.txt"))
+    ts = spillanalysis(grid, usediags=true)
+    allfull = collect(1:numtraps(ts))
+
+    # Inclusion / assignment: a culvert between two footprint cells of two in-network
+    # traps is included and registered on the inlet trap and the outlet trap.
+    # On the :long network (start (7,119)): inlet cell (7,119) -> trap 233 (the start
+    # trap), outlet cell (199,4) -> trap 13 (far downstream).
+    @testset "inclusion and assignment (trap <-> trap)" begin
+        inlet, outlet = CartesianIndex(7, 119), CartesianIndex(199, 4)
+        out = setup_network(ts, [CartesianIndex(7, 119)], allfull; culverts=[cvlt(inlet, outlet)])
+        @test length(out) == 1
+        net = out[1]
+        @test valid_network(net)
+        @test disjoint_cells(out)
+        @test length(net.culverts) == 1
+        @test net.culverts[1].inlet == inlet && net.culverts[1].outlet == outlet
+        ti_in  = findfirst(t -> t.trap_ix == 233, net.traps)
+        ti_out = findfirst(t -> t.trap_ix == 13,  net.traps)
+        @test ti_in !== nothing && ti_out !== nothing
+        @test net.traps[ti_in].culvert_inlets   == [1]
+        @test net.traps[ti_out].culvert_outlets == [1]
+    end
+
+    # Cross-network merge: two starts give two disjoint networks; a culvert from a
+    # trap in one to a trap in the other merges them into a single network.
+    @testset "cross-network merge" begin
+        separate = setup_network(ts, [CartesianIndex(195, 7), CartesianIndex(179, 37)], allfull)
+        @test length(separate) == 2          # precondition: disjoint without the culvert
+        # trap 71 (footprint (179,37)) is in one net, trap 22 (footprint (196,6)) the other
+        out = setup_network(ts, [CartesianIndex(195, 7), CartesianIndex(179, 37)], allfull;
+                            culverts=[cvlt(CartesianIndex(179, 37), CartesianIndex(196, 6))])
+        @test length(out) == 1
+        net = out[1]
+        @test valid_network(net)
+        @test disjoint_cells(out)
+        @test length(net.culverts) == 1
+        @test 71 in (t.trap_ix for t in net.traps)
+        @test 22 in (t.trap_ix for t in net.traps)
+    end
+
+    # Non-inclusion: a culvert whose inlet and outlet are both off-network must not be
+    # added; the network is unchanged and has no culverts.
+    @testset "non-inclusion (both endpoints off-network)" begin
+        base = setup_network(ts, [CartesianIndex(179, 37)], allfull)
+        out  = setup_network(ts, [CartesianIndex(179, 37)], allfull;
+                            culverts=[cvlt(CartesianIndex(1, 1), CartesianIndex(10, 10))])
+        @test length(out) == length(base) == 1
+        @test isempty(out[1].culverts)
+        @test length(out[1].traps)      == length(base[1].traps)
+        @test length(out[1].flow_paths) == length(base[1].flow_paths)
+    end
+
+    # Outlet in terrain -> downstream expansion: an included culvert whose outlet lands
+    # on a bare-terrain cell traces a fresh downstream chain that joins the network,
+    # growing the trap/path counts.  Here inlet (179,37) is in the network and outlet
+    # (8,119) is a slope cell of the unrelated long chain.
+    @testset "terrain outlet expands the network" begin
+        base = setup_network(ts, [CartesianIndex(179, 37)], allfull)[1]
+        out  = setup_network(ts, [CartesianIndex(179, 37)], allfull;
+                            culverts=[cvlt(CartesianIndex(179, 37), CartesianIndex(8, 119))])
+        @test length(out) == 1
+        net = out[1]
+        @test valid_network(net)
+        @test disjoint_cells(out)
+        @test length(net.culverts) == 1
+        @test length(net.traps)      > length(base.traps)
+        @test length(net.flow_paths) > length(base.flow_paths)
+    end
+
+    # Inlet/outlet on a flow path (not a trap): the culvert is registered on the
+    # owning flow paths' culvert_inlets / culvert_outlets, and on no trap.
+    @testset "inlet/outlet on flow paths" begin
+        inlet, outlet = CartesianIndex(182, 34), CartesianIndex(190, 31)
+        out = setup_network(ts, [CartesianIndex(179, 37)], allfull; culverts=[cvlt(inlet, outlet)])
+        @test length(out) == 1
+        net = out[1]
+        @test valid_network(net)
+        @test length(net.culverts) == 1
+        pin  = findfirst(p -> 1 in p.culvert_inlets,  net.flow_paths)
+        pout = findfirst(p -> 1 in p.culvert_outlets, net.flow_paths)
+        @test pin  !== nothing && inlet  in net.flow_paths[pin].cells
+        @test pout !== nothing && outlet in net.flow_paths[pout].cells
+        @test all(isempty(t.culvert_inlets) && isempty(t.culvert_outlets) for t in net.traps)
+    end
+
+    # Several culverts in one network: each is included and registered exactly once,
+    # with the local culvert indices forming a clean 1:n set.  On the :long network,
+    # cv1 (233 -> 13) and cv2 (444 -> 233) connect three in-network traps.
+    @testset "multiple culverts in one network" begin
+        out = setup_network(ts, [CartesianIndex(7, 119)], allfull;
+                            culverts=[cvlt(CartesianIndex(7, 119), CartesianIndex(199, 4)),
+                                      cvlt(CartesianIndex(115, 68), CartesianIndex(7, 119))])
+        @test length(out) == 1
+        net = out[1]
+        @test valid_network(net)
+        @test length(net.culverts) == 2
+        # every culvert is registered once on the inlet side and once on the outlet side
+        in_regs  = reduce(vcat, [t.culvert_inlets for t in net.traps];
+                          init=Int[]) ∪ reduce(vcat, [p.culvert_inlets for p in net.flow_paths]; init=Int[])
+        out_regs = reduce(vcat, [t.culvert_outlets for t in net.traps];
+                          init=Int[]) ∪ reduce(vcat, [p.culvert_outlets for p in net.flow_paths]; init=Int[])
+        @test sort(in_regs)  == [1, 2]
+        @test sort(out_regs) == [1, 2]
+    end
+
+    # Fix-point inclusion: a culvert is pulled in only because an *earlier* culvert's
+    # expansion grew the network to touch it.  cvA (179,37 -> terrain 8,119) drags in
+    # the long chain; cvB (115,68 -> 199,4) has *both* endpoints on that chain, so it
+    # only becomes reachable after cvA's expansion (it is excluded on its own).
+    @testset "fix-point inclusion (chained culverts)" begin
+        cvA = cvlt(CartesianIndex(179, 37), CartesianIndex(8, 119))
+        cvB = cvlt(CartesianIndex(115, 68), CartesianIndex(199, 4))
+        # cvB alone touches nothing in the (179,37) network -> not included
+        only_b = setup_network(ts, [CartesianIndex(179, 37)], allfull; culverts=[cvB])
+        @test sum(length(n.culverts) for n in only_b) == 0
+        # with cvA present, cvA's expansion brings cvB into reach -> both included
+        out = setup_network(ts, [CartesianIndex(179, 37)], allfull; culverts=[cvA, cvB])
+        @test length(out) == 1
+        @test valid_network(out[1])
+        @test length(out[1].culverts) == 2
+    end
+
+    # Terrain inlet -> expansion (mirror of the terrain-outlet case): an included
+    # culvert whose *inlet* is on bare terrain traces its host chain into the network.
+    @testset "terrain inlet expands the network" begin
+        base = setup_network(ts, [CartesianIndex(179, 37)], allfull)[1]
+        out  = setup_network(ts, [CartesianIndex(179, 37)], allfull;
+                            culverts=[cvlt(CartesianIndex(8, 119), CartesianIndex(179, 37))])
+        @test length(out) == 1
+        net = out[1]
+        @test valid_network(net)
+        @test disjoint_cells(out)
+        @test length(net.culverts) == 1
+        @test length(net.traps)      > length(base.traps)
+        @test length(net.flow_paths) > length(base.flow_paths)
+    end
 end
 
 # ---------------------------------------------------------------------------

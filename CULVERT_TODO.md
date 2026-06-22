@@ -8,29 +8,38 @@ traps, groups paths+traps into components (with culvert links), and assigns
 culverts to their owning path/trap. All existing dynamics tests pass plus new
 unit tests for `_components` (cross-component culvert link, lone trap survival).
 
-**Task 1 integration tests on mini.txt — NOT YET WRITTEN.** This is the main
-outstanding item before moving on. Need integration tests that:
+**Task 1 — DONE (construction + tests + dead-code cleanup).** Added the testset
+`"setup_network culverts on mini.txt"` in `test/dynamics_test.jl` (46 assertions,
+all passing).  It covers the five scenarios below plus three edge cases (multiple
+culverts in one network; fix-point/chained inclusion where one culvert's expansion
+pulls in another; terrain-*inlet* expansion mirroring the terrain-outlet case).
+`valid_network` was extended to bounds-check culvert references in paths/traps, a
+`cvlt(inlet, outlet)` helper builds a `DynCulvert` with throwaway hydraulic
+parameters, and `_culvert_owners` got a unit test for the trap-over-path tie-break.
 
-1. **Inclusion / assignment**: build the `:long` network (start `(7,119)`), add a
-   `DynCulvert` whose inlet is a footprint cell of one in-network trap and whose
-   outlet is a footprint cell of another. Assert the result is still 1 network,
-   `length(net.culverts) == 1`, the inlet trap lists it in `culvert_inlets`, and
-   the outlet trap in `culvert_outlets`.
-2. **Cross-network merge**: starts `[(195,7), (179,37)]` give 2 disjoint networks.
-   A culvert from a trap in net 1 to a trap in net 2 should yield a single merged
-   network containing the culvert.
-3. **Non-inclusion**: a culvert whose inlet and outlet are both on cells not in the
-   network (scan the grid for a cell outside `_occupied_cells`) must NOT be added;
-   the network is unchanged and `net.culverts` is empty.
-4. **Outlet in terrain → downstream expansion**: a culvert whose outlet lands on a
-   bare-terrain cell should trace a new downstream flow path / trap that becomes
-   part of the network (verify trap/path count grows).
-5. **Inlet/outlet on a flow path** (not a trap): assert the culvert is registered
-   on the path's `culvert_inlets` / `culvert_outlets` and the junction handling is
-   correct once the solver side lands.
+**Dead-code cleanup.** Removed vestigial culvert handling left over from the earlier
+"culverts ride on paths" design (superseded by end-stage cell-ownership in
+`_culvert_owners`/`_build_component`): `_resolve_cell_overlaps!` lost its
+`all_culverts` parameter and truncation-drop filter, and `_dedup_traps` lost its
+culvert-list union.  Both ran only on always-empty lists.  Pure no-op refactor —
+full dynamics suite unchanged.  (`_combine_networks` still remaps culvert indices
+generically; that path is harmless and would do the right thing if `_merge_networks`
+were ever handed already-culvert-bearing networks.)
 
-Helper needed in tests: convert `ts.footprints[trap_ix]` linear indices to
-`CartesianIndex` via `CartesianIndices(ts.topography)` to pick endpoint cells.
+1. **Inclusion / assignment** — `:long` network (start `(7,119)`); culvert inlet
+   `(7,119)` → trap 233, outlet `(199,4)` → trap 13.  1 network, 1 culvert,
+   registered on the inlet trap's `culvert_inlets` and the outlet trap's
+   `culvert_outlets`.
+2. **Cross-network merge** — starts `[(195,7),(179,37)]` (2 disjoint nets); culvert
+   `(179,37)`→`(196,6)` merges them into 1 network containing the culvert.
+3. **Non-inclusion** — culvert `(1,1)`→`(10,10)` (both off the `(179,37)` net) is
+   not added; network unchanged, `culverts` empty.
+4. **Terrain outlet → expansion** — culvert inlet `(179,37)` (in net), outlet
+   `(8,119)` (bare slope cell of the long chain); the outlet traces a fresh
+   downstream chain, growing trap/path counts (3→60 traps in practice).
+5. **Inlet/outlet on flow paths** — culvert `(182,34)`→`(190,31)` (both path cells)
+   is registered on the owning paths' `culvert_inlets`/`culvert_outlets`, on no
+   trap.
 
 ## Task 2 (solver) — NOT STARTED
 

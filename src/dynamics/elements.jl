@@ -262,7 +262,7 @@ function _merge_networks(networks::Vector{DynNetwork}, cv_objs::Vector{DynCulver
     all_paths, all_traps, _ = _combine_networks(networks)
 
     # truncate paths that share cells, registering each truncated path as a tributary
-    _resolve_cell_overlaps!(all_paths, DynCulvert[])
+    _resolve_cell_overlaps!(all_paths)
 
     # collapse duplicate trap entries (the same physical trap reached from several
     # subnetworks), so each trap_ix appears once with merged connectivity
@@ -279,8 +279,9 @@ end
 
 # Collapse duplicate trap entries (same `trap_ix` reached from several subnetworks)
 # into one.  The surviving entry keeps a non-zero spill_path if any duplicate had
-# one, and the union of their culvert lists.  Path `target_trap` references are
-# remapped to the surviving index; path/spill_path (path references) are untouched.
+# one.  Path `target_trap` references are remapped to the surviving index;
+# path/spill_path (path references) are untouched.  Culverts are assigned later, by
+# cell (_culvert_owners / _build_component), so traps carry none at this stage.
 function _dedup_traps(all_paths, all_traps)
     canon     = Dict{Int,Int}()              # trap_ix -> surviving index in new_traps
     new_traps = DynTrap[]
@@ -291,9 +292,7 @@ function _dedup_traps(all_paths, all_traps)
             ni  = canon[t.trap_ix]
             old = new_traps[ni]
             new_traps[ni] = DynTrap(t.trap_ix,
-                old.spill_path == 0 ? t.spill_path : old.spill_path,
-                unique([old.culvert_inlets;  t.culvert_inlets]),
-                unique([old.culvert_outlets; t.culvert_outlets]))
+                old.spill_path == 0 ? t.spill_path : old.spill_path)
             remap[ti] = ni
         else
             push!(new_traps, t)
@@ -372,9 +371,10 @@ end
 
 # Truncate any flow path whose cells overlap with a previously-processed path.
 # The truncated path is registered as a tributary (a "merge") of the primary
-# (earlier) path that owns the shared cell, and culverts beyond the truncation
-# point are dropped.  Trap connectivity is left untouched.
-function _resolve_cell_overlaps!(all_paths, all_culverts)
+# (earlier) path that owns the shared cell.  Trap connectivity is left untouched.
+# Culverts are assigned later, by cell (_culvert_owners / _build_component), so
+# paths carry none at this stage.
+function _resolve_cell_overlaps!(all_paths)
     cell_owner = Dict{CartesianIndex{2}, Int}()  # grid cell → owning path index
 
     for pi in 1:length(all_paths)
@@ -384,13 +384,8 @@ function _resolve_cell_overlaps!(all_paths, all_culverts)
         if merge_pos !== nothing
             merge_into = cell_owner[path.cells[merge_pos]]
             kept       = path.cells[1:merge_pos-1]
-            kept_set   = Set(kept)
 
-            # Drop culverts whose cell falls beyond the truncation point
-            inlets  = filter(c -> all_culverts[c].inlet  ∈ kept_set, path.culvert_inlets)
-            outlets = filter(c -> all_culverts[c].outlet ∈ kept_set, path.culvert_outlets)
-
-            all_paths[pi] = DynFlowPath(kept, 0, inlets, outlets, path.merges)
+            all_paths[pi] = DynFlowPath(kept, 0, path.culvert_inlets, path.culvert_outlets, path.merges)
 
             primary      = all_paths[merge_into]
             junction_pos = findfirst(==(path.cells[merge_pos]), primary.cells)
