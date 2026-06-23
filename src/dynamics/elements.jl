@@ -296,8 +296,8 @@ _merge_networks(networks::Vector{DynNetwork}) =
 function _merge_networks(networks::Vector{DynNetwork}, cv_objs::Vector{DynCulvert}, tstruct)
     isempty(networks) && return networks
 
-    # flatten into one pool with globally unique indices
-    all_paths, all_traps, _ = _combine_networks(networks)
+    # flatten the subnets into one pool with globally unique indices
+    all_paths, all_traps = _combine_subnets(networks)
 
     # truncate paths that share cells, registering each truncated path as a tributary
     _resolve_cell_overlaps!(all_paths)
@@ -372,39 +372,36 @@ function _culvert_owners(tstruct, all_paths, all_traps, cv_objs)
     return inlet_owner, outlet_owner
 end
 
-# Merge all networks into a single flat pool with globally unique indices
-function _combine_networks(networks::Vector{DynNetwork})
-    path_offsets    = [0; cumsum([length(n.flow_paths) for n in networks])[1:end-1]]
-    trap_offsets    = [0; cumsum([length(n.traps)      for n in networks])[1:end-1]]
-    culvert_offsets = [0; cumsum([length(n.culverts)   for n in networks])[1:end-1]]
+# Flatten a set of subnets into a single pool of paths and traps with globally
+# unique indices.  Subnets are culvert-free (see `_subnetwork`/`_build_network`),
+# so culverts are not handled here: a culvert's owning path/trap is resolved
+# later, by cell, in `_culvert_owners` / `_build_component`.
+function _combine_subnets(subnets::Vector{DynNetwork})
+    path_offsets = [0; cumsum([length(n.flow_paths) for n in subnets])[1:end-1]]
+    trap_offsets = [0; cumsum([length(n.traps)      for n in subnets])[1:end-1]]
 
-    remap(idx, off)        = idx == 0 ? 0 : idx + off
-    remap_vec(v, off)      = isempty(v) ? copy(v) : v .+ off
-    remap_merges(v, off)   = [(m + off, j) for (m, j) in v]
+    remap(idx, off)      = idx == 0 ? 0 : idx + off
+    remap_merges(v, off) = [(m + off, j) for (m, j) in v]
 
-    all_paths    = DynFlowPath[]
-    all_traps    = DynTrap[]
-    all_culverts = DynCulvert[]
+    all_paths = DynFlowPath[]
+    all_traps = DynTrap[]
 
-    for (ni, net) in enumerate(networks)
-        poff, toff, coff = path_offsets[ni], trap_offsets[ni], culvert_offsets[ni]
+    for (ni, net) in enumerate(subnets)
+        poff, toff = path_offsets[ni], trap_offsets[ni]
         for p in net.flow_paths
             push!(all_paths, DynFlowPath(copy(p.cells),
                                          remap(p.target_trap, toff),
-                                         remap_vec(p.culvert_inlets, coff),
-                                         remap_vec(p.culvert_outlets, coff),
+                                         Int[], Int[],          # culverts added later
                                          remap_merges(p.merges, poff)))
         end
         for t in net.traps
             push!(all_traps, DynTrap(t.trap_ix,
                                      remap(t.spill_path, poff),
-                                     remap_vec(t.culvert_inlets, coff),
-                                     remap_vec(t.culvert_outlets, coff)))
+                                     Int[], Int[]))             # culverts added later
         end
-        append!(all_culverts, net.culverts)
     end
 
-    return all_paths, all_traps, all_culverts
+    return all_paths, all_traps
 end
 
 # Truncate any flow path whose cells overlap with a previously-processed path.

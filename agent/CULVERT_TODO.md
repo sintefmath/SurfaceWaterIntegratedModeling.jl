@@ -22,9 +22,9 @@ parameters, and `_culvert_owners` got a unit test for the trap-over-path tie-bre
 `_culvert_owners`/`_build_component`): `_resolve_cell_overlaps!` lost its
 `all_culverts` parameter and truncation-drop filter, and `_dedup_traps` lost its
 culvert-list union.  Both ran only on always-empty lists.  Pure no-op refactor —
-full dynamics suite unchanged.  (`_combine_networks` still remaps culvert indices
-generically; that path is harmless and would do the right thing if `_merge_networks`
-were ever handed already-culvert-bearing networks.)
+full dynamics suite unchanged.  (`_combine_networks` was likewise simplified and
+renamed `_combine_subnets`: it now flattens paths/traps only, since subnets are
+always culvert-free and culvert ownership is resolved later by cell.)
 
 1. **Inclusion / assignment** — `:long` network (start `(7,119)`); culvert inlet
    `(7,119)` → trap 233, outlet `(199,4)` → trap 13.  1 network, 1 culvert,
