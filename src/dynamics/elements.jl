@@ -87,6 +87,39 @@ struct DynCulvert <: DynObject
     Cw::Float64 # weir coefficient (for overtopping flow)
 end
 
+"""
+    DynCulvert(tstruct, inlet, outlet; r, n=0.013, Cd=0.6, Ke=0.5, Cw=1.7)
+
+Convenience constructor that builds a [`DynCulvert`](@ref) from a minimum of
+physical data, filling in SI default hydraulic coefficients and deriving the
+friction-loss coefficient `Kf` from Manning's roughness `n` and the barrel
+length.
+
+The barrel length is the straight-line distance between the `inlet` and `outlet`
+cells: horizontal extent plus the elevation drop read from `tstruct.topography`.
+All quantities are SI (metres, m^3/s).
+
+Defaults assume a concrete pipe (`n`) with a square-edged entrance (`Cd`, `Ke`)
+and the SI weir coefficient (`Cw`); override any of them when better data exists.
+"""
+function DynCulvert(tstruct, inlet::CartesianIndex{2}, outlet::CartesianIndex{2};
+                    r::Real,
+                    n::Real  = 0.013,   # Manning roughness (~concrete)        # @@@ default
+                    Cd::Real = 0.6,     # orifice discharge coef (square edge) # @@@ default
+                    Ke::Real = 0.5,     # entrance loss coef (square edge)     # @@@ default
+                    Cw::Real = 1.7)     # weir coefficient, SI                 # @@@ default
+    D = 2r
+    di, dj = Tuple(outlet - inlet)
+    # @@@ grid resolution assumed 1 m/cell; use the real cell size once available
+    horiz = hypot(float(di), float(dj))
+    drop  = tstruct.topography[inlet] - tstruct.topography[outlet]
+    L = hypot(horiz, drop)              # full barrel length (m)
+    # Manning friction recast as a dimensionless loss coefficient (SI form):
+    # @@@ SI constant 19.6 (= 2g/Ku^2) -- verify the grouping against HDS-5
+    Kf = 19.6 * n^2 * L / D^(4/3)
+    return DynCulvert(inlet, outlet, float(r), float(Cd), float(Ke), float(Kf), float(Cw))
+end
+
 # Network of dynamic objects
 """
          DynNetwork(flow_paths, traps, culverts)

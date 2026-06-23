@@ -1,0 +1,70 @@
+The current task is to implement support for calculating culvert rates.
+
+* Defining the culvert
+
+The culvert struct is called ~DynCulvert~ and is intended for use in a ~DynNetwork~.  Its definition is in the ~elements.jl~ file.
+
+The struct is probably good as it is, but needs a constructor function or two to set it up properly, based on a minimum of data (radius, discharge coef, entrance loss, manning's roughness coefficient, weir coefficient, inlet and outlet positions), where some factors like discharge coef, weir coef and manning's coef may be have default values as precise information on these values for the actual culverts may be lacking or hard to come by.
+
+* Calculating the culvert's capacity
+
+This should be done by a function, ~culvert_rate~ taking a culvert and other essential information, and outputting a rate.  Other essential information include submerged status at each end, and if submerged, what is the head.  It might also be necessary to provide the trap structure object "tstruct".  Ask for precision if unclear.
+
+The actual rate calculation should be based on SI units, and the rate depends on conditions at endpoints.  There are at least three relevant formulations.  The details are summarized in the file ~culvert_hydraulics_reference.md~ in the /agents/reports folder.
+
+However, we will do the simplification that if the culvert entrance is submerged, we will switch equation right away (no interpolation between weir and orifice flow for now), since the network solver will trigger on the event that a culvert becomes submerged or not.  That way, we keep things as simple as possible.
+
+Code clarity and simplicity is paramount.  Use comments to make everything as clear as possible.
+
+
+Again, ask if anything is unclear, rather than guess.
+
+
+* Clarifications (settled during implementation)
+
+These decisions were agreed with the user and govern the implementation in
+~src/dynamics/culvert_rate.jl~ and the convenience constructor in ~elements.jl~.
+
+1. *Governing rule.*  Compute an inlet-control rate and an outlet-control rate
+   independently, and return the *more restrictive* (smaller) of the two.
+
+2. *Inlet control* is a hard switch on inlet submergence (no weir<->orifice
+   transition blend):
+   - inlet not submerged -> weir:    ~Q = Cw * D * H^1.5~
+   - inlet submerged     -> orifice: ~Q = Cd * A * sqrt(2 g H)~
+
+3. *Outlet control* is full-barrel pressure flow:
+   ~Q = A * sqrt(2 g * dH) / sqrt(1 + Ke + Kf)~, where ~dH~ is the difference
+   between the headwater and tailwater surface elevations.
+   - outlet submerged     -> tailwater = outlet water surface.
+   - outlet not submerged -> *free outfall*: effective tailwater
+     ~TW = max(yc, (yc + D)/2)~ above the outlet invert.
+
+4. *Free-outfall simplification.*  Critical depth ~yc~ is evaluated *one-shot*
+   at the inlet-control rate (no Q<->yc iteration); this branch almost never
+   governs.  The rough HDS-5 §5 approximation for ~yc~ is used.
+
+5. *Heads / datum.*  All heads are measured as the water level above the
+   inlet/outlet *cell elevation* (the invert).  No diameter/centroid correction
+   (the §2 datum warning in the reference is *not* applied here).
+
+6. *Omitted from the reference.*  The weir<->orifice transition blend and the
+   slope/Froude applicability gate (§3) are intentionally left out; the governing
+   ~min()~ already makes inlet control win when the barrel cannot fill.
+
+7. *Units.*  SI throughout (metres, m^3/s, g = 9.81).  Grid resolution is assumed
+   to be 1 m/cell and the SI friction constant 19.6 is taken on trust; both are
+   flagged in the code with ~# @@@~ for later revision.
+
+8. *Constructor.*  ~DynCulvert(tstruct, inlet, outlet; r, n, Cd, Ke, Cw)~ derives
+   the barrel length from the endpoint geometry and computes ~Kf~ from Manning's
+   ~n~; coefficients have SI defaults.  The raw 7-argument struct constructor is
+   retained for tests.
+
+9. *Reverse flow.*  ~culvert_rate~ takes ~allow_reverse=false~ by default
+   (downhill-only: a drowned culvert returns 0).  With ~allow_reverse=true~ the
+   reverse direction is computed by swapping the two ends (the model is symmetric;
+   ~Ke~ is reused symmetrically) and returned as a *negative* rate; the signed
+   result passes continuously through 0 at the crossover.  The solver/routing
+   layer does not yet consume negative rates -- flagged with ~# @@@~ in the code.
+

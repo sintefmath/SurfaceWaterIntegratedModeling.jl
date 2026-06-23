@@ -41,10 +41,19 @@ were ever handed already-culvert-bearing networks.)
    is registered on the owning paths' `culvert_inlets`/`culvert_outlets`, on no
    trap.
 
-## Task 2 (solver) — NOT STARTED
+## Task 2 (solver) — IN PROGRESS
 
-`networksolver.jl` still has no culvert handling. Plan (see conversation):
-- `culvert_rate(culvert, ...)` **mock stub** returning a fixed constant for now.
+**Rate function — DONE.** `culvert_rate` (`src/dynamics/culvert_rate.jl`) computes
+capacity from a simplified HDS-5 model (inlet control weir/orifice vs. outlet
+control full-barrel/free-outfall, take the more restrictive).  A convenience
+`DynCulvert(tstruct, inlet, outlet; r, n, …)` constructor derives `Kf`/length and
+fills SI defaults.  Settled simplifications are under "Clarifications" in
+`agent/prompts/culvert_rate_implementation.org`; unit tests cover both controls,
+the constructor, and the free-outfall branch (`test/dynamics_test.jl`), plus a
+visual `examples/verification/culvert_rate.jl`.  Not yet called by the solver.
+
+**Routing integration — NOT STARTED.** `networksolver.jl`/`_route_flow` still has
+no culvert handling. Plan (see conversation):
 - Precompute per-culvert routing data (inlet/outlet owner: path+cell-pos or trap;
   inlet elevation for submersion events).
 - Handle culvert inlets/outlets inside `_route_flow`, in the unified per-path event

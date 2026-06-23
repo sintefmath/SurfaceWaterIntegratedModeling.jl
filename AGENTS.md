@@ -160,10 +160,18 @@ initial implementation assumes downhill culverts (inlet processed before outlet
 in topological order).  Uphill / reverse culverts are deferred; add a TODO if
 a case arises.
 
-The `culvert_rate` function is currently a stub returning a fixed constant.
-It will be replaced with a proper hydraulic formula (orifice/weir, inlet/outlet
-control) once network topology is validated.  Do not rely on its return value
-for anything other than topology testing.
+The `culvert_rate` function (`src/dynamics/culvert_rate.jl`) computes capacity
+from a simplified HDS-5 model: inlet control (weir below submergence, orifice
+above) vs. outlet control (full-barrel pressure flow, free-outfall tailwater
+when the outlet is dry), returning the more restrictive of the two.  Heads are
+water level above the cell invert; the settled simplifications are recorded under
+"Clarifications" in `agent/prompts/culvert_rate_implementation.org`.  It accepts
+`allow_reverse` (default `false`): when `true` a drowned culvert returns a
+*negative* (outlet→inlet) rate instead of `0`, but the routing layer does not yet
+consume negative rates.  Several
+constants (1 m/cell grid resolution, the SI friction constant 19.6) are taken on
+trust and flagged in-code with `# @@@`.  The function is *not yet wired into the
+solver* — `_route_flow` does not call it yet (that is the remaining part of task 2).
 
 ## Local paths
 

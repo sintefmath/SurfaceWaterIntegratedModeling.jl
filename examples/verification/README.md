@@ -19,3 +19,4 @@ include("examples/verification/<script>.jl")
 |--------|----------------|
 | `dynamic_network.jl` | Overlays the `DynNetwork` produced by `setup_network` on the terrain so the flow-path / trap / merge wiring can be eyeballed. |
 | `solve_dynamic_network.jl` | Runs `solveDynNetwork` in a loop (uniform inflow, optional infiltration, all traps start empty) and plots each trap's fill fraction against cumulative time, so the cascade order and fill-rate acceleration can be eyeballed. |
+| `culvert_rate.jl` | Sweeps the boundary conditions of two contrasting culverts and plots `culvert_rate` vs inlet head: the top row contrasts free-outfall and submerged-outlet cases (weir→orifice switch, inlet/outlet-control crossover); the bottom row shows the negative reverse-flow branch in the drowned region when `allow_reverse = true`. |
