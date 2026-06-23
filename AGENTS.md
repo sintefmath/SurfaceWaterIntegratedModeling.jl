@@ -24,6 +24,20 @@ Key subsystems:
 | Flow intensity over terrain | `watercourses.jl`                  |
 | IO & visualisation          | `IOandplot.jl`                     |
 
+## Agent context folder
+
+Prompts, task specs, and background/working documents that support agent work
+live under `agent/`:
+
+| Path                | Contents                                             |
+|---------------------|------------------------------------------------------|
+| `agent/prompts/`    | Source prompts and original task instructions        |
+| `agent/reports/`    | Generated analysis/review reports                    |
+| `agent/CULVERT_TODO.md` | Active culvert work tracker                       |
+
+Read these for background, but this file (`AGENTS.md`) remains the authoritative
+standing guidance.
+
 ## Language and conventions
 
 - Julia 1.9+ (CI tests on 1.9; compatible with current stable).
@@ -120,3 +134,39 @@ julia --project=docs docs/make.jl
 
 Examples in `examples/` have their own `Project.toml` and must be run with
 that environment activated (see README for the step-by-step guide).
+
+## Mass conservation
+
+**Mass conservation is paramount.** Water that leaves one element of the network
+must arrive at exactly one other element; no flow may be created or destroyed.
+
+This applies everywhere: trap-to-trap routing, path infiltration, tributary
+merges, culvert flows, and ODE rate functions.  Concretely:
+
+- In `_route_flow`, the *actual* flow drawn at a culvert/tributary inlet must
+  equal the flow delivered at its outlet — never the *requested* rate when
+  available flow is insufficient.
+- `culvert_actual_delivered[ci]` tracks the real delivered amount and is the
+  only quantity used on the outlet side.
+- The spill emitted by a full trap must equal `inflow - infiltration - all culvert drains`
+  so that `dV ≈ 0` at steady state.
+
+If a design choice would break mass conservation, find a different design.
+
+## Culverts
+
+Culverts are not constrained to follow terrain flow direction.  However the
+initial implementation assumes downhill culverts (inlet processed before outlet
+in topological order).  Uphill / reverse culverts are deferred; add a TODO if
+a case arises.
+
+The `culvert_rate` function is currently a stub returning a fixed constant.
+It will be replaced with a proper hydraulic formula (orifice/weir, inlet/outlet
+control) once network topology is validated.  Do not rely on its return value
+for anything other than topology testing.
+
+## Local paths
+
+`examples/Project.toml` has a machine-local `[sources]` path and is protected
+with `git update-index --skip-worktree`.  Do not commit it.  `examples/Manifest.toml`
+is in `.gitignore` for the same reason.  See memory file `local_path_overrides.md`.

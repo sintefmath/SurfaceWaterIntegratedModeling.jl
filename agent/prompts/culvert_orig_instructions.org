@@ -1,0 +1,18 @@
+* Culvert implementation
+The next step is to implement culvert support.  Culverts are characterized by routing water from their inlet to their outlet, with a certain capacity which depends on multiple factors, including the height difference between inlet and outlet, the dimensions and characteristics of the culvert and the water level at either side of the culvert.
+
+There are two tasks to undertake in order to fully implement culvert support:
+1) Integrate culverts in the general DynNetwork topology and handling, including the generation of networks and its simulation throguh SolveDynNetwork.
+2) compute the function that computes the exact rate through the culvert, based on the:
+   - culvert properties
+   - water levels at inlet and outlet
+   - height difference in terrain between inlet and outlet.
+
+For the time being, we focus on task 1.  However, since we need rates for testing, a mock-up function to compute the rate for a culvert could be defined.  This function takes the culvert and related factors as input, but will just produce some fixed, hard-coded rate regardless of its input for now.  We will revisit this function once the network topology and solver issues have been properly implemented and tested.
+
+So regarding task 1:  Both inlet and outlet may be either in a trap or in the terrain.  If in a trap, there is an additional consideration: whether the trap is currently below water level or not.  If a trap inlet is in a terrain, it might be connected to an upstream flowpath, or alternatively constitute a 'leaf node' that needs a given specified input when running solveDynNetwork.  If a trap outlet is in a terrain or not submerged, it should be connected to a flowpath that routes the water further downstream to the next trap or intersecting flowpath.   A culvert inlet or outlet may already be intersecting an exiting flowpath, in which case the water should be routed in/out of it in accordance with capacity and with how much water is flowing through the inlet cell.  From the perspective of a flow path, this looks similar to a cell with (not necessarily constant) infiltration, or (for the outlet) and additional 'merge'.
+
+When constructing a network: if a culvert inlet is found in a trap, it does not automatically mean that the culvert is part of the network.  A culvert whose inlet is found in the footprint of a trap in the network, will only be considered in the network itself if it is submerged, or intersects a flowpath).   If water level in a trap changes such that a inlet submersion status changes (submerged->not submerged or vice versa), this should be considered as a simulation termination event, since this will change the topology of the flow network.
+
+Does this seem clear?  Please ask about any unclear points before starting to do any code changes.
+
