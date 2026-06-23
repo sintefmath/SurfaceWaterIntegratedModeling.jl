@@ -67,6 +67,15 @@ no culvert handling. Plan (see conversation):
 - Event detection: a trap-inlet culvert's submersion status flips (water level
   crosses the inlet elevation) → termination event (`:culvert_inlet_change`).
   Outlet submersion does NOT trigger an event (only affects rate).
+- **Solver ordering must respect culvert direction.** Construction now does this:
+  `_topological_order` (in `_build_component`) adds an inlet-owner→outlet-owner
+  edge per culvert, so each built network is ordered inlet-before-outlet and an
+  uphill/reverse culvert (which would make the network cyclic) is rejected at
+  construction. But the solver re-derives its own order via `_network_order`
+  (`networksolver.jl`), which still ignores culverts — when routing lands it must
+  add the same culvert edges (or trust the construction order) so `_route_flow`
+  processes each culvert's inlet before its outlet. Uphill/reverse culverts stay
+  deferred (currently they fail loud at construction).
 
 ## Design decisions already settled (with the user)
 

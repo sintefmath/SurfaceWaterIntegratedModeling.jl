@@ -175,6 +175,16 @@ end
     sp, st = SWIM._topological_order([2, 1], [1], paths, traps)
     @test sp == [1, 2]                   # upstream (p1) before downstream (p2)
     @test st == [1]
+
+    # a culvert orders two terrain-disjoint paths: inlet owner before outlet owner
+    iso   = [DynFlowPath([c(1,1)], 0), DynFlowPath([c(2,2)], 0)]   # no flow edge
+    links = [((:path, 2), (:path, 1))]                            # culvert p2 -> p1
+    sp2, _ = SWIM._topological_order([1, 2], Int[], iso, DynTrap[], links)
+    @test sp2 == [2, 1]                  # inlet owner (p2) before outlet owner (p1)
+
+    # a culvert against terrain flow closes a cycle -> throws (uphill case, deferred)
+    @test_throws Exception SWIM._topological_order([1, 2], [1], paths, traps,
+                                                   [((:path, 2), (:path, 1))])
 end
 
 @testset "_merge_networks: disjoint networks pass through" begin
@@ -337,11 +347,12 @@ end
 
     # Several culverts in one network: each is included and registered exactly once,
     # with the local culvert indices forming a clean 1:n set.  On the :long network,
-    # cv1 (233 -> 13) and cv2 (444 -> 233) connect three in-network traps.
+    # cv1 (233 -> 13) and cv2 (233 -> 444) connect three in-network traps.  Both run
+    # downhill from the start trap 233, so the network stays acyclic and orderable.
     @testset "multiple culverts in one network" begin
         out = setup_network(ts, [CartesianIndex(7, 119)], allfull;
                             culverts=[cvlt(CartesianIndex(7, 119), CartesianIndex(199, 4)),
-                                      cvlt(CartesianIndex(115, 68), CartesianIndex(7, 119))])
+                                      cvlt(CartesianIndex(7, 119), CartesianIndex(115, 68))])
         @test length(out) == 1
         net = out[1]
         @test valid_network(net)
@@ -353,6 +364,16 @@ end
                           init=Int[]) ∪ reduce(vcat, [p.culvert_outlets for p in net.flow_paths]; init=Int[])
         @test sort(in_regs)  == [1, 2]
         @test sort(out_regs) == [1, 2]
+    end
+
+    # An uphill / reverse culvert (inlet downstream of its outlet) makes the network
+    # cyclic, so it cannot be ordered upstream-to-downstream; construction rejects it.
+    @testset "uphill culvert is rejected" begin
+        # (115,68)=trap 444 lies downstream of (7,119)=trap 233 on the :long chain,
+        # so a culvert 444 -> 233 runs against terrain flow.
+        @test_throws Exception setup_network(
+            ts, [CartesianIndex(7, 119)], allfull;
+            culverts=[cvlt(CartesianIndex(115, 68), CartesianIndex(7, 119))])
     end
 
     # Fix-point inclusion: a culvert is pulled in only because an *earlier* culvert's

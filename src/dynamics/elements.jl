@@ -486,11 +486,16 @@ function _components(all_paths, all_traps, inlet_owner, outlet_owner)
 end
 
 # Return (sorted_path_ids, sorted_trap_ids) in upstream-to-downstream order,
-# using a joint topological sort of the path/trap DAG via Graphs.
-function _topological_order(global_path_ids, global_trap_ids, all_paths, all_traps)
+# using a joint topological sort of the path/trap DAG via Graphs.  `culvert_links`
+# is a list of (inlet_owner, outlet_owner) `(:path|:trap, global_id)` pairs whose
+# direction must be respected (inlet processed before outlet) on top of the
+# terrain flow edges.
+function _topological_order(global_path_ids, global_trap_ids, all_paths, all_traps,
+                            culvert_links = Tuple{Tuple{Symbol,Int},Tuple{Symbol,Int}}[])
     np = length(global_path_ids)
     path_node = Dict(gpi => i      for (i, gpi) in enumerate(global_path_ids))
     trap_node = Dict(gti => np + i for (i, gti) in enumerate(global_trap_ids))
+    node_of((kind, gid)) = kind == :path ? path_node[gid] : trap_node[gid]
 
     # Every path/trap referenced from within this component is itself part of the
     # component: _components unions paths and traps via merges, path→trap targets,
@@ -515,9 +520,28 @@ function _topological_order(global_path_ids, global_trap_ids, all_paths, all_tra
             Graphs.add_edge!(g, np + li, path_node[sp])
         end
     end
+    # Culvert direction: the inlet owner is processed before the outlet owner
+    # (downhill assumption), so add an edge inlet_owner -> outlet_owner.  This is
+    # what makes a culvert that links two otherwise terrain-disjoint pieces order
+    # them correctly.  A culvert running against terrain flow would close a cycle
+    # here -- that is the deferred uphill / reverse-culvert case, and
+    # topological_sort_by_dfs throws on it (fail loud rather than mis-route).
+    for (inlet_owner, outlet_owner) in culvert_links
+        (inlet_owner[1] == :none || outlet_owner[1] == :none) && continue
+        Graphs.add_edge!(g, node_of(inlet_owner), node_of(outlet_owner))
+    end
 
-    # The flow graph is assumed acyclic (water flows strictly downstream); a cycle
-    # is a programming error, and topological_sort_by_dfs throws if one is present.
+    # The network must be acyclic to be ordered upstream-to-downstream.  A cycle is
+    # either a terrain-flow programming error or, more commonly, an uphill/reverse
+    # culvert (inlet downstream of its outlet).  Fail loud rather than mis-route.
+    # @@@ uphill / reverse culverts are deferred; revisit when task-2 routing gains
+    #     direction-aware handling instead of rejecting the network here.
+    if Graphs.is_cyclic(g)
+        error("Cyclic dynamic network: flow paths, traps, and culverts form a " *
+              "directed loop and cannot be ordered upstream-to-downstream.  The " *
+              "usual cause is an uphill/reverse culvert (its inlet lies downstream " *
+              "of its outlet), which is not yet supported.")
+    end
     order = Graphs.topological_sort_by_dfs(g)
     return ([global_path_ids[i]      for i in order if i <= np],
             [global_trap_ids[i - np] for i in order if i >  np])
@@ -530,20 +554,26 @@ end
 function _build_component(all_paths, all_traps, cv_objs, inlet_owner, outlet_owner,
                           global_path_ids, global_trap_ids)
     path_set = Set(global_path_ids)
+    trap_set = Set(global_trap_ids)
 
+    # Culverts belonging to this component: both endpoints' owners are necessarily
+    # in the same component (the culvert unites them), so testing the inlet owner
+    # suffices.  (Sets are order-independent, so this is valid before the sort.)
+    in_comp((kind, id)) = kind == :path ? (id in path_set) :
+                          kind == :trap ? (id in trap_set) : false
+    comp_cv = [ci for ci in eachindex(cv_objs) if in_comp(inlet_owner[ci])]
+
+    # Order paths/traps upstream-to-downstream, honoring culvert direction (inlet
+    # owner before outlet owner) on top of terrain flow.
+    culvert_links = [(inlet_owner[ci], outlet_owner[ci]) for ci in comp_cv]
     global_path_ids, global_trap_ids =
-        _topological_order(global_path_ids, global_trap_ids, all_paths, all_traps)
+        _topological_order(global_path_ids, global_trap_ids, all_paths, all_traps,
+                           culvert_links)
 
     path_map = Dict(gpi => lpi for (lpi, gpi) in enumerate(global_path_ids))
     trap_map = Dict(gti => lti for (lti, gti) in enumerate(global_trap_ids))
 
-    # Culverts belonging to this component: both endpoints' owners are necessarily
-    # in the same component (the culvert unites them), so testing the inlet owner
-    # suffices.  Build the local culvert list and, per owner, its inlet/outlet hits.
-    in_comp((kind, id)) = kind == :path ? (id in path_set) :
-                          kind == :trap ? (id in keys(trap_map)) : false
-
-    comp_cv      = [ci for ci in eachindex(cv_objs) if in_comp(inlet_owner[ci])]
+    # Per owner, the local culvert indices whose inlet/outlet it hosts.
     culvert_map  = Dict(gci => lci for (lci, gci) in enumerate(comp_cv))
     path_inlets  = Dict{Int,Vector{Int}}();  path_outlets = Dict{Int,Vector{Int}}()
     trap_inlets  = Dict{Int,Vector{Int}}();  trap_outlets = Dict{Int,Vector{Int}}()
