@@ -100,6 +100,28 @@ end
     @test traps[2].spill_path == 2
 end
 
+@testset "_combine_networks: culvert index remapping" begin
+    # each network carries one culvert, referenced from a path inlet and a trap outlet
+    nA = DynNetwork([DynFlowPath([c(1,1)], 1, [1], Int[], Tuple{Int,Int}[])],
+                    [DynTrap(100, 0, Int[], [1])],
+                    [cvlt(c(1,1), c(2,2))])
+    nB = DynNetwork([DynFlowPath([c(5,5)], 1, [1], Int[], Tuple{Int,Int}[])],
+                    [DynTrap(200, 0, Int[], [1])],
+                    [cvlt(c(5,5), c(6,6))])
+
+    paths, traps, culverts = SWIM._combine_networks([nA, nB])
+
+    # culverts are concatenated in network order
+    @test length(culverts) == 2
+    @test culverts[1].inlet == c(1,1) && culverts[2].inlet == c(5,5)
+    # network A keeps its local culvert indices (zero offset)
+    @test paths[1].culvert_inlets == [1]
+    @test traps[1].culvert_outlets == [1]
+    # network B's culvert references shift by the culvert offset (1)
+    @test paths[2].culvert_inlets == [2]
+    @test traps[2].culvert_outlets == [2]
+end
+
 @testset "_components" begin
     nocv = (Tuple{Symbol,Int}[], Tuple{Symbol,Int}[])
     pathsets(comps) = Set(Set(p) for (p, _) in comps)
