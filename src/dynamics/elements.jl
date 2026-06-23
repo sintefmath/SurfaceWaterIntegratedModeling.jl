@@ -119,6 +119,7 @@ function DynCulvert(tstruct, inlet::CartesianIndex{2}, outlet::CartesianIndex{2}
     # (SI; = 2g/km^2 with Manning unit coef km = 1) and hydraulic radius R = D/4
     # for a full circular pipe.  (R-based form, not D-based -- see §3 of
     # agent/reports/culvert_hydraulics_reference.md.)
+    # @@@ R = D/4, not D/2: hydraulic radius is A/P = pi*r^2 / (2*pi*r) = r/2 = D/4.
     R  = D / 4                          # hydraulic radius, full circular pipe
     Kf = 19.63 * n^2 * L / R^(4/3)
     return DynCulvert(inlet, outlet, float(r), float(Cd), float(Ke), float(Kf), float(Cw))
