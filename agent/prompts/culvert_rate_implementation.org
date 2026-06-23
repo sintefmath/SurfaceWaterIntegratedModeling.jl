@@ -53,8 +53,11 @@ These decisions were agreed with the user and govern the implementation in
    ~min()~ already makes inlet control win when the barrel cannot fill.
 
 7. *Units.*  SI throughout (metres, m^3/s, g = 9.81).  Grid resolution is assumed
-   to be 1 m/cell and the SI friction constant 19.6 is taken on trust; both are
-   flagged in the code with ~@@@~ for later revision.
+   to be 1 m/cell -- still taken on trust and flagged ~@@@~ for later revision.
+   The friction term uses the HDS-5 hydraulic-radius form
+   ~Kf = Ku * n^2 * L / R^(4/3)~ with ~Ku = 19.63~ (SI) and ~R = D/4~ for a full
+   circular pipe (per culvert_hydraulics_reference.md §3 -- *not* the earlier,
+   incorrect D-based ~19.6 * n^2 * L / D^(4/3)~ form).
 
 8. *Constructor.*  ~DynCulvert(tstruct, inlet, outlet; r, n, Cd, Ke, Cw)~ derives
    the barrel length from the endpoint geometry and computes ~Kf~ from Manning's

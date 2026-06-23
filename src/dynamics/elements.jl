@@ -114,9 +114,13 @@ function DynCulvert(tstruct, inlet::CartesianIndex{2}, outlet::CartesianIndex{2}
     horiz = hypot(float(di), float(dj))
     drop  = tstruct.topography[inlet] - tstruct.topography[outlet]
     L = hypot(horiz, drop)              # full barrel length (m)
-    # Manning friction recast as a dimensionless loss coefficient (SI form);
-    # @@@ SI constant 19.6 (= 2g/Ku^2) -- verify the grouping against HDS-5
-    Kf = 19.6 * n^2 * L / D^(4/3)
+    # Manning friction as a dimensionless loss coefficient (HDS-5 eq. 3.5, SI):
+    # Kf = Ku * n^2 * L / R^(4/3), with assembled friction constant Ku = 19.63
+    # (SI; = 2g/km^2 with Manning unit coef km = 1) and hydraulic radius R = D/4
+    # for a full circular pipe.  (R-based form, not D-based -- see §3 of
+    # agent/reports/culvert_hydraulics_reference.md.)
+    R  = D / 4                          # hydraulic radius, full circular pipe
+    Kf = 19.63 * n^2 * L / R^(4/3)
     return DynCulvert(inlet, outlet, float(r), float(Cd), float(Ke), float(Kf), float(Cw))
 end
 

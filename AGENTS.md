@@ -168,8 +168,9 @@ water level above the cell invert; the settled simplifications are recorded unde
 "Clarifications" in `agent/prompts/culvert_rate_implementation.org`.  It accepts
 `allow_reverse` (default `false`): when `true` a drowned culvert returns a
 *negative* (outlet→inlet) rate instead of `0`, but the routing layer does not yet
-consume negative rates.  Several
-constants (1 m/cell grid resolution, the SI friction constant 19.6) are taken on
+consume negative rates.  The outlet-control friction term uses the HDS-5
+hydraulic-radius form `Kf = Ku·n²·L / R^(4/3)` (`Ku = 19.63` SI, `R = D/4` for a
+full circular pipe); the 1 m/cell grid-resolution assumption is still taken on
 trust and flagged in-code with `@@@`.  The function is *not yet wired into the
 solver* — `_route_flow` does not call it yet (that is the remaining part of task 2).
 

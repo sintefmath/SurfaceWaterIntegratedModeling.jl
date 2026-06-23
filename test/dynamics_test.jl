@@ -583,10 +583,10 @@ mock_ts(M) = (; topography = M)
 @testset "DynCulvert convenience constructor" begin
     # flat terrain, inlet c(1,1) -> outlet c(1,2): horiz = 1 m, drop = 0 -> L = 1 m.
     ts = mock_ts(zeros(2, 2))
-    cv = DynCulvert(ts, c(1, 1), c(1, 2); r = 0.5)   # n=0.013, D=1 -> D^(4/3)=1
+    cv = DynCulvert(ts, c(1, 1), c(1, 2); r = 0.5)   # n=0.013, D=1, L=1, R=D/4=0.25
     @test cv.r  == 0.5
     @test cv.Cd == 0.6 && cv.Ke == 0.5 && cv.Cw == 1.7   # SI defaults
-    @test cv.Kf ≈ 19.6 * 0.013^2 * 1.0 / 1.0 rtol = 1e-12
+    @test cv.Kf ≈ 19.63 * 0.013^2 * 1.0 / (0.25)^(4/3) rtol = 1e-12
     # overriding a coefficient propagates
     @test DynCulvert(ts, c(1, 1), c(1, 2); r = 0.5, Cw = 2.0).Cw == 2.0
 end

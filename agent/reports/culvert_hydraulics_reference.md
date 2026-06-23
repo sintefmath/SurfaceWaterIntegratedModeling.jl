@@ -82,11 +82,26 @@ For real design, pull these from HDS-5 Appendix A tables (per shape/edge) or cal
 
 Valid **only** when the barrel actually flows full under pressure.
 
-    Q = A * sqrt(2 * g * dH) / sqrt(1 + Ke + (29 * n^2 * L) / D^(4/3))
+> Symbol convention (matches HDS-5 eq. 3.4b / 3.5):
+> - `Ku` = the **assembled friction constant** = **29** (English) / **19.63** (SI).
+>   This is HDS-5's symbol. It is NOT the Manning unit coefficient.
+> - `km` = the **Manning unit coefficient** inside Manning's velocity equation =
+>   **1.486** (English) / **1.0** (SI). HDS-5 never names this separately; it is already
+>   folded into Ku. Some texts write it as Km.
+> - Bridge between them: **Ku = 2g / km^2** (derived below). Do not confuse the two.
 
-(English units, circular pipe.) Terms:
+HDS-5 builds the required head H as the sum of three velocity-head multiples
+(H = Hv + He + Ho, with friction Hf inside; see eq. 3.1–3.5):
 
-- `A`   full cross-section, pi*D^2/4
+    H = [ 1 + Ke + Ku * n^2 * L / R^(1.33) ] * V^2 / (2g)      (HDS-5 eq. 3.5)
+
+with V = Q/A the mean barrel velocity. Solving for Q (since H = dH for full flow):
+
+    Q = A * sqrt(2 * g * dH) / sqrt(1 + Ke + Ku * n^2 * L / R^(1.33))
+
+Terms:
+
+- `A`   full cross-section, pi*D^2/4 for a circular pipe
 - `dH`  difference between headwater elevation and effective tailwater elevation
 - `Ke`  entrance loss coefficient:
           ~0.2 grooved end / headwall,
@@ -94,10 +109,58 @@ Valid **only** when the barrel actually flows full under pressure.
           ~0.9 projecting
 - `n`   Manning roughness: ~0.012 concrete, ~0.024 corrugated metal
 - `L`   barrel length
-- `D`   diameter
-- friction term `29 * n^2 * L / D^(4/3)` is Manning's equation recast as a loss
-  coefficient. **SI:** replace the constant 29 with **19.6** (i.e. 2g/Ku² handling);
-  verify against HDS-5 for the exact SI grouping before trusting it.
+- `R`   hydraulic radius = A / p (p = wetted perimeter). For a circular pipe flowing
+        **full**, R = D/4.
+- `Ku`  friction constant = 29 (English) / 19.63 (SI). See bridge formula above.
+- exponent `R^(1.33)`: HDS-5 writes 1.33; this is just 4/3 = 1.333... rounded. Use
+  `R^(4/3)` in code for full precision — identical quantity.
+
+> CRITICAL: the friction constant Ku pairs with **R^(1.33)** (hydraulic radius), NOT
+> D^(1.33). An earlier draft of this file wrote `29 n^2 L / D^(4/3)`, which is wrong —
+> mixing the R-based constant with a D-based denominator. Use the R-based form above for
+> any cross-section; it is the safe default and matches the manual one-to-one.
+
+### Circular-pipe shortcut (optional)
+
+If you want the term written directly in D for a full circular pipe, substitute R = D/4.
+Because (D/4)^(4/3) = D^(4/3) / 4^(4/3) and 4^(4/3) ≈ 6.35, the constant scales up by
+~6.35:
+
+    friction term (circular, full) = (Ku * 6.35) * n^2 * L / D^(4/3)
+      English: ~184 * n^2 * L / D^(4/3)
+      SI:      ~124 * n^2 * L / D^(4/3)
+
+These D-based forms are numerically identical to the R-based form for a full circle —
+just pre-substituted. Prefer the R-based form in code to match HDS-5 and avoid confusion.
+
+### Derivation: why Ku = 2g / km^2 = 29 (English) / 19.63 (SI)
+
+Manning's velocity equation uses the unit coefficient km (1.486 English, 1.0 SI):
+
+    V = (km / n) * R^(2/3) * Sf^(1/2)
+
+Solve for the friction slope Sf and multiply by L to get the friction head loss:
+
+    Hf = Sf * L = n^2 * V^2 * L / (km^2 * R^(4/3))
+
+Express Hf as a multiple of the velocity head V^2/(2g) by multiplying and dividing by 2g:
+
+    Hf = [ 2g * n^2 * L / (km^2 * R^(4/3)) ] * V^2/(2g)
+       = [ Ku * n^2 * L / R^(4/3) ] * V^2/(2g)     where  Ku = 2g / km^2
+
+Evaluating Ku:
+      English: 2 * 32.2 / 1.486^2 = 64.4 / 2.208 = 29.0   ✓ (matches HDS-5)
+      SI:      2 * 9.81  / 1.0^2   = 19.62 ≈ 19.63          ✓ (matches HDS-5)
+
+So HDS-5's Ku is exactly this assembled constant; km (the 1.486 / 1.0) lives *inside* it
+and is never shown separately in the manual.
+
+> Unit reminder: g = 32.2 ft/s^2 (English) or 9.81 m/s^2 (SI) — same acceleration, two
+> unit systems. SI coincidence worth noting: Ku = 19.63 happens to equal the velocity-head
+> denominator 2g = 19.62, because km = 1.0 drops out. In English they differ (Ku = 29 vs
+> 2g = 64.4) because of the 1.486^2 factor. This coincidence is purely numerical, not a
+> shared meaning.
+
 
 An exit-loss coefficient (~1.0) is sometimes added explicitly inside the denominator;
 HDS-5's full energy form lists entrance, friction, and exit losses separately.
@@ -213,7 +276,9 @@ solve_inlet_control(HW):
 solve_outlet_control(HW):
     if free_outfall: TW = max(yc(Q), (yc(Q)+D)/2)   # yc via §5 iteration
     dH = HW_elev - TW_elev
-    Q  = A * sqrt(2 g dH) / sqrt(1 + Ke + 29 n^2 L / D^(4/3))
+    Q  = A * sqrt(2 g dH) / sqrt(1 + Ke + Ku * n^2 * L / R^(4/3))
+         # Ku = 29 (English) / 19.63 (SI) = assembled friction constant (HDS-5 eq 3.5)
+         # R = A/p (= D/4 for a full circle); R^(4/3) == HDS-5's R^1.33
     return Q
 govern:
     HW_inlet  = inlet HW for target Q
