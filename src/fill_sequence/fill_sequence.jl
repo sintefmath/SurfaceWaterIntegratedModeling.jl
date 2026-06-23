@@ -21,7 +21,7 @@ patterns.
                                           changes in weather over time
 - `time_slack::Real`: tolerance for when to merge events that are close to each other
                       in time.  Should be set to zero or a small number.
-                      @@ NB: Support for this currently unimplemented.
+                      @@@ NB: Support for this currently unimplemented.
 - `infiltration::Union{Matrix{Real}, Nothing}`: 
                       grid of same shape as the terrain, giving the infiltration rate
                       at each gridcell.

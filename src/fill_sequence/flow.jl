@@ -38,7 +38,7 @@ function compute_flow(spillgraph::SpillGraph,
     g = get_graph(spillgraph)
     sortedg = Graphs.topological_sort_by_dfs(g)
 
-    icount = 0 # @@
+    icount = 0 # @@@
     for sourcenode in sortedg
         icount = icount + 1
         verbose && (mod(icount, 100) == 0) && println("compute_flow iteration: ", icount)
@@ -93,7 +93,7 @@ end
 function _is_sink(cell, tstruct)
     #return cell > 0 && tstruct.spillfield[cell] == -3
 
-    # @@ TODO: should this be optimized, to avoid creation of intermediary
+    # @@@ TODO: should this be optimized, to avoid creation of intermediary
     # CartesianIndices objects every time?
     return cell > 0 && (tstruct.sinks !== nothing) &&
         CartesianIndices(size(tstruct.topography))[cell] in tstruct.sinks
@@ -135,7 +135,7 @@ function _track_flow!(rateinfo, node, amount, tstruct)
 
         #cell, = SurfaceWaterIntegratedModeling._downstream_cell(tstruct.spillfield, cell)
         # downstream cell should exist since this is not a trap bottom
-        # @@ TODO: we might combine this with _is_trap_bottom to avoid double lookup
+        # @@@ TODO: we might combine this with _is_trap_bottom to avoid double lookup
         #cell = Graphs.outneighbors(tstruct.flowgraph, cell)[1]
 
         #_is_sink(cell, tstruct) && break # return if the new cell is a sink

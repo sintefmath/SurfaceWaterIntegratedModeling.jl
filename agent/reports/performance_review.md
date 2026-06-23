@@ -286,7 +286,7 @@ correctness.
 **File:** `src/trapvolumes.jl:52`
 
 ```julia
-num_threads = 1 #@@Threads.nthreads()
+num_threads = 1 #@@@Threads.nthreads()
 ```
 
 The multithreaded chunked accumulation path is present and correctly avoids race

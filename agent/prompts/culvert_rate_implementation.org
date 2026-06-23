@@ -54,7 +54,7 @@ These decisions were agreed with the user and govern the implementation in
 
 7. *Units.*  SI throughout (metres, m^3/s, g = 9.81).  Grid resolution is assumed
    to be 1 m/cell and the SI friction constant 19.6 is taken on trust; both are
-   flagged in the code with ~# @@@~ for later revision.
+   flagged in the code with ~@@@~ for later revision.
 
 8. *Constructor.*  ~DynCulvert(tstruct, inlet, outlet; r, n, Cd, Ke, Cw)~ derives
    the barrel length from the endpoint geometry and computes ~Kf~ from Manning's
@@ -66,5 +66,5 @@ These decisions were agreed with the user and govern the implementation in
    reverse direction is computed by swapping the two ends (the model is symmetric;
    ~Ke~ is reused symmetrically) and returned as a *negative* rate; the signed
    result passes continuously through 0 at the crossover.  The solver/routing
-   layer does not yet consume negative rates -- flagged with ~# @@@~ in the code.
+   layer does not yet consume negative rates -- flagged with ~@@@~ in the code.
 

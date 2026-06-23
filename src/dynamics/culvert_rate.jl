@@ -40,18 +40,18 @@ function _directional_capacity(cv::DynCulvert, g, D, A,
     else
         # Free outfall: no real tailwater, so use an effective one from the
         # critical depth at the downstream end.
-        # @@@ yc evaluated one-shot at Q_inlet (no Q<->yc iteration); the
-        #     free-outfall outlet-control branch almost never governs anyway.
-        # @@@ rough critical-depth approximation (HDS-5 §5); exact iterative
-        #     circular solution is available if more accuracy is ever needed.
+        # @@@ Approximate: yc uses the rough HDS-5 §5 formula and is evaluated
+        #     one-shot at Q_inlet (no Q<->yc iteration).  Acceptable because this
+        #     branch almost never governs; revisit with the exact iterative
+        #     circular solution if more free-outfall accuracy is ever needed.
         yc = D * 0.325 * (Q_inlet / D^2.5)^(2/3) + 0.083 * D
         down_elev = down_z + max(yc, (yc + D) / 2)
     end
     dH = max(up_elev - down_elev, 0.0)      # net driving head (0 if not driving)
     Q_outlet = A * sqrt(2g * dH) / sqrt(1 + cv.Ke + cv.Kf)
 
-    # @@@ slope/Froude applicability gate (HDS-5 §3) intentionally omitted: the
-    #     min() below already lets inlet control win when the barrel cannot fill.
+    # The slope/Froude applicability gate (HDS-5 §3) is intentionally omitted: the
+    # min() below already lets inlet control win when the barrel cannot fill.
     return min(Q_inlet, Q_outlet)
 end
 

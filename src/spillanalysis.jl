@@ -3,7 +3,7 @@ export spillanalysis
 import Images
 
 # all outside regions represented as -1 if true
-# @@ NB: Domain currently only implemented for spillfield!
+# @@@ NB: Domain currently only implemented for spillfield!
 """
     spillanalysis(grid; usediags=true, clip_mask=nothing, sinks=Vector{CartesianIndex{2}}(),
                   lengths=nothing, domain=nothing, merge_outregions=false, verbose=false,
@@ -32,7 +32,7 @@ documentation for details.
 - `lengths::Union{Tuple{<:Real}, Nothing}=nothing`: 
       tuple expressing the length and width of the grid (used to compute aspect ratios)
 - `domain::Union{Domain2D, Nothing}=nothing`: 
-      restrict computation to the specified domain of the grid.  @@ Note that this is not
+      restrict computation to the specified domain of the grid.  @@@ Note that this is not
       fully supported yet for this function.
 - `merge_outregions::Bool=false`: if `true`, all "outside" regions will be merged and 
       represented as region -1.   Otherwise, each "outside" region will be represented

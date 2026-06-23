@@ -170,7 +170,7 @@ water level above the cell invert; the settled simplifications are recorded unde
 *negative* (outlet→inlet) rate instead of `0`, but the routing layer does not yet
 consume negative rates.  Several
 constants (1 m/cell grid resolution, the SI friction constant 19.6) are taken on
-trust and flagged in-code with `# @@@`.  The function is *not yet wired into the
+trust and flagged in-code with `@@@`.  The function is *not yet wired into the
 solver* — `_route_flow` does not call it yet (that is the remaining part of task 2).
 
 ## Local paths

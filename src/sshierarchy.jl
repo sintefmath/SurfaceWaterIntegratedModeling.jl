@@ -198,7 +198,7 @@ function _identify_new_spillpoint!(grid, subtraps, spillregions, boundaries)
     # the boundaries of the subregions, and removing those parts that are shared
     # ("internal" to the new region)
 
-    # @@ by not copying, the boundaries for these subregions will no longer be
+    # @@@ by not copying, the boundaries for these subregions will no longer be
     # correct, but they are presumably not needed anymore
     outer_bnd = [boundaries[s] for s in subtraps]; 
                                                    

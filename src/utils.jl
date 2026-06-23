@@ -1,6 +1,6 @@
 import Graphs
 import Roots
-#using Infiltrator # @@ for debugging
+#using Infiltrator @@@ for debugging
 
 export flatten_grid!, raise_buildings!, identify_flat_areas, toplevel_traps,
     show_region_selection, all_subtraps_of, interpolate_timeseries,
@@ -746,7 +746,7 @@ end
 
 # # ----------------------------------------------------------------------------
 # function current_upstream_area(tstruct::TrapStructure{<:Real}, point, tstates; recur=1)
-#     if recur >= 10000 # @@@ stack overflow guard
+#     if recur >= 10000 @@@ stack overflow guard
 #         return []
 #     end
 #     submerged, puddlecells = _is_submerged(tstruct, point, tstates)
@@ -921,7 +921,7 @@ function upstream_area(tstruct::TrapStructure{<:Real},
             return findall(tmp[:])
         end
     elseif is_sink
-        # @@ ideally this should be restructured together with the outside-trap
+        # @@@ ideally this should be restructured together with the outside-trap
         # case, as there is some redundancy.
         if local_only
             return findall(tstruct.regions[:] .== region)
@@ -1449,7 +1449,7 @@ function current_upstream_area(tstruct::TrapStructure{<:Real}, point, tstates)
     
     # determine all cells belonging to any of the contributing full regions
 
-    #regcells = findall(in(all_full_regions).(tstruct.regions[:])) # @@ Slow! 
+    #regcells = findall(in(all_full_regions).(tstruct.regions[:])) @@@ Slow! 
     mask = in.(tstruct.regions, Ref(Set(all_full_regions)))
     regcells = findall(mask[:])
     

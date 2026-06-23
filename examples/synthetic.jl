@@ -31,7 +31,7 @@ using Pkg.Artifacts
 datapath = joinpath(datapath_testdata(), "data", "synthetic")
 grid = loadgrid(joinpath(datapath, "synsurf.txt"))
 
-grid = flatten_small_traps(grid, 154) # @@
+grid = flatten_small_traps(grid, 154) # @@@
 
 ## for ease of use, we create our own label of key colors found in the
 ## colorsheme `:Paired_12` used below
