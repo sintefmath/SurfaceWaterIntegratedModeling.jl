@@ -52,7 +52,7 @@ were ever handed already-culvert-bearing networks.)
   its cell). **Mass conservation is paramount**: the actual flow drawn at a culvert
   inlet (possibly capped by available flow) must equal the amount delivered at the
   outlet — track `culvert_actual_delivered[ci]` and use only that on the outlet
-  side. See CLAUDE.md.
+  side. See AGENTS.md (Mass conservation).
 - Trap-inlet culverts drain the trap; trap-outlet culverts add to it — all computed
   inside `_route_flow` using topological order (inlet processed before outlet).
 - Event detection: a trap-inlet culvert's submersion status flips (water level
