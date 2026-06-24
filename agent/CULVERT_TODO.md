@@ -80,8 +80,15 @@ no culvert handling. Plan (see conversation):
 ## Design decisions already settled (with the user)
 
 - `DynFlowPath.merges` is `Vector{Tuple{Int,Int}}` (tributary idx, junction cell idx).
+- `DynFlowPath.culvert_inlets`/`culvert_outlets` are `Vector{Tuple{Int,Int}}`
+  `(culvert idx, cell position in this path's cells)` — the position lets routing
+  charge infiltration up to the abstraction/addition point, like a `merges` junction.
+  `DynTrap.culvert_inlets`/`culvert_outlets` stay `Vector{Int}` (a trap is a reservoir
+  with no along-path position).  The inlet/outlet *elevation* needed for trap-inlet
+  submersion events is NOT stored in `DynTrap`: the cell is already in `DynCulvert`
+  and elevations are derived from `tstruct`, so the solver precomputes it per culvert
+  (see the routing-integration bullet on `inlet elevation for submersion events`).
 - Inclusion rule (final, simple): a culvert is in the network iff an endpoint cell
   is in an in-network trap footprint or on an in-network flow path.
 - Expansion traces a fresh `_subnetwork` from BOTH endpoints of each included culvert.
-- `culvert_rate` is a stub for now; real hydraulics come in task 2's second phase.
 - One routing code path only (no separate approximate path).

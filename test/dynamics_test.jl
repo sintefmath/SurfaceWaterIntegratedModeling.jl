@@ -18,8 +18,8 @@ function valid_network(net)
     for p in net.flow_paths
         ok &= 0 <= p.target_trap <= nt
         ok &= all(1 <= m <= np for (m, _) in p.merges)
-        ok &= all(1 <= ci <= nc for ci in p.culvert_inlets)
-        ok &= all(1 <= ci <= nc for ci in p.culvert_outlets)
+        ok &= all(1 <= ci <= nc && 1 <= pos <= length(p.cells) for (ci, pos) in p.culvert_inlets)
+        ok &= all(1 <= ci <= nc && 1 <= pos <= length(p.cells) for (ci, pos) in p.culvert_outlets)
     end
     for t in net.traps
         ok &= 0 <= t.spill_path <= np
@@ -338,10 +338,18 @@ end
         net = out[1]
         @test valid_network(net)
         @test length(net.culverts) == 1
-        pin  = findfirst(p -> 1 in p.culvert_inlets,  net.flow_paths)
-        pout = findfirst(p -> 1 in p.culvert_outlets, net.flow_paths)
-        @test pin  !== nothing && inlet  in net.flow_paths[pin].cells
-        @test pout !== nothing && outlet in net.flow_paths[pout].cells
+        # culvert 1 is registered on a path's inlet/outlet list, and the stored cell
+        # position points to the actual inlet/outlet cell.
+        function find_pos(listf)
+            for p in net.flow_paths, (ci, pos) in listf(p)
+                ci == 1 && return (p, pos)
+            end
+            return (nothing, 0)
+        end
+        pin_p,  ipos = find_pos(p -> p.culvert_inlets)
+        pout_p, opos = find_pos(p -> p.culvert_outlets)
+        @test pin_p  !== nothing && pin_p.cells[ipos]  == inlet
+        @test pout_p !== nothing && pout_p.cells[opos] == outlet
         @test all(isempty(t.culvert_inlets) && isempty(t.culvert_outlets) for t in net.traps)
     end
 
@@ -357,11 +365,12 @@ end
         net = out[1]
         @test valid_network(net)
         @test length(net.culverts) == 2
-        # every culvert is registered once on the inlet side and once on the outlet side
-        in_regs  = reduce(vcat, [t.culvert_inlets for t in net.traps];
-                          init=Int[]) ∪ reduce(vcat, [p.culvert_inlets for p in net.flow_paths]; init=Int[])
-        out_regs = reduce(vcat, [t.culvert_outlets for t in net.traps];
-                          init=Int[]) ∪ reduce(vcat, [p.culvert_outlets for p in net.flow_paths]; init=Int[])
+        # every culvert is registered once on the inlet side and once on the outlet
+        # side (traps store bare indices, paths store (index, position) tuples)
+        in_regs  = reduce(vcat, [t.culvert_inlets for t in net.traps]; init=Int[]) ∪
+                   [ci for p in net.flow_paths for (ci, _) in p.culvert_inlets]
+        out_regs = reduce(vcat, [t.culvert_outlets for t in net.traps]; init=Int[]) ∪
+                   [ci for p in net.flow_paths for (ci, _) in p.culvert_outlets]
         @test sort(in_regs)  == [1, 2]
         @test sort(out_regs) == [1, 2]
     end

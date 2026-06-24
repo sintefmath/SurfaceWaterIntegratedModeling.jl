@@ -23,17 +23,22 @@ struct DynFlowPath <: DynObject
     # Target trap index (0 for out-of-domain or intersection with another flow path)
     target_trap::Int
 
-    # culvert inlets and outlets, each represented by a culvert ID
-    culvert_inlets::Vector{Int}
-    culvert_outlets::Vector{Int}
+    # culvert inlets and outlets on this path: each (culvert_index, cell_position),
+    # where cell_position is the 1-based index of the culvert's inlet/outlet cell in
+    # *this* path's `cells`.  The position lets routing charge the infiltration up to
+    # the abstraction/addition point, exactly like a `merges` junction.
+    culvert_inlets::Vector{Tuple{Int,Int}}
+    culvert_outlets::Vector{Tuple{Int,Int}}
 
     # tributary paths that merge into this one: (tributary_path_index, junction_cell_index)
     # where junction_cell_index is the 1-based index of the junction cell in *this* path's cells.
     merges::Vector{Tuple{Int,Int}}
 end
 
-DynFlowPath(cells, target_trap) = DynFlowPath(cells, target_trap, Int[], Int[], Tuple{Int,Int}[])
-DynFlowPath(cells) = DynFlowPath(cells, 0, Int[], Int[], Tuple{Int,Int}[])
+DynFlowPath(cells, target_trap) =
+    DynFlowPath(cells, target_trap, Tuple{Int,Int}[], Tuple{Int,Int}[], Tuple{Int,Int}[])
+DynFlowPath(cells) =
+    DynFlowPath(cells, 0, Tuple{Int,Int}[], Tuple{Int,Int}[], Tuple{Int,Int}[])
 
 """
         DynTrap(trap_ix, spill_path, culvert_inlets, culvert_outlets)
@@ -391,7 +396,7 @@ function _combine_subnets(subnets::Vector{DynNetwork})
         for p in net.flow_paths
             push!(all_paths, DynFlowPath(copy(p.cells),
                                          remap(p.target_trap, toff),
-                                         Int[], Int[],          # culverts added later
+                                         Tuple{Int,Int}[], Tuple{Int,Int}[],   # culverts added later
                                          remap_merges(p.merges, poff)))
         end
         for t in net.traps
@@ -573,24 +578,30 @@ function _build_component(all_paths, all_traps, cv_objs, inlet_owner, outlet_own
     path_map = Dict(gpi => lpi for (lpi, gpi) in enumerate(global_path_ids))
     trap_map = Dict(gti => lti for (lti, gti) in enumerate(global_trap_ids))
 
-    # Per owner, the local culvert indices whose inlet/outlet it hosts.
+    # Per owner, the local culvert indices it hosts.  A path also records the
+    # 1-based position of the culvert's inlet/outlet cell within its `cells`, so
+    # routing can charge infiltration up to that point (like a `merges` junction);
+    # a trap has no along-path position, so it stores the bare culvert index.
     culvert_map  = Dict(gci => lci for (lci, gci) in enumerate(comp_cv))
-    path_inlets  = Dict{Int,Vector{Int}}();  path_outlets = Dict{Int,Vector{Int}}()
-    trap_inlets  = Dict{Int,Vector{Int}}();  trap_outlets = Dict{Int,Vector{Int}}()
-    register!(d, owner_id, lc) = push!(get!(d, owner_id, Int[]), lc)
+    path_inlets  = Dict{Int,Vector{Tuple{Int,Int}}}();  path_outlets = Dict{Int,Vector{Tuple{Int,Int}}}()
+    trap_inlets  = Dict{Int,Vector{Int}}();             trap_outlets = Dict{Int,Vector{Int}}()
+    pos_on(gpi, cell) = findfirst(==(cell), all_paths[gpi].cells)
     for gci in comp_cv
         lc = culvert_map[gci]
+        cv = cv_objs[gci]
         ik, iid = inlet_owner[gci]
         ok, oid = outlet_owner[gci]
-        register!(ik == :path ? path_inlets  : trap_inlets,  iid, lc)
-        register!(ok == :path ? path_outlets : trap_outlets, oid, lc)
+        ik == :path ? push!(get!(path_inlets,  iid, Tuple{Int,Int}[]), (lc, pos_on(iid, cv.inlet))) :
+                      push!(get!(trap_inlets,  iid, Int[]), lc)
+        ok == :path ? push!(get!(path_outlets, oid, Tuple{Int,Int}[]), (lc, pos_on(oid, cv.outlet))) :
+                      push!(get!(trap_outlets, oid, Int[]), lc)
     end
 
     local_paths = [DynFlowPath(
         all_paths[gpi].cells,
         get(trap_map, all_paths[gpi].target_trap, 0),
-        get(path_inlets,  gpi, Int[]),
-        get(path_outlets, gpi, Int[]),
+        get(path_inlets,  gpi, Tuple{Int,Int}[]),
+        get(path_outlets, gpi, Tuple{Int,Int}[]),
         [(path_map[m], j) for (m, j) in all_paths[gpi].merges if m ∈ path_set]
     ) for gpi in global_path_ids]
 
