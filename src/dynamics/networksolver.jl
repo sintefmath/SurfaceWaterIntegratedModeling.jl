@@ -741,6 +741,8 @@ function _build_event_callback(p::DynNetworkRateParams,
                                evolving::AbstractVector{<:Integer},
                                V0::AbstractVector{<:Real})
 
+    # register _which_ traps should be monitored for _which_ events
+    # (fill/empty/stagnation for evolving, unspill for full)
     conds = _event_conditions(p, evolving)
     event = DynNetworkEvent()
 
