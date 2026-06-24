@@ -359,22 +359,47 @@ function _route_flow(net::DynNetwork,
 
     for node in order
         if node <= np                               # a flow path
-            p      = node
-            prefix = path_infil_prefix[p]
-            tribs  = sorted_trib_info[p]
-
-            # Segmented routing: process each inter-junction segment in order,
-            # adding each tributary's delivered flow at its junction position.
+            p        = node
+            prefix   = path_infil_prefix[p]
+            fp       = net.flow_paths[p]
             current  = path_flow[p]
             prev_pfx = 0.0
-            for (junc, m) in tribs
-                current  = max(current - (prefix[junc] - prev_pfx), 0.0)
-                current += trib_output[m]
-                prev_pfx = prefix[junc]
-            end
-            delivered = max(current - (prefix[end] - prev_pfx), 0.0)
 
-            tt = net.flow_paths[p].target_trap
+            if cvplan === nothing
+                # Segmented routing over tributary junctions only: each segment loses
+                # its infiltration, then the tributary's delivered flow is added.
+                for (junc, m) in sorted_trib_info[p]
+                    current  = max(current - (prefix[junc] - prev_pfx), 0.0)
+                    current += trib_output[m]
+                    prev_pfx = prefix[junc]
+                end
+            else
+                # Merge tributary junctions and culvert inlet/outlet positions into one
+                # in-order stream along the path.  A culvert inlet abstracts up to the
+                # flow passing its cell (mass cap); a culvert outlet adds the amount its
+                # (earlier-routed, by topological order) source actually drew.
+                events = Tuple{Int,Symbol,Int}[]
+                for (junc, m) in sorted_trib_info[p]; push!(events, (junc, :trib,  m));  end
+                for (ci, pos) in fp.culvert_inlets;   push!(events, (pos,  :cvin,  ci)); end
+                for (ci, pos) in fp.culvert_outlets;  push!(events, (pos,  :cvout, ci)); end
+                sort!(events; by = first)
+                for (pos, kind, idx) in events
+                    current = max(current - (prefix[pos] - prev_pfx), 0.0)
+                    if kind === :trib
+                        current += trib_output[idx]
+                    elseif kind === :cvout
+                        current += culvert_actual[idx]            # deliver
+                    else                                          # :cvin
+                        a = min(_culvert_flow(cvplan, net, idx, trap_level), current)
+                        culvert_actual[idx] = a                   # drawn == delivered
+                        current -= a
+                    end
+                    prev_pfx = prefix[pos]
+                end
+            end
+
+            delivered = max(current - (prefix[end] - prev_pfx), 0.0)
+            tt = fp.target_trap
             if tt > 0
                 trap_inflow[tt] += delivered        # into the downstream trap
             elseif merge_target[p] > 0
@@ -389,14 +414,12 @@ function _route_flow(net::DynNetwork,
                 for ci in trap.culvert_outlets
                     trap_inflow[i] += culvert_actual[ci]
                 end
-                # culvert inlets draining this trap.  Trap->trap culverts are handled
-                # here; an outlet on a flow path is deferred and carries 0 for now.
+                # culvert inlets draining this trap (the matching delivery happens at
+                # the outlet's owner -- trap or flow path -- later in topological order)
                 for ci in trap.culvert_inlets
-                    if !cvplan.outlet_is_path[ci]
-                        q = _culvert_flow(cvplan, net, ci, trap_level)
-                        culvert_actual[ci] = q
-                        trap_inflow[i]    -= q          # drawn out of this trap
-                    end
+                    q = _culvert_flow(cvplan, net, ci, trap_level)
+                    culvert_actual[ci] = q
+                    trap_inflow[i]    -= q              # drawn out of this trap
                 end
             end
             if spilling[i]

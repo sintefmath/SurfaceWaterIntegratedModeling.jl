@@ -720,3 +720,28 @@ end
     @test SWIM._route_flow(net, [5.0, 7.0], [false, false], [0.0, 0.0],
                            Vector{Float64}[]) == [5.0, 7.0]
 end
+
+@testset "_route_flow: flow-path culvert endpoint (capped by passing flow)" begin
+    # path p1 (3 cells, exits domain); a culvert inlet sits at cell position 2 and
+    # delivers into trap t1.  Path endpoints use head = D, not submerged.
+    pcells = [c(1,1), c(1,2), c(1,3)]
+    cv  = DynCulvert(pcells[2], c(5,5), 0.5, 0.6, 0.5, 1.0, 1.7)        # D = 1
+    p1  = DynFlowPath(pcells, 0, [(1, 2)], Tuple{Int,Int}[], Tuple{Int,Int}[])
+    t1  = DynTrap(101, 0, Int[], [1])               # trap hosts the culvert outlet
+    net = DynNetwork([p1], [t1], [cv])
+    ts  = mock_ts(zeros(6, 6))                       # all inverts at 0
+    plan = SWIM._build_culvert_plan(net, ts)
+    cellinfil = [[0.0, 0.0, 0.0]]                    # no path infiltration
+
+    # capacity at the path endpoint (inlet head = D, outlet dry)
+    Q = culvert_rate(cv, ts; inlet_submerged = false, inlet_head = 1.0,
+                     outlet_submerged = false, outlet_head = 0.0)
+    @test Q > 0
+    rf(F) = SWIM._route_flow(net, [0.0], [false], [0.0], cellinfil;
+                             path_inflow = [F], cvplan = plan, trap_level = [0.0])
+
+    # plenty of flow -> culvert abstracts its full capacity into the trap
+    @test rf(10.0)[1] ≈ Q rtol = 1e-12
+    # little flow -> abstraction is capped at the passing flow (mass-conserving)
+    @test rf(0.3 * Q)[1] ≈ 0.3 * Q rtol = 1e-12
+end
