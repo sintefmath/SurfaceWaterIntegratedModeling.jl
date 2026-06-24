@@ -352,6 +352,65 @@ function _route_flow(net::DynNetwork,
                        cvplan, trap_level, path_events)
 end
 
+# Flow delivered at the end of a path: the head flow travels the path losing per-
+# segment infiltration, tributaries add their delivered output at their junctions,
+# and culvert inlets/outlets abstract/add at their cell positions.  `tribs` is the
+# sorted `(junction, tributary)` list (culvert-free fast path); `events` is the
+# precomputed `(pos, kind, idx)` stream (culvert-aware path) or `nothing`.  Mutates
+# `culvert_actual` to record what each culvert inlet on this path drew.
+function _path_delivered!(prefix, head_flow, tribs, events,
+                          trib_output, culvert_actual, cvplan, net, trap_level)
+    current  = head_flow
+    prev_pfx = 0.0
+    if cvplan === nothing
+        for (junc, m) in tribs
+            current  = max(current - (prefix[junc] - prev_pfx), 0.0)
+            current += trib_output[m]
+            prev_pfx = prefix[junc]
+        end
+    else
+        for (pos, kind, idx) in events
+            current = max(current - (prefix[pos] - prev_pfx), 0.0)
+            if kind === :trib
+                current += trib_output[idx]
+            elseif kind === :cvout
+                current += culvert_actual[idx]                # deliver
+            else                                              # :cvin
+                a = min(_culvert_flow(cvplan, net, idx, trap_level), current)
+                culvert_actual[idx] = a                       # drawn == delivered
+                current -= a
+            end
+            prev_pfx = prefix[pos]
+        end
+    end
+    return max(current - (prefix[end] - prev_pfx), 0.0)
+end
+
+# Trap node: apply the culvert flows touching this trap (deliver what culverts
+# routed in drew; drain what culverts draining it carry), then, if it is full,
+# spill its surplus into its spill path.  Mutates `trap_inflow`, `path_flow`, and
+# `culvert_actual`.
+function _route_trap_node!(i, net, trap_inflow, path_flow, footprint_infil,
+                           spilling, cvplan, trap_level, culvert_actual)
+    if cvplan !== nothing
+        trap = net.traps[i]
+        for ci in trap.culvert_outlets                # deliver (source drew earlier)
+            trap_inflow[i] += culvert_actual[ci]
+        end
+        for ci in trap.culvert_inlets                 # drain (delivered at its outlet)
+            q = _culvert_flow(cvplan, net, ci, trap_level)
+            culvert_actual[ci] = q
+            trap_inflow[i]    -= q
+        end
+    end
+    if spilling[i]
+        spill = max(trap_inflow[i] - footprint_infil[i], 0.0)
+        sp = net.traps[i].spill_path
+        sp > 0 && (path_flow[sp] += spill)            # sp == 0: spills out of domain
+    end
+    return nothing
+end
+
 # Core router with all static routing data pre-supplied.  Tributaries are handled
 # via segmented routing: flow is charged infiltration only over the path cells it
 # actually travels through, so a tributary joining at junction j is not charged
@@ -385,69 +444,20 @@ function _route_flow(net::DynNetwork,
 
     for node in order
         if node <= np                               # a flow path
-            p        = node
-            prefix   = path_infil_prefix[p]
-            fp       = net.flow_paths[p]
-            current  = path_flow[p]
-            prev_pfx = 0.0
-
-            if cvplan === nothing
-                # Segmented routing over tributary junctions only: each segment loses
-                # its infiltration, then the tributary's delivered flow is added.
-                for (junc, m) in sorted_trib_info[p]
-                    current  = max(current - (prefix[junc] - prev_pfx), 0.0)
-                    current += trib_output[m]
-                    prev_pfx = prefix[junc]
-                end
-            else
-                # Walk the precomputed in-order stream of tributary junctions and
-                # culvert inlet/outlet positions along the path.  A culvert inlet
-                # abstracts up to the flow passing its cell (mass cap); a culvert
-                # outlet adds the amount its (earlier-routed) source actually drew.
-                for (pos, kind, idx) in path_events[p]
-                    current = max(current - (prefix[pos] - prev_pfx), 0.0)
-                    if kind === :trib
-                        current += trib_output[idx]
-                    elseif kind === :cvout
-                        current += culvert_actual[idx]            # deliver
-                    else                                          # :cvin
-                        a = min(_culvert_flow(cvplan, net, idx, trap_level), current)
-                        culvert_actual[idx] = a                   # drawn == delivered
-                        current -= a
-                    end
-                    prev_pfx = prefix[pos]
-                end
-            end
-
-            delivered = max(current - (prefix[end] - prev_pfx), 0.0)
-            tt = fp.target_trap
+            p      = node
+            events = cvplan === nothing ? nothing : path_events[p]
+            delivered = _path_delivered!(path_infil_prefix[p], path_flow[p],
+                                         sorted_trib_info[p], events,
+                                         trib_output, culvert_actual, cvplan, net, trap_level)
+            tt = net.flow_paths[p].target_trap
             if tt > 0
                 trap_inflow[tt] += delivered        # into the downstream trap
             elseif merge_target[p] > 0
-                trib_output[p] = delivered          # buffer for main path's segmented routing
+                trib_output[p] = delivered          # buffer for the main path's routing
             end                                      # else: exits the domain
         else                                        # a trap
-            i = node - np
-            if cvplan !== nothing
-                trap = net.traps[i]
-                # culvert outlets ending in this trap: deliver what their (already-
-                # routed, earlier in topological order) source drew.
-                for ci in trap.culvert_outlets
-                    trap_inflow[i] += culvert_actual[ci]
-                end
-                # culvert inlets draining this trap (the matching delivery happens at
-                # the outlet's owner -- trap or flow path -- later in topological order)
-                for ci in trap.culvert_inlets
-                    q = _culvert_flow(cvplan, net, ci, trap_level)
-                    culvert_actual[ci] = q
-                    trap_inflow[i]    -= q              # drawn out of this trap
-                end
-            end
-            if spilling[i]
-                spill = max(trap_inflow[i] - footprint_infil[i], 0.0)
-                sp = net.traps[i].spill_path
-                sp > 0 && (path_flow[sp] += spill)  # sp == 0: spills out of domain
-            end
+            _route_trap_node!(node - np, net, trap_inflow, path_flow, footprint_infil,
+                              spilling, cvplan, trap_level, culvert_actual)
         end
     end
     return trap_inflow
