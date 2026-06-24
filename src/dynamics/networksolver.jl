@@ -272,6 +272,23 @@ function _add_culvert_edges!(g, net::DynNetwork, np::Int)
     return g
 end
 
+# Per-path in-order event template for the culvert-aware router: tributary junctions
+# and culvert inlet/outlet positions merged and sorted by cell position, as
+# `(position, :trib|:cvin|:cvout, tributary-or-culvert index)`.  The list is static
+# for a solve (only the flow values it drives are dynamic), so it is built once and
+# reused every rate-function call instead of being rebuilt and re-sorted each time.
+function _path_event_templates(net::DynNetwork)
+    return [begin
+                ev = Tuple{Int,Symbol,Int}[]
+                for (m, j)   in fp.merges;          push!(ev, (j,   :trib,  m));  end
+                for (ci, pos) in fp.culvert_inlets;  push!(ev, (pos, :cvin,  ci)); end
+                for (ci, pos) in fp.culvert_outlets; push!(ev, (pos, :cvout, ci)); end
+                sort!(ev; by = first)
+                ev
+            end
+            for fp in net.flow_paths]
+end
+
 # Volumetric flow through culvert `ci` given the current trap water levels.  A flow-
 # path endpoint is treated as not-submerged with head fixed at the diameter (so its
 # inlet-control capacity is the weir capacity at head D); a trap endpoint uses its
@@ -329,9 +346,10 @@ function _route_flow(net::DynNetwork,
     order, _      = _network_order(net)
     prefix        = [_infil_prefix(ci) for ci in path_cell_infil]
     sorted_tribs  = [sort([(j, m) for (m, j) in fp.merges]) for fp in net.flow_paths]
+    path_events   = cvplan === nothing ? nothing : _path_event_templates(net)
     return _route_flow(net, external_inflow, spilling, footprint_infil,
                        prefix, path_inflow, sorted_tribs, order, _merge_targets(net),
-                       cvplan, trap_level)
+                       cvplan, trap_level, path_events)
 end
 
 # Core router with all static routing data pre-supplied.  Tributaries are handled
@@ -350,7 +368,8 @@ function _route_flow(net::DynNetwork,
                      order::AbstractVector{<:Integer},
                      merge_target::AbstractVector{<:Integer},
                      cvplan = nothing,
-                     trap_level = nothing)
+                     trap_level = nothing,
+                     path_events = nothing)
 
     np = length(net.flow_paths)
     nt = length(net.traps)
@@ -381,16 +400,11 @@ function _route_flow(net::DynNetwork,
                     prev_pfx = prefix[junc]
                 end
             else
-                # Merge tributary junctions and culvert inlet/outlet positions into one
-                # in-order stream along the path.  A culvert inlet abstracts up to the
-                # flow passing its cell (mass cap); a culvert outlet adds the amount its
-                # (earlier-routed, by topological order) source actually drew.
-                events = Tuple{Int,Symbol,Int}[]
-                for (junc, m) in sorted_trib_info[p]; push!(events, (junc, :trib,  m));  end
-                for (ci, pos) in fp.culvert_inlets;   push!(events, (pos,  :cvin,  ci)); end
-                for (ci, pos) in fp.culvert_outlets;  push!(events, (pos,  :cvout, ci)); end
-                sort!(events; by = first)
-                for (pos, kind, idx) in events
+                # Walk the precomputed in-order stream of tributary junctions and
+                # culvert inlet/outlet positions along the path.  A culvert inlet
+                # abstracts up to the flow passing its cell (mass cap); a culvert
+                # outlet adds the amount its (earlier-routed) source actually drew.
+                for (pos, kind, idx) in path_events[p]
                     current = max(current - (prefix[pos] - prev_pfx), 0.0)
                     if kind === :trib
                         current += trib_output[idx]
@@ -521,6 +535,7 @@ struct DynNetworkRateParams
     order::Vector{Int}
     merge_target::Vector{Int}
     cvplan::Union{CulvertPlan,Nothing}   # culvert routing data, or nothing if none
+    path_events::Union{Vector{Vector{Tuple{Int,Symbol,Int}}},Nothing}  # per-path event templates
 end
 
 # ----------------------------------------------------------------------------
@@ -553,6 +568,7 @@ function _build_rate_params(tstruct::TrapStructure,
     prefix          = [_infil_prefix(ci) for ci in cell_infil]
     sorted_tribs    = [sort([(j, m) for (m, j) in fp.merges]) for fp in net.flow_paths]
     cvplan = isempty(net.culverts) ? nothing : _build_culvert_plan(net, tstruct)
+    events = cvplan === nothing ? nothing : _path_event_templates(net)
     return DynNetworkRateParams(net,
                                 _build_trap_geometry(tstruct, net, infiltration; zvt=zvt),
                                 Float64.(external_inflow),
@@ -562,7 +578,8 @@ function _build_rate_params(tstruct::TrapStructure,
                                 sorted_tribs,
                                 order,
                                 _merge_targets(net),
-                                cvplan)
+                                cvplan,
+                                events)
 end
 
 # ----------------------------------------------------------------------------
@@ -601,7 +618,8 @@ function _routed_inflow(V, p::DynNetworkRateParams)
                  [_surface_level(geom[i], V[i]) for i in 1:nt]
     inflow = _route_flow(p.net, p.external_inflow, spilling,
                          p.footprint_infil, p.path_infil_prefix, p.external_path_inflow,
-                         p.sorted_trib_info, p.order, p.merge_target, p.cvplan, trap_level)
+                         p.sorted_trib_info, p.order, p.merge_target,
+                         p.cvplan, trap_level, p.path_events)
     return inflow, spilling
 end
 
