@@ -873,9 +873,10 @@ function solveDynNetwork(tstruct::TrapStructure,
         return (time = 0.0, trap = net.traps[worst].trap_ix, kind = :unspill, state = final)
     end
 
-    # Traps that evolve: those below their capacity.  Full traps with non-negative net
-    # (handled above) are steady (dV ~ 0) and would trigger :fill spuriously.
-    evolving = [i for i in 1:nt if V0[i] < p.geom[i].capacity]
+    # Traps that evolve: those at least abstol below their capacity.  The abstol guard
+    # prevents ODE floating-point drift on full traps (where dV ≈ 0 but not exactly 0)
+    # from making them re-enter evolving and spin the callback at dt ≈ 0.
+    evolving = [i for i in 1:nt if V0[i] + abstol < p.geom[i].capacity]
 
     # Nothing evolves, or everything that could is already at rest: steady state.
     isempty(evolving) && return (time = Inf, trap = 0, kind = :none, state = V0)

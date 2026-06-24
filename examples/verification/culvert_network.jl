@@ -41,7 +41,10 @@ const SWIM = SurfaceWaterIntegratedModeling
 const _START_CELL = CartesianIndex(7, 119)   # :long scenario start
 const _CV_INLET   = CartesianIndex(7, 119)   # culvert inlet  (trap 233)
 const _CV_OUTLET  = CartesianIndex(199, 4)   # culvert outlet (trap 13)
-const _CV_RADIUS  = 0.3                      # barrel radius, metres (concrete pipe)
+const _CV_RADIUS  = 0.5                      # barrel radius, metres
+# Trap 233 is only ~0.1 m deep, so its head at full gives Q_culvert ≈ 0.055 m³/s.
+# inflow=0.02 per trap gives Q_culvert/inflow ≈ 2.5 at equilibrium, producing a
+# clear plateau of the inlet trap at ~50 % of its capacity.
 
 function _mini_trapstructure()
     grid = loadgrid(joinpath(datapath_testdata(), "data", "small", "mini.txt"))
@@ -87,7 +90,7 @@ Build the :long scenario on mini.txt with and without a $(2*_CV_RADIUS) m-diamet
 culvert from the head-of-chain trap to a trap ~80 % of the way downstream, run
 both fill cascades from empty, and plot the fill fractions side by side.
 """
-function verify_culvert_network(; inflow=1.0, infiltration=0.0)
+function verify_culvert_network(; inflow=0.02, infiltration=0.0)
     ts      = _mini_trapstructure()
     allfull = collect(1:SWIM.numtraps(ts))
 

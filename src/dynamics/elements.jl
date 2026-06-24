@@ -218,8 +218,8 @@ function _expand_with_culverts(tstruct, subnets, culverts, full_traps)
             ci in incl_set && continue
             if cv.inlet in occ || cv.outlet in occ
                 push!(included, ci); push!(incl_set, ci); changed = true
-                push!(subnets, _subnetwork(tstruct, cv.inlet,  full_traps))
-                push!(subnets, _subnetwork(tstruct, cv.outlet, full_traps))
+                cv.inlet  ∉ occ && push!(subnets, _subnetwork(tstruct, cv.inlet,  full_traps))
+                cv.outlet ∉ occ && push!(subnets, _subnetwork(tstruct, cv.outlet, full_traps))
             end
         end
     end
