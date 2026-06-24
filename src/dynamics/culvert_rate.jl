@@ -1,49 +1,53 @@
 # Culvert flow-rate hydraulics.
 #
-# Computes the volumetric capacity (m^3/s, SI) of a `DynCulvert` given the water
-# level at each end.  The model is a deliberately simplified version of the
-# FHWA HDS-5 procedure (see agent/reports/culvert_hydraulics_reference.md and the
-# "Clarifications" heading in agent/prompts/culvert_rate_implementation.org):
+# Computes the volumetric flow (m^3/s, SI) through a `DynCulvert` given the water
+# level at each end.  Simplified FHWA HDS-5 model (see
+# agent/reports/culvert_hydraulics_reference.md and the "Clarifications" heading in
+# agent/prompts/culvert_rate_implementation.org):
 #
-#   * Inlet control: a hard switch on inlet submergence -- weir below, orifice
-#     once submerged.  No weir<->orifice transition blend.
-#   * Outlet control: full-barrel pressure flow.  When the downstream end is not
-#     submerged a free-outfall effective tailwater is assumed.
+#   * Inlet control: a hard switch on the upstream end's submergence -- weir below,
+#     orifice once submerged.  No weir<->orifice transition blend.
+#   * Outlet control: full-barrel pressure flow.  The tailwater is the downstream
+#     pool surface when that end holds water, or a free-outfall critical-depth
+#     tailwater when it is dry.
 #   * The governing (more restrictive, i.e. smaller) of the two rates is returned.
 #
-# A culvert is hydraulically symmetric, so reverse flow (downstream pool higher
-# than upstream) is the same model with the two ends swapped and the sign flipped
-# -- see `_directional_capacity` and the `allow_reverse` option below.
+# Flow runs from the higher water surface to the lower.  A culvert is hydraulically
+# symmetric, so reverse flow (outlet pool higher than inlet) is the same model with
+# the ends swapped, returned as a negative rate -- enabled by `allow_reverse`.
 #
-# All heads are measured as the water level above the inlet/outlet cell elevation
-# (the invert) -- no diameter/centroid correction.
+# All heads are water level above the inlet/outlet cell elevation (the invert).
 
 export culvert_rate
 
-# Non-negative capacity for a single flow direction, from the `up`(stream) end to
-# the `down`(stream) end.  Each end is given as (submerged?, head above invert,
-# invert elevation).  The entrance-loss coefficient `cv.Ke` is used symmetrically
-# (same value whichever end is the entrance).
-function _directional_capacity(cv::DynCulvert, g, D, A,
-                               up_submerged::Bool,   up_head,   up_z,
-                               down_submerged::Bool, down_head, down_z)
-    # --- inlet control at the upstream end ------------------------------------
-    # Hard switch on submergence (no transition blend); weir width = D.
+# Non-negative capacity for a single flow direction, from the upstream end to the
+# downstream end.  Each end is (submerged?, head above invert, invert elevation),
+# but only the *upstream* submergence matters -- it selects weir vs orifice at the
+# entrance.  The entrance-loss coefficient cv.Ke is used symmetrically.
+function _directional_capacity(cv::DynCulvert,
+                               up_submerged::Bool, up_head, up_z,
+                               down_head, down_z)
+    g = 9.81
+    D = 2 * cv.r              # barrel diameter
+    A = pi * cv.r^2           # full cross-sectional area
+
+    # --- inlet control at the upstream end: weir below submergence, orifice above
+    # (hard switch on submergence; no transition blend; weir width = D).
     Q_inlet = up_submerged ?
         cv.Cd * A * sqrt(2g * up_head) :    # orifice (submerged entrance)
         cv.Cw * D * up_head^1.5             # weir    (free entrance)
 
     # --- outlet control (full-barrel pressure flow) ---------------------------
     up_elev = up_z + up_head                # upstream water-surface elevation
-    if down_submerged
-        down_elev = down_z + down_head      # tailwater surface elevation
+    if down_head > 0
+        down_elev = down_z + down_head      # real downstream pool surface
     else
-        # Free outfall: no real tailwater, so use an effective one from the
-        # critical depth at the downstream end.
-        # @@@ Approximate: yc uses the rough HDS-5 §5 formula and is evaluated
-        #     one-shot at Q_inlet (no Q<->yc iteration).  Acceptable because this
-        #     branch almost never governs; revisit with the exact iterative
-        #     circular solution if more free-outfall accuracy is ever needed.
+        # Downstream end is dry -> free outfall; effective tailwater from the
+        # critical depth at the outfall.
+        # @@@ Approximate: yc uses the rough HDS-5 §5 formula, evaluated one-shot
+        #     at Q_inlet (no Q<->yc iteration).  Acceptable because this branch
+        #     rarely governs; use the exact iterative circular solution if more
+        #     free-outfall accuracy is ever needed.
         yc = D * 0.325 * (Q_inlet / D^2.5)^(2/3) + 0.083 * D
         down_elev = down_z + max(yc, (yc + D) / 2)
     end
@@ -61,20 +65,18 @@ end
                  outlet_submerged, outlet_head,
                  allow_reverse = false) -> Float64
 
-Volumetric flow through culvert `cv` in m^3/s (SI), given the submergence state
-and water head (metres above the cell invert) at each end.  `tstruct` supplies
-the inlet/outlet invert elevations used by the outlet-control balance.
+Volumetric flow through culvert `cv` in m^3/s (SI), given the submergence state and
+water head (metres above the cell invert) at each end.  `tstruct` supplies the
+inlet/outlet invert elevations.
 
 A positive result is flow from the inlet to the outlet.  By default
-(`allow_reverse = false`) the culvert is treated as downhill-only: if the outlet
-pool stands higher than the inlet pool the culvert is "drowned" and `0` is
-returned.  With `allow_reverse = true` the reverse direction is computed by
-swapping the two ends (the model is symmetric, with `Ke` reused symmetrically)
-and returned as a **negative** rate.
+(`allow_reverse = false`) the culvert is downhill-only: if the outlet pool stands
+higher than the inlet pool the forward driving head is zero and `0` is returned
+("drowned").  With `allow_reverse = true`, when the outlet surface is the higher of
+the two the flow reverses and a **negative** (outlet->inlet) rate is returned.
 
-Within each direction the returned rate is `min(Q_inlet_control, Q_outlet_control)`
--- the bottleneck that physically governs.  See the module header for the
-modelling assumptions.
+In the chosen direction the rate is `min(Q_inlet_control, Q_outlet_control)` -- the
+bottleneck that physically governs.  See the module header for the assumptions.
 
 !!! note
     @@@ The network solver does not yet consume a negative (reverse) rate -- the
@@ -85,25 +87,18 @@ function culvert_rate(cv::DynCulvert, tstruct;
                       inlet_submerged::Bool,  inlet_head::Real,
                       outlet_submerged::Bool, outlet_head::Real,
                       allow_reverse::Bool = false)
-    g = 9.81
-    D = 2 * cv.r              # barrel diameter
-    A = pi * cv.r^2           # full cross-sectional area
-
     hi = max(float(inlet_head),  0.0)   # head above inlet invert
     ho = max(float(outlet_head), 0.0)   # head above outlet invert
     z_in  = tstruct.topography[cv.inlet]
     z_out = tstruct.topography[cv.outlet]
 
-    # Forward direction: inlet (upstream) -> outlet (downstream).
-    Q_fwd = _directional_capacity(cv, g, D, A, inlet_submerged, hi, z_in,
-                                                outlet_submerged, ho, z_out)
-    allow_reverse || return Q_fwd       # downhill-only: never reverse
-
-    # Reverse direction: outlet (upstream) -> inlet (downstream).  At most one of
-    # the two directions has a positive driving head (the other's outlet-control
-    # head clamps to 0), so the signed difference is the net flow: + inlet->outlet,
-    # - outlet->inlet, and it passes continuously through 0 at the crossover.
-    Q_rev = _directional_capacity(cv, g, D, A, outlet_submerged, ho, z_out,
-                                                inlet_submerged, hi, z_in)
-    return Q_fwd - Q_rev
+    # Flow runs from the higher water surface to the lower one.  The downhill-only
+    # default always treats the inlet as upstream; if the outlet pool is actually
+    # higher the forward dH clamps to 0 and the culvert reads as drowned.  With
+    # allow_reverse, an outlet surface above the inlet's genuinely reverses the
+    # flow: compute it directly in the outlet->inlet direction and negate it.
+    if allow_reverse && (z_out + ho) > (z_in + hi)
+        return -_directional_capacity(cv, outlet_submerged, ho, z_out, hi, z_in)
+    end
+    return _directional_capacity(cv, inlet_submerged, hi, z_in, ho, z_out)
 end

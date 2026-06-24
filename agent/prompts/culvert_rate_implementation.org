@@ -35,10 +35,14 @@ These decisions were agreed with the user and govern the implementation in
 
 3. *Outlet control* is full-barrel pressure flow:
    ~Q = A * sqrt(2 g * dH) / sqrt(1 + Ke + Kf)~, where ~dH~ is the difference
-   between the headwater and tailwater surface elevations.
-   - outlet submerged     -> tailwater = outlet water surface.
-   - outlet not submerged -> *free outfall*: effective tailwater
-     ~TW = max(yc, (yc + D)/2)~ above the outlet invert.
+   between the headwater and tailwater surface elevations.  The tailwater is keyed
+   on whether the downstream end holds *water*, not on its submergence flag:
+   - downstream head > 0 -> tailwater = downstream pool surface (its real water
+     level), even when that end is only partially full (weir regime).
+   - downstream head = 0 (genuinely dry) -> *free outfall*: effective tailwater
+     ~TW = max(yc, (yc + D)/2)~ above the downstream invert.
+   (Earlier this keyed on the submergence flag, which double-counted in the
+   reverse-flow case when neither end was submerged -- see point 9.)
 
 4. *Free-outfall simplification.*  Critical depth ~yc~ is evaluated *one-shot*
    at the inlet-control rate (no Q<->yc iteration); this branch almost never
@@ -65,9 +69,12 @@ These decisions were agreed with the user and govern the implementation in
    retained for tests.
 
 9. *Reverse flow.*  ~culvert_rate~ takes ~allow_reverse=false~ by default
-   (downhill-only: a drowned culvert returns 0).  With ~allow_reverse=true~ the
-   reverse direction is computed by swapping the two ends (the model is symmetric;
-   ~Ke~ is reused symmetrically) and returned as a *negative* rate; the signed
-   result passes continuously through 0 at the crossover.  The solver/routing
-   layer does not yet consume negative rates -- flagged with ~@@@~ in the code.
+   (downhill-only: a drowned culvert returns 0).  Flow runs from the higher water
+   surface to the lower, so with ~allow_reverse=true~ the direction is chosen by
+   comparing ~z+h~ on the two sides: if the outlet surface is higher, the flow is
+   computed *directly* in the outlet->inlet direction (ends swapped; ~Ke~ reused
+   symmetrically) and returned as a *negative* rate.  (No ~Q_fwd - Q_rev~ trick --
+   that gave wrong results when neither end was submerged, since each direction's
+   free-outfall tailwater was fictitious rather than the other pool's surface.)
+   The solver/routing layer does not yet consume negative rates -- flagged ~@@@~.
 

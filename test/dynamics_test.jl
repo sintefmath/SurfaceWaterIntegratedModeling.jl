@@ -661,3 +661,33 @@ end
     @test culvert_rate(cv, flat; inlet_submerged = true, inlet_head = 3.0,
                                  outlet_submerged = true, outlet_head = 1.0) ≈ qf rtol = 1e-6
 end
+
+@testset "culvert_rate: partial-depth tailwater & reverse" begin
+    A = pi * 0.5^2
+    flat = mock_ts([0.0 0.0])
+    cv = DynCulvert(c(1, 1), c(1, 2), 0.5, 0.6, 0.5, 1.0, 1.7)   # D=1, Kf=1.0
+    # outlet-control rate for a real tailwater giving dH = 0.10 m
+    q_dH(dH) = A * sqrt(2 * 9.81 * dH) / sqrt(1 + 0.5 + 1.0)
+
+    # NEITHER end submerged, but both hold water (weir regime both ways).  The
+    # downstream pool -- not a free outfall -- sets the tailwater, so the driving
+    # head is the real surface difference (0.95 - 0.85 = 0.10), and allow_reverse
+    # must NOT change a forward-dominant result (it used to: Q_fwd - Q_rev bug).
+    nr_off = culvert_rate(cv, flat; inlet_submerged = false, inlet_head = 0.95,
+                                    outlet_submerged = false, outlet_head = 0.85)
+    nr_on  = culvert_rate(cv, flat; inlet_submerged = false, inlet_head = 0.95,
+                                    outlet_submerged = false, outlet_head = 0.85,
+                                    allow_reverse = true)
+    @test nr_off ≈ q_dH(0.10) rtol = 1e-6     # real tailwater, not free outfall
+    @test nr_on  ≈ nr_off     rtol = 1e-6     # inlet higher -> no reverse triggered
+
+    # outlet pool higher, neither submerged: downhill-only drowns (0), reverse
+    # gives the genuine outlet->inlet flow as a negative, symmetric to nr_off.
+    @test culvert_rate(cv, flat; inlet_submerged = false, inlet_head = 0.85,
+                                 outlet_submerged = false, outlet_head = 0.95) == 0.0
+    rev = culvert_rate(cv, flat; inlet_submerged = false, inlet_head = 0.85,
+                                 outlet_submerged = false, outlet_head = 0.95,
+                                 allow_reverse = true)
+    @test rev ≈ -q_dH(0.10) rtol = 1e-6
+    @test rev ≈ -nr_off     rtol = 1e-6
+end
