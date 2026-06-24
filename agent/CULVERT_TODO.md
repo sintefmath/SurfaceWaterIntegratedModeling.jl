@@ -52,30 +52,32 @@ fills SI defaults.  Settled simplifications are under "Clarifications" in
 the constructor, and the free-outfall branch (`test/dynamics_test.jl`), plus a
 visual `examples/verification/culvert_rate.jl`.  Not yet called by the solver.
 
-**Routing integration — NOT STARTED.** `networksolver.jl`/`_route_flow` still has
-no culvert handling. Plan (see conversation):
-- Precompute per-culvert routing data (inlet/outlet owner: path+cell-pos or trap;
-  inlet elevation for submersion events).
-- Handle culvert inlets/outlets inside `_route_flow`, in the unified per-path event
-  traversal (inlet = like high infiltration at its cell; outlet = like a merge at
-  its cell). **Mass conservation is paramount**: the actual flow drawn at a culvert
-  inlet (possibly capped by available flow) must equal the amount delivered at the
-  outlet — track `culvert_actual_delivered[ci]` and use only that on the outlet
-  side. See AGENTS.md (Mass conservation).
-- Trap-inlet culverts drain the trap; trap-outlet culverts add to it — all computed
-  inside `_route_flow` using topological order (inlet processed before outlet).
-- Event detection: a trap-inlet culvert's submersion status flips (water level
-  crosses the inlet elevation) → termination event (`:culvert_inlet_change`).
-  Outlet submersion does NOT trigger an event (only affects rate).
-- **Solver ordering must respect culvert direction.** Construction now does this:
-  `_topological_order` (in `_build_component`) adds an inlet-owner→outlet-owner
-  edge per culvert, so each built network is ordered inlet-before-outlet and an
-  uphill/reverse culvert (which would make the network cyclic) is rejected at
-  construction. But the solver re-derives its own order via `_network_order`
-  (`networksolver.jl`), which still ignores culverts — when routing lands it must
-  add the same culvert edges (or trust the construction order) so `_route_flow`
-  processes each culvert's inlet before its outlet. Uphill/reverse culverts stay
-  deferred (currently they fail loud at construction).
+**Routing integration — IN PROGRESS.**
+
+*Increment 1 — trap↔trap culverts — DONE.* `_route_flow` now routes culverts whose
+both endpoints own traps: per call it evaluates `culvert_rate` from the two traps'
+live water levels (`CulvertPlan` precomputes owners/diameters/topography handle;
+`dynNetworkRateFunction!` passes `trap_level = water_level(geom, V)`), then **drains
+the inlet trap and delivers the same amount to the outlet trap** (`trap_inflow[in]
+-= q; trap_inflow[out] += q`), so `dV = inflow − loss − spill` stays mass-exact.
+Downhill-only (`allow_reverse=false`); a would-be reverse yields 0.  `_network_order`
+now adds the inlet→outlet culvert edge (the solver-side ordering fix).  Mass-
+conservation unit test on a two-trap network; end-to-end solve verified on mini.txt.
+
+*Remaining:*
+- **Flow-path endpoints (increment 2).** A culvert inlet/outlet on a flow path:
+  inlet = abstract at its cell position, **capped by the flow passing there**;
+  outlet = add the delivered amount at its position (like a `merges` junction).
+  Path endpoints are treated as not-submerged with head = diameter `D` (so capacity
+  is `weir(D)`).  Needs the unified per-path traversal (tributaries + culvert
+  inlets/outlets merged by cell position).  Currently such culverts carry 0.
+- **Unspill event for culvert-drained full traps (increment 3).** A full trap drained
+  by a culvert until its net crosses zero should raise `:unspill`, but that condition
+  is still dormant (`condition` outputs `1.0`).  The `:unspill` scaffold should also
+  be enabled for traps with culvert inlets/outlets (state-dependent net).  No new
+  *submersion* event is needed (settled: events are for topology changes only; a
+  culvert turning on/off or switching weir↔orifice doesn't change connectivity).
+- Uphill/reverse culverts stay deferred (rejected at construction; reverse → 0).
 
 ## Design decisions already settled (with the user)
 

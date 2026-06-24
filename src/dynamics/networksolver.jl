@@ -193,6 +193,7 @@ function _network_order(net::DynNetwork)
     for (t, trap) in enumerate(net.traps)
         trap.spill_path > 0 && Graphs.add_edge!(g, np + t, trap.spill_path)
     end
+    _add_culvert_edges!(g, net, np)        # inlet owner before outlet owner
 
     return Graphs.topological_sort_by_dfs(g), np
 end
@@ -208,6 +209,86 @@ function _merge_targets(net::DynNetwork)
         merge_target[m] = a
     end
     return merge_target
+end
+
+# ----------------------------------------------------------------------------
+# Culvert routing data and helpers.
+#
+# A culvert connects an inlet endpoint to an outlet endpoint, each owned by a flow
+# path or a trap (resolved at construction; see the DynFlowPath/DynTrap culvert
+# lists).  `CulvertPlan` precomputes, per culvert, which kind of element owns each
+# endpoint and its network-local index, plus the barrel diameter and a handle on the
+# topography for the invert-elevation lookups used by `culvert_rate`.
+
+struct CulvertPlan
+    topo::AbstractMatrix          # tstruct.topography (invert elevations)
+    diam::Vector{Float64}         # barrel diameter (2r) per culvert
+    inlet_is_path::BitVector
+    inlet_owner::Vector{Int}      # local path or trap index owning the inlet
+    outlet_is_path::BitVector
+    outlet_owner::Vector{Int}     # local path or trap index owning the outlet
+end
+
+function _build_culvert_plan(net::DynNetwork, tstruct)
+    nc   = length(net.culverts)
+    plan = CulvertPlan(tstruct.topography, [2 * cv.r for cv in net.culverts],
+                       falses(nc), zeros(Int, nc), falses(nc), zeros(Int, nc))
+    for (p, path) in enumerate(net.flow_paths)
+        for (ci, _) in path.culvert_inlets;  plan.inlet_is_path[ci]  = true; plan.inlet_owner[ci]  = p; end
+        for (ci, _) in path.culvert_outlets; plan.outlet_is_path[ci] = true; plan.outlet_owner[ci] = p; end
+    end
+    for (t, trap) in enumerate(net.traps)
+        for ci in trap.culvert_inlets;  plan.inlet_owner[ci]  = t; end   # is_path stays false
+        for ci in trap.culvert_outlets; plan.outlet_owner[ci] = t; end
+    end
+    return plan
+end
+
+# Add an inlet-owner -> outlet-owner edge per culvert to the routing-order graph, so
+# the inlet is routed before the outlet.  Construction already verified the network
+# is acyclic with these edges (see `_topological_order`).
+function _add_culvert_edges!(g, net::DynNetwork, np::Int)
+    inlet_node  = zeros(Int, length(net.culverts))
+    outlet_node = zeros(Int, length(net.culverts))
+    for (p, path) in enumerate(net.flow_paths)
+        for (ci, _) in path.culvert_inlets;  inlet_node[ci]  = p; end
+        for (ci, _) in path.culvert_outlets; outlet_node[ci] = p; end
+    end
+    for (t, trap) in enumerate(net.traps)
+        for ci in trap.culvert_inlets;  inlet_node[ci]  = np + t; end
+        for ci in trap.culvert_outlets; outlet_node[ci] = np + t; end
+    end
+    for ci in eachindex(net.culverts)
+        (inlet_node[ci] > 0 && outlet_node[ci] > 0) &&
+            Graphs.add_edge!(g, inlet_node[ci], outlet_node[ci])
+    end
+    return g
+end
+
+# Volumetric flow through culvert `ci` given the current trap water levels.  A flow-
+# path endpoint is treated as not-submerged with head fixed at the diameter (so its
+# inlet-control capacity is the weir capacity at head D); a trap endpoint uses its
+# live water level above the culvert's invert.  Downhill-only (no reverse flow).
+function _culvert_flow(plan::CulvertPlan, net::DynNetwork, ci::Int,
+                       trap_level::AbstractVector{<:Real})
+    cv = net.culverts[ci]
+    D  = plan.diam[ci]
+    if plan.inlet_is_path[ci]
+        ih, isub = D, false
+    else
+        ih   = max(trap_level[plan.inlet_owner[ci]] - plan.topo[cv.inlet], 0.0)
+        isub = ih >= D
+    end
+    if plan.outlet_is_path[ci]
+        oh, osub = D, false
+    else
+        oh   = max(trap_level[plan.outlet_owner[ci]] - plan.topo[cv.outlet], 0.0)
+        osub = oh >= D
+    end
+    return culvert_rate(cv, (; topography = plan.topo);
+                        inlet_submerged = isub,  inlet_head  = ih,
+                        outlet_submerged = osub, outlet_head = oh,
+                        allow_reverse = false)
 end
 
 # ----------------------------------------------------------------------------
@@ -236,12 +317,14 @@ function _route_flow(net::DynNetwork,
                      spilling::AbstractVector{Bool},
                      footprint_infil::AbstractVector{<:Real},
                      path_cell_infil::AbstractVector{<:AbstractVector{<:Real}};
-                     path_inflow = zeros(length(net.flow_paths)))
+                     path_inflow = zeros(length(net.flow_paths)),
+                     cvplan = nothing, trap_level = nothing)
     order, _      = _network_order(net)
     prefix        = [_infil_prefix(ci) for ci in path_cell_infil]
     sorted_tribs  = [sort([(j, m) for (m, j) in fp.merges]) for fp in net.flow_paths]
     return _route_flow(net, external_inflow, spilling, footprint_infil,
-                       prefix, path_inflow, sorted_tribs, order, _merge_targets(net))
+                       prefix, path_inflow, sorted_tribs, order, _merge_targets(net),
+                       cvplan, trap_level)
 end
 
 # Core router with all static routing data pre-supplied.  Tributaries are handled
@@ -258,7 +341,9 @@ function _route_flow(net::DynNetwork,
                      external_path_inflow::AbstractVector{<:Real},
                      sorted_trib_info::AbstractVector{<:AbstractVector},
                      order::AbstractVector{<:Integer},
-                     merge_target::AbstractVector{<:Integer})
+                     merge_target::AbstractVector{<:Integer},
+                     cvplan = nothing,
+                     trap_level = nothing)
 
     np = length(net.flow_paths)
     nt = length(net.traps)
@@ -269,6 +354,8 @@ function _route_flow(net::DynNetwork,
     trap_inflow = Float64.(external_inflow)        # accumulator, seeded with external trap inflow
     path_flow   = Float64.(external_path_inflow)   # head inflow per path (trap spills + path_inflow)
     trib_output = zeros(Float64, np)               # delivered output of each tributary path
+    # actual flow each culvert carries (drawn at inlet == delivered at outlet)
+    culvert_actual = cvplan === nothing ? Float64[] : zeros(Float64, length(net.culverts))
 
     for node in order
         if node <= np                               # a flow path
@@ -295,6 +382,23 @@ function _route_flow(net::DynNetwork,
             end                                      # else: exits the domain
         else                                        # a trap
             i = node - np
+            if cvplan !== nothing
+                trap = net.traps[i]
+                # culvert outlets ending in this trap: deliver what their (already-
+                # routed, earlier in topological order) source drew.
+                for ci in trap.culvert_outlets
+                    trap_inflow[i] += culvert_actual[ci]
+                end
+                # culvert inlets draining this trap.  Trap->trap culverts are handled
+                # here; an outlet on a flow path is deferred and carries 0 for now.
+                for ci in trap.culvert_inlets
+                    if !cvplan.outlet_is_path[ci]
+                        q = _culvert_flow(cvplan, net, ci, trap_level)
+                        culvert_actual[ci] = q
+                        trap_inflow[i]    -= q          # drawn out of this trap
+                    end
+                end
+            end
             if spilling[i]
                 spill = max(trap_inflow[i] - footprint_infil[i], 0.0)
                 sp = net.traps[i].spill_path
@@ -386,6 +490,7 @@ struct DynNetworkRateParams
     sorted_trib_info::Vector{Vector{Tuple{Int,Int}}}
     order::Vector{Int}
     merge_target::Vector{Int}
+    cvplan::Union{CulvertPlan,Nothing}   # culvert routing data, or nothing if none
 end
 
 # ----------------------------------------------------------------------------
@@ -417,6 +522,7 @@ function _build_rate_params(tstruct::TrapStructure,
     cell_infil      = _path_cell_infiltration(net, infiltration)
     prefix          = [_infil_prefix(ci) for ci in cell_infil]
     sorted_tribs    = [sort([(j, m) for (m, j) in fp.merges]) for fp in net.flow_paths]
+    cvplan = isempty(net.culverts) ? nothing : _build_culvert_plan(net, tstruct)
     return DynNetworkRateParams(net,
                                 _build_trap_geometry(tstruct, net, infiltration; zvt=zvt),
                                 Float64.(external_inflow),
@@ -425,7 +531,8 @@ function _build_rate_params(tstruct::TrapStructure,
                                 prefix,
                                 sorted_tribs,
                                 order,
-                                _merge_targets(net))
+                                _merge_targets(net),
+                                cvplan)
 end
 
 # ----------------------------------------------------------------------------
@@ -460,9 +567,12 @@ function dynNetworkRateFunction!(dV, V, p::DynNetworkRateParams, t = 0.0)
         spilling[i] = V[i] >= geom[i].capacity
     end
 
+    # culverts need the live water level of each trap to evaluate their heads
+    trap_level = p.cvplan === nothing ? nothing :
+                 [water_level(geom[i], V[i]) for i in 1:nt]
     inflow = _route_flow(p.net, p.external_inflow, spilling,
                          p.footprint_infil, p.path_infil_prefix, p.external_path_inflow,
-                         p.sorted_trib_info, p.order, p.merge_target)
+                         p.sorted_trib_info, p.order, p.merge_target, p.cvplan, trap_level)
 
     @inbounds for i in 1:nt
         if spilling[i]

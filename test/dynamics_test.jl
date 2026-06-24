@@ -691,3 +691,32 @@ end
     @test rev ≈ -q_dH(0.10) rtol = 1e-6
     @test rev ≈ -nr_off     rtol = 1e-6
 end
+
+@testset "_route_flow: trap-to-trap culvert (mass conservation)" begin
+    inlet, outlet = c(1, 1), c(1, 2)
+    cv  = DynCulvert(inlet, outlet, 0.5, 0.6, 0.5, 1.0, 1.7)    # D = 1
+    t1  = DynTrap(101, 0, [1], Int[])     # trap 1 hosts the culvert inlet (drained)
+    t2  = DynTrap(102, 0, Int[], [1])     # trap 2 hosts the culvert outlet (filled)
+    net = DynNetwork(DynFlowPath[], [t1, t2], [cv])
+    ts  = mock_ts([0.0 0.0])              # both culvert inverts at elevation 0
+    plan = SWIM._build_culvert_plan(net, ts)
+    rf(levels) = SWIM._route_flow(net, [0.0, 0.0], [false, false], [0.0, 0.0],
+                                  Vector{Float64}[]; cvplan = plan, trap_level = levels)
+
+    # trap 1 higher -> culvert flows 1 -> 2; drawn at inlet == delivered at outlet
+    Q = culvert_rate(cv, ts; inlet_submerged = true, inlet_head = 3.0,
+                     outlet_submerged = false, outlet_head = 0.0)
+    @test Q > 0
+    inflow = rf([3.0, 0.0])
+    @test inflow[1] ≈ -Q rtol = 1e-12              # trap 1 drained
+    @test inflow[2] ≈  Q rtol = 1e-12              # trap 2 filled
+    @test inflow[1] + inflow[2] ≈ 0.0 atol = 1e-12 # mass conserved (no external flux)
+
+    # trap 2 higher -> uphill; reverse disallowed -> no flow
+    @test rf([0.0, 3.0]) == [0.0, 0.0]
+    # equal surfaces -> no driving head -> no flow
+    @test rf([1.0, 1.0]) == [0.0, 0.0]
+    # without a culvert plan the culvert is ignored entirely
+    @test SWIM._route_flow(net, [5.0, 7.0], [false, false], [0.0, 0.0],
+                           Vector{Float64}[]) == [5.0, 7.0]
+end
