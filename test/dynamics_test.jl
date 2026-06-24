@@ -745,3 +745,23 @@ end
     # little flow -> abstraction is capped at the passing flow (mass-conserving)
     @test rf(0.3 * Q)[1] ≈ 0.3 * Q rtol = 1e-12
 end
+
+@testset "solveDynNetwork: culvert drain triggers :unspill" begin
+    grid = loadgrid(joinpath(artifact"swim_testdata", "data", "small", "mini.txt"))
+    ts = spillanalysis(grid, usediags=true)
+    allfull = collect(1:SWIM.numtraps(ts))
+    net = setup_network(ts, [CartesianIndex(7, 119)], allfull;
+                        culverts=[cvlt(CartesianIndex(7, 119), CartesianIndex(199, 4))])[1]
+    nt = length(net.traps)
+    ti_in = findfirst(t -> t.culvert_inlets == [1], net.traps)
+    @test ti_in !== nothing
+
+    # all traps full, no external inflow, no infiltration: the culvert drains the
+    # inlet trap, making it the only trap with a negative net -> it must unspill.
+    zer = zeros(size(ts.topography))
+    p   = SWIM._build_rate_params(ts, net, zer, zeros(nt))
+    V0  = [g.capacity for g in p.geom]
+    res = solveDynNetwork(ts, net, zer, zeros(nt), V0)
+    @test res.kind == :unspill
+    @test res.trap == net.traps[ti_in].trap_ix
+end

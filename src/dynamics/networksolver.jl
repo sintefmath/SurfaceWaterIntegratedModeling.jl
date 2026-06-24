@@ -130,6 +130,13 @@ function water_level(g::TrapGeometry, V::Real)
                             Float64(g.v2z(V))
 end
 
+# Actual water-surface elevation of trap `g` at volume `V`, with no `Inf` sentinel:
+# a full trap sits at its spill level (the table top), not `Inf`.  Used for culvert
+# heads, where the real surface elevation matters and `Inf - Inf` would be `NaN`.
+function _surface_level(g::TrapGeometry, V::Real)
+    return V <= 0.0 ? g.zmin : Float64(g.v2z(min(V, g.capacity)))
+end
+
 # ----------------------------------------------------------------------------
 """
     wetted_infiltration(g::TrapGeometry, V) -> Float64
@@ -579,23 +586,31 @@ and fills at its wetted-area rate
 `inflow` is the caller's constant inflow plus everything routed in from upstream
 full traps (see [`_route_flow`](@ref)).  Mirrors `NBSNetworkRateFunction!`.
 """
+# The routed inflow into every trap at state `V`, plus which traps are full
+# (spilling).  Shared by the rate function and the :unspill event condition, which
+# needs the raw net (inflow - footprint loss) that the rate function clamps away.
+function _routed_inflow(V, p::DynNetworkRateParams)
+    geom = p.geom
+    nt   = length(geom)
+    spilling = Vector{Bool}(undef, nt)
+    @inbounds for i in 1:nt
+        spilling[i] = V[i] >= geom[i].capacity
+    end
+    # culverts need each trap's real water-surface elevation (not the Inf sentinel)
+    trap_level = p.cvplan === nothing ? nothing :
+                 [_surface_level(geom[i], V[i]) for i in 1:nt]
+    inflow = _route_flow(p.net, p.external_inflow, spilling,
+                         p.footprint_infil, p.path_infil_prefix, p.external_path_inflow,
+                         p.sorted_trib_info, p.order, p.merge_target, p.cvplan, trap_level)
+    return inflow, spilling
+end
+
 function dynNetworkRateFunction!(dV, V, p::DynNetworkRateParams, t = 0.0)
     geom = p.geom
     nt   = length(geom)
     @assert length(dV) == length(V) == nt
 
-    # which traps are currently full (and therefore spilling / passing water on)
-    spilling = Vector{Bool}(undef, nt)
-    @inbounds for i in 1:nt
-        spilling[i] = V[i] >= geom[i].capacity
-    end
-
-    # culverts need the live water level of each trap to evaluate their heads
-    trap_level = p.cvplan === nothing ? nothing :
-                 [water_level(geom[i], V[i]) for i in 1:nt]
-    inflow = _route_flow(p.net, p.external_inflow, spilling,
-                         p.footprint_infil, p.path_infil_prefix, p.external_path_inflow,
-                         p.sorted_trib_info, p.order, p.merge_target, p.cvplan, trap_level)
+    inflow, spilling = _routed_inflow(V, p)
 
     @inbounds for i in 1:nt
         if spilling[i]
@@ -628,12 +643,17 @@ end
 #                                           constant and crosses zero at a cell
 #                                           elevation rather than asymptotically.
 #
-# Only *evolving* traps (V < capacity at solve start) are monitored: a full trap
-# already sits at `capacity - V == 0`, which would trigger :fill spuriously.
+# Only the *evolving* traps (V < capacity at solve start) get the fill/empty/
+# stagnation triple: a full trap already sits at `capacity - V == 0`, which would
+# trigger :fill spuriously.  Each *full* trap instead gets an :unspill condition --
 #
-# Dormant scaffolds (:unspill when a spilling trap's net crosses zero, and
-# culvert-outlet threshold crossings) plug into the same vector but produce no
-# entries until a state-dependent drain (culvert / NBS) exists.
+#   :unspill     inflow - loss       -> 0   a full trap's net inflow crosses zero
+#                                           (downward) and it begins draining; e.g.
+#                                           a feeding/draining culvert or (later)
+#                                           an NBS inflow changing with the state.
+#
+# It never crosses while the net is constant, so it is inert for plain constant-
+# inflow networks.
 # ============================================================================
 
 # One monitored event condition, tied to a network-local trap index.
@@ -666,15 +686,15 @@ function _event_conditions(p::DynNetworkRateParams, evolving::AbstractVector{<:I
         push!(conds, EventCondition(:stagnation, e))
     end
 
-    # --- dormant scaffolding ---------------------------------------------------
-    # :unspill -- a full trap stops spilling when its net (inflow - losses) crosses
-    # zero.  With constant inflow and infiltration this net is constant, so it can
-    # only happen once a trap has a state-dependent drain (a culvert outlet).
-    for (i, trap) in enumerate(p.net.traps)
-        isempty(trap.culvert_outlets) || push!(conds, EventCondition(:unspill, i))
+    # :unspill -- a full (non-evolving) trap stops spilling and begins draining when
+    # its net inflow (inflow - footprint loss) crosses zero.  Its net can vary because
+    # a feeding/draining culvert depends on the upstream state, and upstream spills
+    # (and, later, NBS inflows) can drop too.  Harmless when the net is constant: the
+    # condition simply never crosses.
+    evolving_set = Set(evolving)
+    for i in eachindex(p.net.traps)
+        i in evolving_set || push!(conds, EventCondition(:unspill, i))
     end
-    # Culvert-outlet threshold crossings would be appended here per culvert; there
-    # are none in the current scope (lakes and rivers only), so nothing is added.
 
     return conds
 end
@@ -702,7 +722,14 @@ function _build_event_callback(p::DynNetworkRateParams,
     dubuf = similar(V0, Float64)   # reused derivative scratch
 
     function condition(out, V, t, integrator)
-        dynNetworkRateFunction!(dubuf, V, p, t)
+        # one routing pass, reused for the stagnation rate (dubuf) and the :unspill
+        # net (inflow - footprint loss), which the clamped rate would otherwise hide.
+        inflow, spilling = _routed_inflow(V, p)
+        @inbounds for i in eachindex(V)
+            dubuf[i] = spilling[i] ?
+                inflow[i] - p.footprint_infil[i] - max(inflow[i] - p.footprint_infil[i], 0.0) :
+                inflow[i] - wetted_infiltration(p.geom[i], V[i])
+        end
         @inbounds for (k, ec) in enumerate(conds)
             if ec.kind == :fill
                 out[k] = p.geom[ec.trap].capacity - V[ec.trap]
@@ -710,8 +737,11 @@ function _build_event_callback(p::DynNetworkRateParams,
                 out[k] = V[ec.trap]
             elseif ec.kind == :stagnation
                 out[k] = dv0[ec.trap] * dubuf[ec.trap]
+            elseif ec.kind == :unspill
+                # net inflow of a full trap; crosses zero (downward) as it starts draining
+                out[k] = inflow[ec.trap] - p.footprint_infil[ec.trap]
             else
-                out[k] = 1.0   # dormant scaffolds: never cross in the current scope
+                out[k] = 1.0
             end
         end
     end
