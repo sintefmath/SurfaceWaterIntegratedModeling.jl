@@ -343,68 +343,87 @@ V[i] <= 0.0 && dV[i] < 0.0 && (dV[i] = 0.0)
 This prevents ODE integration from pushing an EMPTY lowest-level trap negative.
 It is not a tolerance hack — it is the exact physical boundary condition.
 
-** DONE Modify ~_event_conditions~: restrict ~:empty~ to parent traps
+** DONE Modify ~_event_conditions~: restrict ~:empty~ to parent traps; filter ~:unspill~ by initial sign; steady state moves to DiscreteCallback
 
-Add ~nreg::Int~ parameter.  Only register ~:empty~ for traps whose global index
-is a parent trap:
+Add ~nreg::Int~ and ~inflow0::AbstractVector~ parameters.
+
+- Only register ~:empty~ for parent traps (trap_ix > nreg).
+- Drop per-trap ~:stagnation~ entries.
+- Register ~:unspill~ only for full traps with *strictly positive* initial net inflow
+  (inflow0[i] - footprint_infil[i] > 0).  A condition starting at exactly 0 and
+  staying there is degenerate in ~VectorContinuousCallback~: the root-finder sees it
+  as "always at a crossing" and forces infinitesimally small ODE steps, which then
+  causes the steady-state DiscreteCallback to fire prematurely.
+- Steady-state detection is *not* a condition in this list — it is a separate
+  ~DiscreteCallback~ built by ~_build_steadystate_callback~.
 
 #+BEGIN_SRC julia
-function _event_conditions(p::DynNetworkRateParams, evolving, nreg::Int)
+function _event_conditions(p, evolving, nreg::Int, inflow0)
     conds = EventCondition[]
     for e in evolving
         push!(conds, EventCondition(:fill, e))
-        # :empty only for parent traps (topology changes when a parent empties)
         p.net.traps[e].trap_ix > nreg &&
             push!(conds, EventCondition(:empty, e))
-        push!(conds, EventCondition(:stagnation, e))
     end
     evolving_set = Set(evolving)
     for i in eachindex(p.net.traps)
-        i in evolving_set || push!(conds, EventCondition(:unspill, i))
+        i in evolving_set && continue
+        inflow0[i] - p.footprint_infil[i] > 0 &&
+            push!(conds, EventCondition(:unspill, i))
     end
     return conds
 end
 #+END_SRC
 
-Update ~_build_event_callback~ to pass ~nreg~.
+** DONE Steady-state via DiscreteCallback (~_build_steadystate_callback~)
 
-** DONE Modify ~_build_event_callback~: stagnation terminates only when all traps stagnate
+A ~VectorContinuousCallback~ steady-state condition of the form ~max(|dV[e]|) - abstol~
+fails for step-function infiltration: near the Zeno oscillation point the rate
+alternates ±0.2 / -0.1 and never approaches zero.  Instead, we detect steady state
+by observing that the *state* converges even when the rate does not.
 
-A single trap reaching steady state does *not* change topology.  The solver
-should continue until *all* evolving traps have stagnated.
+~_build_steadystate_callback~ returns a ~DiscreteCallback~ that fires when
+~|u[e] - uprev[e]| ≤ abstol + reltol·|uprev[e]|~ for all evolving traps, where
+~uprev~ is the state at the previous accepted ODE step.  This detects both:
 
-Change the ~affect!~ closure inside ~_build_event_callback~ to track a mutable
-set of stagnated traps, and only call ~terminate!~ when all have stagnated:
+- *Smooth equilibria* (rate → 0): the state barely changes per step.
+- *Zeno convergence* (step-function infiltration): the ODE oscillates at a sign-flip
+  equilibrium with geometrically shrinking amplitude; accepted steps become tiny;
+  |Δu| per step drops below the tolerance.
+
+To avoid false positives the callback requires *n_consecutive* (default 3)
+consecutive such tiny steps before firing:
+
+- A single tiny step occurs transiently at each discrete cell-flooding transition
+  (rate discontinuity) and during VectorContinuousCallback root-finding near a
+  ~:fill~ event.  These are isolated events followed by normal-sized steps.
+- Sustained tiny steps (≥ 3 in a row) only occur at genuine equilibria.
 
 #+BEGIN_SRC julia
-stagnated = Set{Int}()
-
-function affect!(integrator, ix)
-    k   = isa(ix, AbstractVector) ? findfirst(!iszero, ix) : ix
-    ec  = conds[k]
-    if ec.kind == :stagnation
-        push!(stagnated, ec.trap)
-        length(stagnated) < length(evolving) && return  # keep integrating
-        event.kind = :stagnation
-        event.trap = 0
-    else
-        event.kind = ec.kind
-        event.trap = ec.trap
+function _build_steadystate_callback(evolving, abstol, reltol = 1e-6; n_consecutive = 3)
+    counter = Ref(0)
+    function condition(u, t, integrator)
+        tiny = all(abs(u[e] - integrator.uprev[e]) <=
+                   abstol + reltol * abs(integrator.uprev[e]) for e in evolving)
+        tiny ? (counter[] += 1) : (counter[] = 0)
+        return counter[] >= n_consecutive
     end
-    terminate!(integrator)
+    return DiscreteCallback(condition, terminate!; save_positions = (false, false))
 end
 #+END_SRC
 
+The callback is combined with the topology ~VectorContinuousCallback~ via
+~CallbackSet(cb_topo, cb_ss)~ in ~solveDynNetwork!~.  When it fires, ~event.kind~
+stays ~:none~, so the driver returns ~(Inf, 0, :none)~ as usual.
+
 Key properties:
-- Non-stagnation events (~:fill~, ~:empty~, ~:unspill~) always terminate
-  immediately.
-- Stagnation events accumulate until *all* evolving traps have fired, then
-  terminate once (converted to ~:none~ return).
-- Since each trap's rate is monotone within a call (wetted-area infiltration is
-  a step function; once the rate crosses zero it does not return positive),
-  stagnation does not un-fire: the ~stagnated~ set only grows.
-- The ~length(stagnated) < length(evolving)~ guard is safe: once all have
-  stagnated, ~terminate!~ is called exactly once.
+- All topology events (~:fill~, ~:empty~, ~:unspill~) continue to terminate immediately
+  via the VectorContinuousCallback.
+- Correct regardless of rate history: a trap that briefly stagnated and then resumed
+  (e.g., when a culvert inlet floods) continues integration without false termination.
+- Works for any future inflow source (NBS, time-varying culverts) without modification.
+- The pre-check ~all(|du0[i]| ≤ abstol for i in evolving)~ guards the initial condition:
+  if all rates are already near zero at t=0, return ~:none~ without running the ODE.
 
 ** DONE Implement ~dynNetworkRateFunction!()~
 

@@ -1,5 +1,6 @@
 import Interpolations
 import Graphs
+using DifferentialEquations: DiscreteCallback, CallbackSet
 
 export dynNetworkRateFunction!, solveDynNetwork!
 
@@ -697,9 +698,9 @@ end
 """
     DynNetworkEvent
 
-The event a solve terminated on: its `kind` (`:fill`, `:empty`, `:stagnation`,
-`:unspill`, or `:none`) and the network-local `trap` index it concerns (0 if
-none).  The driver maps `trap` to a global trap index for its return value.
+The event a solve terminated on: its `kind` (`:fill`, `:empty`, `:unspill`,
+or `:none`) and the network-local `trap` index it concerns (0 if none).
+The driver maps `trap` to a global trap index for its return value.
 """
 mutable struct DynNetworkEvent
     kind::Symbol
@@ -710,80 +711,102 @@ DynNetworkEvent() = DynNetworkEvent(:none, 0)
 # ----------------------------------------------------------------------------
 # Build the list of monitored conditions.
 #
-# Each TRANSITORY (evolving) trap gets :fill.  :stagnation is only registered when
-# the trap's initial rate is non-negligible (|dv0| > abstol); zero-rate traps (e.g.
-# empty culvert-outlet traps waiting for the culvert to start flowing) would produce
-# an immediate spurious zero-crossing in the sign-product condition if included.
-# Only evolving *parent* traps (trap_ix > nreg) get :empty — when a lowest-level
-# trap reaches V=0 that is its physical minimum with no topology change, so the
-# event is not interesting.
-# Each FULL (non-evolving) trap gets :unspill.
+# Each non-FULL (evolving) trap gets :fill.  Only evolving *parent* traps
+# (trap_ix > nreg) get :empty — when a leaf trap reaches V=0 that is its physical
+# floor with no topology change, so the event is not interesting.
+# Each FULL (non-evolving) trap with strictly positive initial net inflow gets
+# :unspill.  The sign filter is critical: a condition that starts at exactly 0
+# and stays there is degenerate in VectorContinuousCallback — the rootfinder
+# sees it as "always at a crossing" and forces infinitesimally small ODE steps.
+# Traps with initial net inflow <= 0 cannot unspill (they're already not spilling
+# in any meaningful sense), so they are safely omitted.
+# Steady-state termination is handled separately by a DiscreteCallback (see
+# _build_steadystate_callback) rather than a condition here, because "all rates
+# simultaneously small" is insufficient when infiltration is a step function:
+# the rate never approaches zero near the equilibrium point, but the *state*
+# does — so we test |Δu| per accepted ODE step instead.
 function _event_conditions(p::DynNetworkRateParams,
                            evolving::AbstractVector{<:Integer},
                            nreg::Int,
-                           dv0::AbstractVector{<:Real},
-                           abstol::Real)
+                           inflow0::AbstractVector{<:Real})
     conds = EventCondition[]
     for e in evolving
-        push!(conds, EventCondition(:fill,       e))
+        push!(conds, EventCondition(:fill,  e))
         # :empty only for parent traps: exposing subtraps changes topology
         p.net.traps[e].trap_ix > nreg &&
             push!(conds, EventCondition(:empty, e))
-        # :stagnation only when the initial rate is non-trivial
-        abs(dv0[e]) > abstol &&
-            push!(conds, EventCondition(:stagnation, e))
     end
 
-    # :unspill -- a full (non-evolving) trap stops spilling and begins draining when
-    # its net inflow (inflow - footprint loss) crosses zero downward.  Inert for
-    # constant-inflow / no-culvert networks; fires when a culvert's head changes.
+    # :unspill -- a full (non-evolving) trap stops spilling when its net inflow
+    # crosses zero downward.  Only register for traps that start with positive
+    # net inflow; zero or negative initial values would create degenerate conditions.
     evolving_set = Set(evolving)
     for i in eachindex(p.net.traps)
-        i in evolving_set || push!(conds, EventCondition(:unspill, i))
+        i in evolving_set && continue
+        inflow0[i] - p.footprint_infil[i] > 0 &&
+            push!(conds, EventCondition(:unspill, i))
     end
 
     return conds
 end
 
 # ----------------------------------------------------------------------------
+# Steady-state detector: DiscreteCallback that fires when the state change per
+# accepted ODE step is small for all evolving traps.
+#
+# This detects both smooth equilibria (rate → 0) and Zeno-type convergence from
+# step-function infiltration (rate oscillates but |ΔV/step| → 0 as the ODE
+# localises to the discontinuity).  A VectorContinuousCallback max-rate condition
+# cannot detect the latter because the rate never approaches zero there.
+function _build_steadystate_callback(evolving::AbstractVector{<:Integer},
+                                     abstol::Real, reltol::Real = 1e-6;
+                                     n_consecutive::Int = 3)
+    # Consecutive-tiny-step counter.  A single tiny step can occur transiently at a
+    # rate-function discontinuity (each discrete cell flooding in/out) or during
+    # VectorContinuousCallback root-finding near a :fill event.  Requiring n_consecutive
+    # in a row eliminates those false positives while still firing for:
+    #   • smooth equilibria: rate → 0, all steps have |Δu| ≈ 0 forever
+    #   • Zeno convergence (step-function infil): the ODE oscillates at a sign-flip
+    #     equilibrium with infinitesimally shrinking amplitude; many consecutive tiny steps
+    counter = Ref(0)
+    function condition(u, t, integrator)
+        tiny = all(abs(u[e] - integrator.uprev[e]) <=
+                   abstol + reltol * abs(integrator.uprev[e])
+                   for e in evolving)
+        if tiny
+            counter[] += 1
+        else
+            counter[] = 0
+        end
+        return counter[] >= n_consecutive
+    end
+    return DiscreteCallback(condition, terminate!; save_positions = (false, false))
+end
+
+# ----------------------------------------------------------------------------
 """
-    _build_event_callback(p, evolving, V0, nreg; abstol) -> (callback, event)
+    _build_event_callback(p, evolving, V0, nreg) -> (callback, event)
 
 Construct the `VectorContinuousCallback` that halts the integration at the first
 topology-changing event and the [`DynNetworkEvent`](@ref) it will record into.
-`evolving` lists the network-local indices of the traps that evolve; `V0` is the
-initial state, used to fix the sign of each trap's rate for stagnation detection;
-`nreg` is `numregions(tstruct)`, used to restrict `:empty` to parent traps.
+`evolving` lists the network-local indices of non-FULL traps; `nreg` is
+`numregions(tstruct)`, used to restrict `:empty` to parent traps.
 
-Stagnation is special: a single trap reaching steady state is not a topology
-change.  The solver only terminates for stagnation once *all stagnatable* evolving
-traps have stagnated.  A trap is stagnatable if its initial rate |dv0| > abstol;
-zero-rate traps (e.g. empty culvert-outlet traps waiting for inflow to start) are
-excluded from the stagnation count — they contribute only :fill events.  The set of
-stagnated traps is accumulated in `affect!`.
+Steady-state termination is handled by a separate `DiscreteCallback` built by
+`_build_steadystate_callback`; the two are combined with `CallbackSet` in
+`solveDynNetwork!`.
 """
 function _build_event_callback(p::DynNetworkRateParams,
                                evolving::AbstractVector{<:Integer},
                                V0::AbstractVector{<:Real},
-                               nreg::Int;
-                               abstol::Real = 1e-8)
+                               nreg::Int)
 
-    # Compute initial rates first: needed to gate :stagnation registration and
-    # to build the n_stagnatable count used in the termination condition.
-    dv0   = similar(V0, Float64)
-    dynNetworkRateFunction!(dv0, V0, p, 0.0)
-
-    conds = _event_conditions(p, evolving, nreg, dv0, abstol)
+    inflow0, _ = _routed_inflow(V0, p)
+    conds = _event_conditions(p, evolving, nreg, inflow0)
     event = DynNetworkEvent()
-
-    # Number of evolving traps that actually have a :stagnation condition.
-    # Only these need to stagnate before we declare steady state.
-    n_stagnatable = count(e -> abs(dv0[e]) > abstol, evolving)
-
-    dubuf = similar(V0, Float64)   # reused scratch
+    dubuf = similar(V0, Float64)   # scratch: rates at current time step
 
     function condition(out, V, t, integrator)
-        # one routing pass, shared by stagnation rate (dubuf) and :unspill net
         inflow, spilling = _routed_inflow(V, p)
         @inbounds for i in eachindex(V)
             dubuf[i] = spilling[i] ?
@@ -795,8 +818,6 @@ function _build_event_callback(p::DynNetworkRateParams,
                 out[k] = p.geom[ec.trap].capacity - V[ec.trap]
             elseif ec.kind == :empty
                 out[k] = V[ec.trap]
-            elseif ec.kind == :stagnation
-                out[k] = dv0[ec.trap] * dubuf[ec.trap]
             elseif ec.kind == :unspill
                 out[k] = inflow[ec.trap] - p.footprint_infil[ec.trap]
             else
@@ -805,21 +826,11 @@ function _build_event_callback(p::DynNetworkRateParams,
         end
     end
 
-    # Stagnation accumulator: only terminate once every evolving trap has stagnated.
-    stagnated = Set{Int}()
-
     function affect!(integrator, ix)
         k  = isa(ix, AbstractVector) ? findfirst(!iszero, ix) : ix
         ec = conds[k]
-        if ec.kind == :stagnation
-            push!(stagnated, ec.trap)
-            length(stagnated) < n_stagnatable && return   # keep integrating
-            event.kind = :stagnation
-            event.trap = 0
-        else
-            event.kind = ec.kind
-            event.trap = ec.trap
-        end
+        event.kind = ec.kind
+        event.trap = ec.trap
         terminate!(integrator)
     end
 
@@ -975,7 +986,7 @@ function solveDynNetwork!(state::AbstractVector{Float64},
 
     _validate_network(tstruct, net, V0, p.geom)
 
-    # Compute initial rates once; used for the t=0 fast-path checks and the stagnation guard.
+    # Compute initial rates once: used for the t=0 fast-path checks.
     du0 = similar(V0, Float64)
     dynNetworkRateFunction!(du0, V0, p, 0.0)
 
@@ -1004,18 +1015,20 @@ function solveDynNetwork!(state::AbstractVector{Float64},
     all(abs(du0[i]) <= abstol for i in evolving) &&
         return (time = Inf, trap = 0, kind = :none)
 
-    # Integrate to the first topology-changing event.
-    cb, event = _build_event_callback(p, evolving, V0, nreg; abstol=abstol)
+    # Integrate to the first topology-changing event or steady state.
+    # VectorContinuousCallback handles topology events (:fill, :empty, :unspill).
+    # DiscreteCallback handles steady state by testing |Δu| per accepted step.
+    cb_topo, event = _build_event_callback(p, evolving, V0, nreg)
+    cb_ss = _build_steadystate_callback(evolving, abstol)
     sol = solve(ODEProblem(dynNetworkRateFunction!, V0, (0.0, Inf), p);
-                callback = cb, abstol = abstol, reltol = reltol)
+                callback = CallbackSet(cb_topo, cb_ss),
+                abstol = abstol, reltol = reltol)
 
     # Write ODE result back into state in place (saves one nt-length allocation per call).
     state .= sol.u[end]
 
-    # All traps stagnated (or callback never fired): steady state.
-    if event.kind == :stagnation || event.kind == :none
-        return (time = Inf, trap = 0, kind = :none)
-    end
+    # Steady-state callback fired (or nothing fired): return :none.
+    event.kind == :none && return (time = Inf, trap = 0, kind = :none)
 
     # Clamp the triggering trap to its exact threshold so the validator passes on the
     # next call without requiring the caller to handle floating-point residual at the

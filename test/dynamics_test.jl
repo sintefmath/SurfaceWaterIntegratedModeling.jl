@@ -555,19 +555,23 @@ end
         @test res_pi.kind == :fill && res_pi.trap == net.traps[leaf].trap_ix
         @test isfinite(res_pi.time) && res_pi.time > 0
 
-        # STAGNATION -> Inf: only the leaf is fed, infiltration only on its footprint,
-        # so it reaches a steady level below capacity (no further topology event).
-        # With the new design only all-stagnated terminates, so a single trap stagnating
-        # continues integration until the whole system is at rest.
-        infil_stag  = zeros(size(ts.topography))
-        infil_stag[ts.footprints[net.traps[leaf].trap_ix]] .= 0.3
-        inflow_stag = zeros(nt); inflow_stag[leaf] = 0.5
-        state_stag  = copy(caps); state_stag[leaf] = 0.0
-        res2 = solveDynNetwork!(state_stag, ts, net, infil_stag, inflow_stag)
+        # STAGNATION -> Inf: single isolated trap (57) with 11 cells, inflow=0.3,
+        # infil=0.1/cell → max-infil=1.1 > inflow, equilibrium at ~3 cells wet (V_eq
+        # well below capacity=2.3126).  The steady-state DiscreteCallback must fire
+        # and return :none with the state settled at the sub-capacity equilibrium.
+        # (Trap 13, the :long-chain leaf, cannot be used here because its second cell's
+        # bottom equals the spillpoint, giving no sub-capacity zone where infil > inflow.)
+        net_s   = DynNetwork([DynFlowPath(CartesianIndex{2}[], 0)],
+                             [DynTrap(57, 0)], DynCulvert[])
+        infil_s = zeros(size(ts.topography))
+        infil_s[ts.footprints[57]] .= 0.1
+        state_s = [0.0]
+        caps_s  = SWIM._build_trap_geometry(ts, net_s, infil_s)[1].capacity
+        res2 = solveDynNetwork!(state_s, ts, net_s, infil_s, [0.3])
         @test res2.kind == :none
         @test res2.trap == 0
         @test res2.time == Inf
-        @test state_stag[leaf] < caps[leaf]   # leaf settled below capacity
+        @test 0.0 < state_s[1] < caps_s   # settled below capacity
 
         # UNSPILL: upstream FULL traps have infiltration exceeding inflow -> immediately
         # draining.  The leaf is left EMPTY (0.0); it does not participate in the check.
@@ -592,12 +596,12 @@ end
             state_bad, ts, net, zeros(size(ts.topography)), zeros(nt))
     end
 
-    @testset "solveDynNetwork!: all evolving traps must stagnate before :none" begin
+    @testset "solveDynNetwork!: steady-state callback waits for all traps to settle" begin
         # Two independent leaf traps (57: 11-cell footprint, 313: 10-cell footprint) in a
-        # synthetic DynNetwork.  Both start EMPTY with positive inflow; both stagnate at
-        # sub-capacity equilibrium.  Trap 313 (lower inflow, lower max-infiltration) stagnates
-        # first.  With the old single-trap termination, integration would stop early and leave
-        # trap 57 still filling.  With the correct all-must-stagnate logic, both converge.
+        # synthetic DynNetwork.  Both start EMPTY with positive inflow; both settle at
+        # sub-capacity equilibrium (inflow = infiltration).  Trap 313 settles first.
+        # The :steadystate condition fires only when max(|dV|) < abstol for BOTH traps,
+        # not as soon as one trap's rate crosses zero.
         net_two = DynNetwork(
             [DynFlowPath(CartesianIndex{2}[], 1), DynFlowPath(CartesianIndex{2}[], 2)],
             [DynTrap(57, 0), DynTrap(313, 0)],
@@ -622,10 +626,10 @@ end
     end
 
     @testset "solveDynNetwork!: :empty registered only for parent traps" begin
-        # _event_conditions must add :fill + :stagnation for evolving traps with
-        # non-zero initial rate, but :empty only for those whose trap_ix > numregions
-        # (parent/merged traps).  Leaf traps at V=0 are at their physical floor —
-        # no topology changes there.
+        # _event_conditions must add :fill for ALL evolving traps and :empty only for
+        # those whose trap_ix > numregions (parent/merged traps).  Leaf traps at V=0
+        # are at their physical floor — no topology changes there.
+        # Steady state is detected by the single global :steadystate entry (trap==0).
         nreg = numregions(ts)
         p_ec = SWIM._build_rate_params(ts, net, zeros(size(ts.topography)), fill(1.0, nt))
 
@@ -634,21 +638,17 @@ end
         li = nt
         @assert pi !== nothing "test requires a parent trap in the :long chain"
 
-        # Use half-capacity state so both pi and li have dv0 > abstol (each gets
-        # inflow=1.0, no infiltration, not spilling → dV=1.0 for every trap).
-        caps_ec = [g.capacity for g in p_ec.geom]
-        V0_ec   = caps_ec .* 0.5
-        dv0_ec  = zeros(nt)
-        SWIM.dynNetworkRateFunction!(dv0_ec, V0_ec, p_ec, 0.0)
-        conds = SWIM._event_conditions(p_ec, [pi, li], nreg, dv0_ec, 1e-8)
+        inflow0_ec, _ = SWIM._routed_inflow(fill(0.0, nt), p_ec)   # V0 = all zero for :long network
+        conds = SWIM._event_conditions(p_ec, [pi, li], nreg, inflow0_ec)
 
-        @test  any(c -> c.trap == li && c.kind == :fill,       conds)
-        @test  any(c -> c.trap == li && c.kind == :stagnation, conds)
-        @test !any(c -> c.trap == li && c.kind == :empty,      conds)  # leaf: no :empty
+        @test  any(c -> c.trap == li && c.kind == :fill,  conds)
+        @test !any(c -> c.trap == li && c.kind == :empty, conds)  # leaf: no :empty
 
-        @test  any(c -> c.trap == pi && c.kind == :fill,       conds)
-        @test  any(c -> c.trap == pi && c.kind == :stagnation, conds)
-        @test  any(c -> c.trap == pi && c.kind == :empty,      conds)  # parent: has :empty
+        @test  any(c -> c.trap == pi && c.kind == :fill,  conds)
+        @test  any(c -> c.trap == pi && c.kind == :empty, conds)  # parent: has :empty
+
+        # no stagnation entries — steady-state is handled by a separate DiscreteCallback
+        @test !any(c -> c.kind == :stagnation  || c.kind == :steadystate, conds)
     end
 
     @testset "solveDynNetwork!: two-call cascade (caller rebuilds network after fill)" begin
