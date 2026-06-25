@@ -1,6 +1,6 @@
 import Interpolations
 import Graphs
-using DifferentialEquations: DiscreteCallback, CallbackSet
+using DifferentialEquations   # brings DiscreteCallback, CallbackSet, SciMLBase into scope
 
 export dynNetworkRateFunction!, solveDynNetwork!
 
@@ -663,30 +663,29 @@ end
 # ============================================================================
 # Event detection.
 #
-# The solve integrates forward and stops at the first event.  Events are detected
-# with a `VectorContinuousCallback` whose condition vector generalises the
-# `[full, empty, stagnation]` triple of `fill_trap_until` to every evolving trap:
+# Two callbacks stop the integration at the first event:
 #
-#   :fill        capacity - V        -> 0   trap fills, starts spilling (type-1)
-#   :empty       V                   -> 0   trap empties, exposes its subtraps
-#   :stagnation  dv0 * dV            -> 0   net rate changed sign: steady state.
-#                                           Reachable in finite time because the
-#                                           wetted-area infiltration is a step
-#                                           function of V, so dV is piecewise
-#                                           constant and crosses zero at a cell
-#                                           elevation rather than asymptotically.
+# 1. VectorContinuousCallback (`cb_topo`): per-trap topology-changing events.
+#    Fires on downward zero-crossings (LeftRootFind) of:
 #
-# Only the *evolving* traps (V < capacity at solve start) get the fill/empty/
-# stagnation triple: a full trap already sits at `capacity - V == 0`, which would
-# trigger :fill spuriously.  Each *full* trap instead gets an :unspill condition --
+#      :fill    capacity - V  -> 0   trap fills, starts spilling
+#      :empty   V            -> 0   trap empties, exposes its subtraps
+#      :unspill inflow - loss -> 0   a full trap's net inflow goes negative
 #
-#   :unspill     inflow - loss       -> 0   a full trap's net inflow crosses zero
-#                                           (downward) and it begins draining; e.g.
-#                                           a feeding/draining culvert or (later)
-#                                           an NBS inflow changing with the state.
+#    Every *evolving* trap (V < capacity at solve start) gets :fill; parent
+#    evolving traps also get :empty.  Every *full* trap gets :unspill.
+#    LeftRootFind means conditions starting at exactly 0 (full traps with
+#    zero initial net inflow) do not cause degenerate root-finding — they
+#    wait silently for a genuine downward crossing (e.g. a culvert that later
+#    makes the inflow positive and then negative mid-integration).
 #
-# It never crosses while the net is constant, so it is inert for plain constant-
-# inflow networks.
+# 2. DiscreteCallback (`cb_ss`): global steady-state detector.
+#    Fires at the first accepted ODE step where max(|dV/dt|) < abstol over
+#    all evolving traps.  Using a DiscreteCallback (not ContinuousCallback)
+#    is essential: wetted_infiltration is a step function of V, so evaluating
+#    the condition at interpolated states mid-step would detect spurious
+#    crossings.  Spilling-veto: if any evolving trap has V >= C at this step,
+#    skip (the VCB :fill event fires first in the CallbackSet ordering).
 # ============================================================================
 
 # One monitored event condition, tied to a network-local trap index.
@@ -714,71 +713,56 @@ DynNetworkEvent() = DynNetworkEvent(:none, 0)
 # Each non-FULL (evolving) trap gets :fill.  Only evolving *parent* traps
 # (trap_ix > nreg) get :empty — when a leaf trap reaches V=0 that is its physical
 # floor with no topology change, so the event is not interesting.
-# Each FULL (non-evolving) trap with strictly positive initial net inflow gets
-# :unspill.  The sign filter is critical: a condition that starts at exactly 0
-# and stays there is degenerate in VectorContinuousCallback — the rootfinder
-# sees it as "always at a crossing" and forces infinitesimally small ODE steps.
-# Traps with initial net inflow <= 0 cannot unspill (they're already not spilling
-# in any meaningful sense), so they are safely omitted.
-# Steady-state termination is handled separately by a DiscreteCallback (see
-# _build_steadystate_callback) rather than a condition here, because "all rates
-# simultaneously small" is insufficient when infiltration is a step function:
-# the rate never approaches zero near the equilibrium point, but the *state*
-# does — so we test |Δu| per accepted ODE step instead.
+# Every FULL (non-evolving) trap gets :unspill.  The VCB uses LeftRootFind so
+# conditions starting at zero (full traps with zero initial net inflow) do not
+# trigger degenerate root-finding; they wait silently for a genuine downward
+# crossing (e.g. a culvert that later makes the inflow positive then negative).
+# Steady-state termination is handled by a separate DiscreteCallback (`cb_ss`).
 function _event_conditions(p::DynNetworkRateParams,
                            evolving::AbstractVector{<:Integer},
-                           nreg::Int,
-                           inflow0::AbstractVector{<:Real})
+                           nreg::Int)
     conds = EventCondition[]
     for e in evolving
         push!(conds, EventCondition(:fill,  e))
-        # :empty only for parent traps: exposing subtraps changes topology
         p.net.traps[e].trap_ix > nreg &&
             push!(conds, EventCondition(:empty, e))
     end
-
-    # :unspill -- a full (non-evolving) trap stops spilling when its net inflow
-    # crosses zero downward.  Only register for traps that start with positive
-    # net inflow; zero or negative initial values would create degenerate conditions.
     evolving_set = Set(evolving)
     for i in eachindex(p.net.traps)
         i in evolving_set && continue
-        inflow0[i] - p.footprint_infil[i] > 0 &&
-            push!(conds, EventCondition(:unspill, i))
+        push!(conds, EventCondition(:unspill, i))
     end
-
     return conds
 end
 
 # ----------------------------------------------------------------------------
-# Steady-state detector: DiscreteCallback that fires when the state change per
-# accepted ODE step is small for all evolving traps.
+# Steady-state detector: DiscreteCallback that fires at the first accepted ODE
+# step where the global maximum |dV/dt| across all evolving traps drops below
+# abstol.
 #
-# This detects both smooth equilibria (rate → 0) and Zeno-type convergence from
-# step-function infiltration (rate oscillates but |ΔV/step| → 0 as the ODE
-# localises to the discontinuity).  A VectorContinuousCallback max-rate condition
-# cannot detect the latter because the rate never approaches zero there.
-function _build_steadystate_callback(evolving::AbstractVector{<:Integer},
-                                     abstol::Real, reltol::Real = 1e-6;
-                                     n_consecutive::Int = 3)
-    # Consecutive-tiny-step counter.  A single tiny step can occur transiently at a
-    # rate-function discontinuity (each discrete cell flooding in/out) or during
-    # VectorContinuousCallback root-finding near a :fill event.  Requiring n_consecutive
-    # in a row eliminates those false positives while still firing for:
-    #   • smooth equilibria: rate → 0, all steps have |Δu| ≈ 0 forever
-    #   • Zeno convergence (step-function infil): the ODE oscillates at a sign-flip
-    #     equilibrium with infinitesimally shrinking amplitude; many consecutive tiny steps
-    counter = Ref(0)
+# A DiscreteCallback is the correct tool here because wetted_infiltration is a
+# step function of V.  A ContinuousCallback would evaluate its condition at dense-
+# output (polynomial) states that straddle cell-volume boundaries mid-step, and
+# would detect spurious "crossings" of the discontinuous condition before the
+# accepted step actually lands in the settled zone.  The DiscreteCallback only
+# evaluates at accepted step endpoints, where the ODE state is genuine.
+#
+# Spilling-veto: if any evolving trap is at V >= capacity at this accepted step
+# (the VCB :fill rootfinder is still narrowing down the crossing), fire only
+# after the VCB has had a chance to terminate first.  In practice the VCB fires
+# before this check, but the veto prevents a race at the exact crossing step.
+function _build_steadystate_callback(p::DynNetworkRateParams,
+                                     evolving::AbstractVector{<:Integer},
+                                     abstol::Real)
     function condition(u, t, integrator)
-        tiny = all(abs(u[e] - integrator.uprev[e]) <=
-                   abstol + reltol * abs(integrator.uprev[e])
-                   for e in evolving)
-        if tiny
-            counter[] += 1
-        else
-            counter[] = 0
+        inflow, spilling = _routed_inflow(u, p)
+        for e in evolving
+            spilling[e] && return false   # veto: :fill wins
         end
-        return counter[] >= n_consecutive
+        for e in evolving
+            abs(inflow[e] - wetted_infiltration(p.geom[e], u[e])) >= abstol && return false
+        end
+        return true
     end
     return DiscreteCallback(condition, terminate!; save_positions = (false, false))
 end
@@ -787,8 +771,9 @@ end
 """
     _build_event_callback(p, evolving, V0, nreg) -> (callback, event)
 
-Construct the `VectorContinuousCallback` that halts the integration at the first
-topology-changing event and the [`DynNetworkEvent`](@ref) it will record into.
+Construct the `VectorContinuousCallback` (with `LeftRootFind`) that halts the
+integration at the first topology-changing event and the
+[`DynNetworkEvent`](@ref) it will record into.
 `evolving` lists the network-local indices of non-FULL traps; `nreg` is
 `numregions(tstruct)`, used to restrict `:empty` to parent traps.
 
@@ -801,8 +786,7 @@ function _build_event_callback(p::DynNetworkRateParams,
                                V0::AbstractVector{<:Real},
                                nreg::Int)
 
-    inflow0, _ = _routed_inflow(V0, p)
-    conds = _event_conditions(p, evolving, nreg, inflow0)
+    conds = _event_conditions(p, evolving, nreg)
     event = DynNetworkEvent()
     dubuf = similar(V0, Float64)   # scratch: rates at current time step
 
@@ -818,10 +802,8 @@ function _build_event_callback(p::DynNetworkRateParams,
                 out[k] = p.geom[ec.trap].capacity - V[ec.trap]
             elseif ec.kind == :empty
                 out[k] = V[ec.trap]
-            elseif ec.kind == :unspill
+            else   # :unspill
                 out[k] = inflow[ec.trap] - p.footprint_infil[ec.trap]
-            else
-                out[k] = 1.0
             end
         end
     end
@@ -834,7 +816,8 @@ function _build_event_callback(p::DynNetworkRateParams,
         terminate!(integrator)
     end
 
-    return VectorContinuousCallback(condition, affect!, length(conds)), event
+    return VectorContinuousCallback(condition, affect!, length(conds);
+                                    rootfind = SciMLBase.LeftRootFind), event
 end
 
 # ============================================================================
@@ -1016,10 +999,12 @@ function solveDynNetwork!(state::AbstractVector{Float64},
         return (time = Inf, trap = 0, kind = :none)
 
     # Integrate to the first topology-changing event or steady state.
-    # VectorContinuousCallback handles topology events (:fill, :empty, :unspill).
-    # DiscreteCallback handles steady state by testing |Δu| per accepted step.
+    # cb_topo (VectorContinuousCallback, LeftRootFind): topology events (:fill, :empty, :unspill).
+    # cb_ss   (DiscreteCallback): fires at the first accepted step where max|dV/dt| < abstol
+    #         across all evolving traps (step-function infil → must check at accepted steps,
+    #         not interpolated points).
     cb_topo, event = _build_event_callback(p, evolving, V0, nreg)
-    cb_ss = _build_steadystate_callback(evolving, abstol)
+    cb_ss = _build_steadystate_callback(p, evolving, abstol)
     sol = solve(ODEProblem(dynNetworkRateFunction!, V0, (0.0, Inf), p);
                 callback = CallbackSet(cb_topo, cb_ss),
                 abstol = abstol, reltol = reltol)

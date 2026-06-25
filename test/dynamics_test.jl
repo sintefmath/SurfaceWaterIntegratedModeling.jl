@@ -600,8 +600,8 @@ end
         # Two independent leaf traps (57: 11-cell footprint, 313: 10-cell footprint) in a
         # synthetic DynNetwork.  Both start EMPTY with positive inflow; both settle at
         # sub-capacity equilibrium (inflow = infiltration).  Trap 313 settles first.
-        # The :steadystate condition fires only when max(|dV|) < abstol for BOTH traps,
-        # not as soon as one trap's rate crosses zero.
+        # The :steadystate DiscreteCallback fires only when max(|dV/dt|) < abstol
+        # for BOTH traps, not as soon as one trap's rate crosses zero.
         net_two = DynNetwork(
             [DynFlowPath(CartesianIndex{2}[], 1), DynFlowPath(CartesianIndex{2}[], 2)],
             [DynTrap(57, 0), DynTrap(313, 0)],
@@ -638,8 +638,7 @@ end
         li = nt
         @assert pi !== nothing "test requires a parent trap in the :long chain"
 
-        inflow0_ec, _ = SWIM._routed_inflow(fill(0.0, nt), p_ec)   # V0 = all zero for :long network
-        conds = SWIM._event_conditions(p_ec, [pi, li], nreg, inflow0_ec)
+        conds = SWIM._event_conditions(p_ec, [pi, li], nreg)
 
         @test  any(c -> c.trap == li && c.kind == :fill,  conds)
         @test !any(c -> c.trap == li && c.kind == :empty, conds)  # leaf: no :empty
@@ -649,6 +648,11 @@ end
 
         # no stagnation entries — steady-state is handled by a separate DiscreteCallback
         @test !any(c -> c.kind == :stagnation  || c.kind == :steadystate, conds)
+
+        # :unspill registered for ALL non-evolving traps, including zero-initial-inflow ones.
+        # LeftRootFind prevents degenerate rootfinding on zero-starting conditions so
+        # culvert-driven networks where inflow later goes 0 → positive → negative are covered.
+        @test count(c -> c.kind == :unspill, conds) == nt - 2
     end
 
     @testset "solveDynNetwork!: two-call cascade (caller rebuilds network after fill)" begin
