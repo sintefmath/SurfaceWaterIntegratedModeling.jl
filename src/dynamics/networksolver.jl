@@ -1,7 +1,7 @@
 import Interpolations
 import Graphs
 
-export dynNetworkRateFunction!, solveDynNetwork
+export dynNetworkRateFunction!, solveDynNetwork!
 
 # ============================================================================
 # Geometry helpers for the dynamic network solver.
@@ -651,6 +651,10 @@ function dynNetworkRateFunction!(dV, V, p::DynNetworkRateParams, t = 0.0)
             spill = 0.0
         end
         dV[i] = inflow[i] - loss - spill
+        # Physical floor: volume cannot go below zero.  When an EMPTY trap has negative
+        # computed dV (e.g. a culvert trying to draw from it), clamp to zero rather than
+        # letting the ODE push V < 0 and blow up the v2z interpolation.
+        V[i] <= 0.0 && dV[i] < 0.0 && (dV[i] = 0.0)
     end
     return nothing
 end
@@ -704,21 +708,27 @@ end
 DynNetworkEvent() = DynNetworkEvent(:none, 0)
 
 # ----------------------------------------------------------------------------
-# Build the list of monitored conditions: the live triple for each evolving trap,
-# plus dormant scaffolds that stay empty until drainage / culverts exist.
-function _event_conditions(p::DynNetworkRateParams, evolving::AbstractVector{<:Integer})
+# Build the list of monitored conditions.
+#
+# Each TRANSITORY (evolving) trap gets :fill / :stagnation.  Only evolving *parent*
+# traps (trap_ix > nreg) get :empty — when a lowest-level trap reaches V=0 that is
+# its physical minimum with no topology change, so the event is not interesting.
+# Each FULL (non-evolving) trap gets :unspill.
+function _event_conditions(p::DynNetworkRateParams,
+                           evolving::AbstractVector{<:Integer},
+                           nreg::Int)
     conds = EventCondition[]
     for e in evolving
         push!(conds, EventCondition(:fill,       e))
-        push!(conds, EventCondition(:empty,      e))
+        # :empty only for parent traps: exposing subtraps changes topology
+        p.net.traps[e].trap_ix > nreg &&
+            push!(conds, EventCondition(:empty, e))
         push!(conds, EventCondition(:stagnation, e))
     end
 
     # :unspill -- a full (non-evolving) trap stops spilling and begins draining when
-    # its net inflow (inflow - footprint loss) crosses zero.  Its net can vary because
-    # a feeding/draining culvert depends on the upstream state, and upstream spills
-    # (and, later, NBS inflows) can drop too.  Harmless when the net is constant: the
-    # condition simply never crosses.
+    # its net inflow (inflow - footprint loss) crosses zero downward.  Inert for
+    # constant-inflow / no-culvert networks; fires when a culvert's head changes.
     evolving_set = Set(evolving)
     for i in eachindex(p.net.traps)
         i in evolving_set || push!(conds, EventCondition(:unspill, i))
@@ -729,31 +739,33 @@ end
 
 # ----------------------------------------------------------------------------
 """
-    _build_event_callback(p, evolving, V0) -> (callback, event)
+    _build_event_callback(p, evolving, V0, nreg) -> (callback, event)
 
 Construct the `VectorContinuousCallback` that halts the integration at the first
-event and the [`DynNetworkEvent`](@ref) it will record into.  `evolving` lists the
-network-local indices of the traps that evolve (those with `V < capacity` at the
-start); `V0` is the initial state, used to fix the sign of each evolving trap's
-rate for the stagnation test.
+topology-changing event and the [`DynNetworkEvent`](@ref) it will record into.
+`evolving` lists the network-local indices of the traps that evolve; `V0` is the
+initial state, used to fix the sign of each trap's rate for stagnation detection;
+`nreg` is `numregions(tstruct)`, used to restrict `:empty` to parent traps.
+
+Stagnation is special: a single trap reaching steady state is not a topology
+change.  The solver only terminates for stagnation once *all* evolving traps have
+stagnated.  This is tracked with a mutable `stagnated` set inside `affect!`.
 """
 function _build_event_callback(p::DynNetworkRateParams,
                                evolving::AbstractVector{<:Integer},
-                               V0::AbstractVector{<:Real})
+                               V0::AbstractVector{<:Real},
+                               nreg::Int)
 
-    # register _which_ traps should be monitored for _which_ events
-    # (fill/empty/stagnation for evolving, unspill for full)
-    conds = _event_conditions(p, evolving)
+    conds = _event_conditions(p, evolving, nreg)
     event = DynNetworkEvent()
 
-    # initial rate, to detect sign changes (stagnation) later
-    dv0 = similar(V0, Float64)
+    # initial rate vector — sign fixes the stagnation condition
+    dv0   = similar(V0, Float64)
     dynNetworkRateFunction!(dv0, V0, p, 0.0)
-    dubuf = similar(V0, Float64)   # reused derivative scratch
+    dubuf = similar(V0, Float64)   # reused scratch
 
     function condition(out, V, t, integrator)
-        # one routing pass, reused for the stagnation rate (dubuf) and the :unspill
-        # net (inflow - footprint loss), which the clamped rate would otherwise hide.
+        # one routing pass, shared by stagnation rate (dubuf) and :unspill net
         inflow, spilling = _routed_inflow(V, p)
         @inbounds for i in eachindex(V)
             dubuf[i] = spilling[i] ?
@@ -768,7 +780,6 @@ function _build_event_callback(p::DynNetworkRateParams,
             elseif ec.kind == :stagnation
                 out[k] = dv0[ec.trap] * dubuf[ec.trap]
             elseif ec.kind == :unspill
-                # net inflow of a full trap; crosses zero (downward) as it starts draining
                 out[k] = inflow[ec.trap] - p.footprint_infil[ec.trap]
             else
                 out[k] = 1.0
@@ -776,11 +787,21 @@ function _build_event_callback(p::DynNetworkRateParams,
         end
     end
 
+    # Stagnation accumulator: only terminate once every evolving trap has stagnated.
+    stagnated = Set{Int}()
+
     function affect!(integrator, ix)
-        # DiffEq v8+ may pass ix as a vector of flags; older versions a scalar index
-        k = isa(ix, AbstractVector) ? findfirst(!iszero, ix) : ix
-        event.kind = conds[k].kind
-        event.trap = conds[k].trap
+        k  = isa(ix, AbstractVector) ? findfirst(!iszero, ix) : ix
+        ec = conds[k]
+        if ec.kind == :stagnation
+            push!(stagnated, ec.trap)
+            length(stagnated) < length(evolving) && return   # keep integrating
+            event.kind = :stagnation
+            event.trap = 0
+        else
+            event.kind = ec.kind
+            event.trap = ec.trap
+        end
         terminate!(integrator)
     end
 
@@ -798,115 +819,196 @@ end
 # steady state (reported as an event time of `Inf`).
 # ============================================================================
 
+# ----------------------------------------------------------------------------
 """
-    solveDynNetwork(tstruct, net, infiltration, inflow, state;
-                    path_inflow=nothing, abstol=1e-8, reltol=1e-8, zvt=nothing)
-        -> (; time, trap, kind, state)
+    _validate_network(tstruct, net, state, geom)
+
+Check the three-state caller contract before every [`solveDynNetwork!`](@ref) call.
+Throws an informative error on the first violation found.
+
+**Contract** (enforced here):
+- FULL (V == C): `spill_path > 0`; if a parent trap, all its in-network children
+  must also be FULL.
+- TRANSITORY (0 < V < C): `spill_path == 0`.
+- EMPTY (V == 0): `trap_ix <= numregions(tstruct)` (only leaf traps may be EMPTY).
+"""
+function _validate_network(tstruct::TrapStructure,
+                           net::DynNetwork,
+                           state::AbstractVector{<:Real},
+                           geom::Vector{TrapGeometry})
+    nreg     = numregions(tstruct)
+    nt       = length(net.traps)
+    trap_map = Dict(net.traps[i].trap_ix => i for i in 1:nt)
+    for i in 1:nt
+        trap = net.traps[i]
+        V    = state[i]
+        C    = geom[i].capacity
+        if V == C                                     # FULL
+            trap.spill_path > 0 ||
+                error("solveDynNetwork!: FULL trap $(trap.trap_ix) has spill_path == 0. " *
+                      "Rebuild the network (via setup_network) with this trap in full_traps " *
+                      "before the next call so it obtains a downstream spill path.")
+            if trap.trap_ix > nreg                    # parent: in-network children must be FULL
+                for child in subtrapsof(tstruct, trap.trap_ix)
+                    ci = get(trap_map, child, 0)
+                    ci == 0 && continue               # child not in network; assumed FULL externally
+                    state[ci] == geom[ci].capacity ||
+                        error("solveDynNetwork!: FULL parent trap $(trap.trap_ix) has " *
+                              "in-network child $child with V < C. " *
+                              "A parent trap can only hold water above both children's spillpoints, " *
+                              "so both children must be FULL whenever the parent is FULL.")
+                end
+            end
+        elseif V == 0.0                               # EMPTY
+            trap.trap_ix <= nreg ||
+                error("solveDynNetwork!: EMPTY trap $(trap.trap_ix) is a parent trap " *
+                      "(trap_ix=$(trap.trap_ix) > numregions=$nreg). " *
+                      "Parent traps may only appear in the network when they contain water " *
+                      "(V > 0), i.e. all their children are full. " *
+                      "Remove this parent from the network or set its state > 0.")
+        else                                          # TRANSITORY
+            trap.spill_path == 0 ||
+                error("solveDynNetwork!: TRANSITORY trap $(trap.trap_ix) has spill_path > 0. " *
+                      "A trap that is not yet full should not have a downstream spill path. " *
+                      "Rebuild the network without this trap in full_traps.")
+        end
+    end
+end
+
+# ============================================================================
+# Driver: solveDynNetwork!.
+#
+# Wires the pieces together: validate the caller contract, build the static rate
+# parameters, classify traps into evolving / full, run the ODE, and stop at the
+# first topology-changing event.  The `state` vector is updated in place.
+# ============================================================================
+
+"""
+    solveDynNetwork!(state, tstruct, net, infiltration, inflow;
+                     path_inflow=nothing, abstol=1e-8, reltol=1e-8, zvt=nothing)
+        -> (; time, trap, kind)
 
 Evolve the water content of the lakes (traps) of a [`DynNetwork`](@ref) forward in
-time until the first *event* that changes the network topology, and return it.
+time until the first *event* that changes the network topology.  `state` is updated
+in-place with the trap volumes at the event time.
 
 # Arguments
+- `state`: stored volume (net of subtraps) of each trap, indexed as `net.traps`.
+  **Mutated in place.**  Must satisfy the three-state contract (see below) on entry.
 - `tstruct`: the [`TrapStructure`](@ref) supplying the geometry `net` refers to
 - `net`: the network to solve
 - `infiltration`: grid (shape of `tstruct.topography`) of per-cell infiltration
   rates; 0 for impermeable / fully saturated cells
 - `inflow`: constant inflow rate into each trap, indexed as `net.traps`
-- `state`: current stored volume (net of subtraps) of each trap, indexed as
-  `net.traps`.  Non-leaf traps must be full (at capacity); leaf traps may be
-  partially filled.
 
 # Keyword arguments
 - `path_inflow`: constant inflow rate directly onto each flow path (e.g. rainfall
   on path cells), indexed as `net.flow_paths`.  Defaults to zeros if `nothing`.
-  Added at the path head before infiltration losses are applied.
 - `zvt`: pre-computed volume↔level tables from [`_compute_z_vol_tables`](@ref).
-  Pass a cached value when solving many networks over the same [`TrapStructure`](@ref)
-  to avoid recomputing these static tables on every call.
+  Pass a cached value when solving many networks over the same [`TrapStructure`](@ref).
 - `abstol`, `reltol`: ODE solver tolerances.
 
 # Returns
-A named tuple:
-- `time`: time of the event, or `Inf` if the network reaches steady state with no
-  further event
+A named tuple (no `state` field — state is updated in place):
+- `time`: time of the event, or `Inf` if steady state
 - `trap`: global trap index (into `tstruct`) where the event occurred, or `0`
-  for the steady-state / no-event case
-- `kind`: `:fill` (a trap filled and started spilling), `:empty` (a trap emptied),
-  `:unspill` (a full trap's losses exceed its inflow and it immediately begins
-  draining), or `:none` (steady state)
-- `state`: the trap-volume state at `time`
+- `kind`: `:fill`, `:empty`, `:unspill`, or `:none`
 
-The problem is integrated as an `ODEProblem` with [`dynNetworkRateFunction!`](@ref)
-as the right-hand side and the first-event callback from
-[`_build_event_callback`](@ref).
+# Three-state contract (validated at entry)
+
+The caller must guarantee before every call:
+- **FULL** (V == C exactly): `DynTrap.spill_path > 0`; if a parent trap, all its
+  in-network children are also FULL.
+- **TRANSITORY** (0 < V < C strictly): `DynTrap.spill_path == 0`.
+- **EMPTY** (V == 0 exactly): the trap is a lowest-level (leaf) trap
+  (`trap_ix <= numregions(tstruct)`).
+
+# Caller protocol after each event
+
+| Event       | Action before next call                                               |
+|-------------|-----------------------------------------------------------------------|
+| `:fill`     | `state[trap]` already clamped to C.  Add trap to `full_traps`,       |
+|             | rebuild network via `setup_network`.                                  |
+| `:unspill`  | `state` unchanged (trap is still at C).  Remove trap from            |
+|             | `full_traps`, set `state[trap] = prevfloat(C)`, rebuild network.     |
+| `:empty`    | `state[trap]` clamped to 0.  Remove parent + all its children from   |
+|             | `full_traps`.  Set `state[child] = prevfloat(C_child)`.  Rebuild.   |
+| `:none`     | Steady state; no further event.                                       |
+
+FULL traps that were neither the event trigger nor changed topology may have tiny
+ODE-induced drift away from exact C.  The caller should clamp them to exactly C
+(consistent with its authoritative `full_traps` list) before the next call.
 """
-function solveDynNetwork(tstruct::TrapStructure,
-                         net::DynNetwork,
-                         infiltration::AbstractMatrix{<:Real},
-                         inflow::AbstractVector{<:Real},
-                         state::AbstractVector{<:Real};
-                         path_inflow = nothing,
-                         abstol = 1e-8, reltol = 1e-8,
-                         zvt = nothing)
+function solveDynNetwork!(state::AbstractVector{Float64},
+                          tstruct::TrapStructure,
+                          net::DynNetwork,
+                          infiltration::AbstractMatrix{<:Real},
+                          inflow::AbstractVector{<:Real};
+                          path_inflow = nothing,
+                          abstol = 1e-8, reltol = 1e-8,
+                          zvt = nothing)
 
     nt = length(net.traps)
     @assert length(state) == nt "state must have one entry per trap in net.traps"
 
     p  = _build_rate_params(tstruct, net, infiltration, inflow;
                             path_inflow=path_inflow, zvt=zvt)
-    V0 = Float64.(state)
+    V0 = copy(state)   # immutable snapshot; ODE evolves this, state is updated at the end
 
-    # Compute initial rates once; used for both the :unspill check and the stagnation check.
+    _validate_network(tstruct, net, V0, p.geom)
+
+    # Compute initial rates once; used for the t=0 fast-path checks and the stagnation guard.
     du0 = similar(V0, Float64)
     dynNetworkRateFunction!(du0, V0, p, 0.0)
 
-    # A full trap whose losses exceed its inflow (du0 < 0) begins draining immediately.
-    # Return an :unspill event at t=0 and clamp all such traps to just below capacity
-    # so the next call treats them as evolving rather than re-triggering the same event.
-    unspilling = [i for i in 1:nt if V0[i] >= p.geom[i].capacity && du0[i] < -abstol]
-    if !isempty(unspilling)
-        worst = unspilling[argmin(du0[unspilling])]
-        final = copy(V0)
-        for i in unspilling
-            final[i] = prevfloat(p.geom[i].capacity)
-        end
-        return (time = 0.0, trap = net.traps[worst].trap_ix, kind = :unspill, state = final)
+    # t=0 FULL→TRANSITORY fast path.  If any FULL trap already has du0 < 0 (net inflow
+    # below its footprint losses), it begins draining right now.  Return :unspill
+    # immediately without running the ODE.  `state` is left unchanged — the caller sets
+    # state[trap] = prevfloat(C) before the next call to make it TRANSITORY.
+    for i in 1:nt
+        V0[i] == p.geom[i].capacity && du0[i] < 0.0 || continue
+        return (time = 0.0, trap = net.traps[i].trap_ix, kind = :unspill)
     end
 
-    # Traps that evolve: those at least abstol below their capacity.  The abstol guard
-    # prevents ODE floating-point drift on full traps (where dV ≈ 0 but not exactly 0)
-    # from making them re-enter evolving and spin the callback at dt ≈ 0.
-    evolving = [i for i in 1:nt if V0[i] + abstol < p.geom[i].capacity]
+    # Traps that evolve: TRANSITORY traps (0 < V < C) plus EMPTY traps with positive
+    # inflow.  FULL traps (V == C) do not participate in :fill/:empty/:stagnation; they
+    # are handled only by the :unspill callback.
+    nreg     = numregions(tstruct)
+    evolving = [i for i in 1:nt
+                if V0[i] != p.geom[i].capacity          # not FULL
+                && (V0[i] > 0.0 || du0[i] > 0.0)]       # not a draining-empty trap
 
-    # Nothing evolves, or everything that could is already at rest: steady state.
-    isempty(evolving) && return (time = Inf, trap = 0, kind = :none, state = V0)
+    # Nothing evolves: steady state.
+    isempty(evolving) && return (time = Inf, trap = 0, kind = :none)
+
+    # All evolving traps at or near zero rate: steady state already.
+    # (abstol is a rate tolerance here, not a state classification guard.)
     all(abs(du0[i]) <= abstol for i in evolving) &&
-        return (time = Inf, trap = 0, kind = :none, state = V0)
+        return (time = Inf, trap = 0, kind = :none)
 
-    # Integrate to the first event.  Events occur in finite time (the wetted-area
-    # infiltration is piecewise constant, so a leaf either fills or hits a steady
-    # level), so an unbounded horizon with the terminating callback is safe.
-    cb, event = _build_event_callback(p, evolving, V0)
+    # Integrate to the first topology-changing event.
+    cb, event = _build_event_callback(p, evolving, V0, nreg)
     sol = solve(ODEProblem(dynNetworkRateFunction!, V0, (0.0, Inf), p);
                 callback = cb, abstol = abstol, reltol = reltol)
-    final = sol.u[end]
 
-    # Stagnation (or no trigger) means steady state -> no further event.
+    # Write ODE result back into state in place (saves one nt-length allocation per call).
+    state .= sol.u[end]
+
+    # All traps stagnated (or callback never fired): steady state.
     if event.kind == :stagnation || event.kind == :none
-        return (time = Inf, trap = 0, kind = :none, state = final)
+        return (time = Inf, trap = 0, kind = :none)
     end
 
-    # Clamp the triggering trap to its exact threshold so the next call does not
-    # re-trigger the same event due to floating-point residual at the crossing.
-    final = copy(final)
+    # Clamp the triggering trap to its exact threshold so the validator passes on the
+    # next call without requiring the caller to handle floating-point residual at the
+    # event crossing.
     if event.kind == :fill
-        final[event.trap] = p.geom[event.trap].capacity
+        state[event.trap] = p.geom[event.trap].capacity
     elseif event.kind == :empty
-        final[event.trap] = 0.0
+        state[event.trap] = 0.0
     end
 
-    return (time  = sol.t[end],
-            trap  = net.traps[event.trap].trap_ix,
-            kind  = event.kind,
-            state = final)
+    return (time = sol.t[end],
+            trap = net.traps[event.trap].trap_ix,
+            kind = event.kind)
 end

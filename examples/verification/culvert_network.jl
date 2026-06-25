@@ -51,36 +51,85 @@ function _mini_trapstructure()
     return spillanalysis(grid, usediags=true)
 end
 
-# Run the fill cascade from all-empty to steady state, returning
-#   times     — cumulative event times (length n+1, includes t=0)
-#   fracs     — (ntraps × (n+1)) fill-fraction matrix
-#   events    — vector of (t, kind, trap) named tuples for non-:none events
-function _run_cascade(ts, net; inflow=1.0, infiltration=0.0, max_events=5000)
-    nt    = length(net.traps)
-    ifil  = fill(infiltration, size(ts.topography))
-    qin   = fill(Float64(inflow), nt)
-    geom  = SWIM._build_trap_geometry(ts, net, ifil)
-    caps  = [g.capacity for g in geom]
-    state = zeros(Float64, nt)
-    t_abs = 0.0
+# Run the fill cascade from all-empty to steady state, rebuilding the network
+# after every topology-changing event (fill / unspill) as required by the
+# solveDynNetwork! caller contract.
+#
+# Returns:
+#   times      — cumulative event times (length n+1, includes t=0)
+#   fracs      — (ntraps × (n+1)) fill-fraction matrix, traps in first-network order
+#   events     — vector of (t, kind, trap) named tuples for non-:none events
+#   gix_order  — global trap_ix in the order used for rows of `fracs`
+function _run_cascade(ts, start_cells, cvlts=DynCulvert[];
+                      inflow=1.0, infiltration=0.0, max_events=5000)
+    ifil       = fill(infiltration, size(ts.topography))
+    full_traps = Int[]
 
-    norm_fracs(s) = s ./ max.(caps, 1e-12)
+    # First network (no full traps yet) establishes the full trap list and capacities.
+    first_nets = setup_network(ts, start_cells, full_traps; culverts=cvlts)
+    isempty(first_nets) && return [0.0], zeros(0, 1), NamedTuple{(:t,:kind,:trap),Tuple{Float64,Symbol,Int}}[], Int[]
+    first_net  = first_nets[1]
+    gix_order  = [t.trap_ix for t in first_net.traps]  # stable row order for `fracs`
+    ntotal     = length(gix_order)
 
+    # Per-trap capacity (by global trap_ix) and current volume.
+    cap_by_gix = Dict{Int,Float64}()
+    vol_by_gix = Dict(gix => 0.0 for gix in gix_order)
+
+    function _caps_and_state!(net)
+        geom = SWIM._build_trap_geometry(ts, net, ifil)
+        state = Vector{Float64}(undef, length(net.traps))
+        for (i, trap) in enumerate(net.traps)
+            cap_by_gix[trap.trap_ix] = geom[i].capacity
+            state[i] = trap.trap_ix in full_traps ? geom[i].capacity :
+                                                    get(vol_by_gix, trap.trap_ix, 0.0)
+        end
+        return state
+    end
+
+    snap_fn() = [get(vol_by_gix, gix, 0.0) / max(get(cap_by_gix, gix, 1.0), 1e-12)
+                 for gix in gix_order]
+
+    # Populate initial capacities.
+    _caps_and_state!(first_net)
+
+    t_abs     = 0.0
     times     = [0.0]
-    snapshots = [norm_fracs(state)]
+    snapshots = [snap_fn()]
     events    = NamedTuple{(:t, :kind, :trap), Tuple{Float64, Symbol, Int}}[]
 
     for _ in 1:max_events
-        res    = solveDynNetwork(ts, net, ifil, qin, state)
+        nets = setup_network(ts, start_cells, full_traps; culverts=cvlts)
+        isempty(nets) && break
+        net   = nets[1]
+        qin   = fill(Float64(inflow), length(net.traps))
+        state = _caps_and_state!(net)
+
+        res = solveDynNetwork!(state, ts, net, ifil, qin)
+
+        # Update global volumes from the (mutated) state.
+        for (i, trap) in enumerate(net.traps)
+            vol_by_gix[trap.trap_ix] = state[i]
+        end
+
         t_abs += isfinite(res.time) ? res.time : 0.0
-        state  = copy(res.state)
         push!(times, t_abs)
-        push!(snapshots, norm_fracs(state))
+        push!(snapshots, snap_fn())
         res.kind != :none && push!(events, (t=t_abs, kind=res.kind, trap=res.trap))
-        res.kind == :none && break
+
+        if res.kind == :fill
+            push!(full_traps, res.trap)
+        elseif res.kind == :unspill
+            # Caller must set the unspilling trap to just below capacity.
+            li = findfirst(t -> t.trap_ix == res.trap, net.traps)
+            li !== nothing && (vol_by_gix[res.trap] = prevfloat(cap_by_gix[res.trap]))
+            filter!(!=(res.trap), full_traps)
+        elseif res.kind == :none
+            break
+        end
     end
 
-    return times, hcat(snapshots...), events
+    return times, hcat(snapshots...), events, gix_order
 end
 
 """
@@ -91,27 +140,28 @@ culvert from the head-of-chain trap to a trap ~80 % of the way downstream, run
 both fill cascades from empty, and plot the fill fractions side by side.
 """
 function verify_culvert_network(; inflow=0.02, infiltration=0.0)
-    ts      = _mini_trapstructure()
-    allfull = collect(1:SWIM.numtraps(ts))
+    ts = _mini_trapstructure()
+    cv = DynCulvert(ts, _CV_INLET, _CV_OUTLET; r=_CV_RADIUS)
 
-    net_bare = setup_network(ts, [_START_CELL], allfull)[1]
-    cv       = DynCulvert(ts, _CV_INLET, _CV_OUTLET; r=_CV_RADIUS)
-    net_cv   = setup_network(ts, [_START_CELL], allfull; culverts=[cv])[1]
+    times_bare, fracs_bare, evts_bare, gix_bare = _run_cascade(ts, [_START_CELL];
+                                                                inflow, infiltration)
+    times_cv,   fracs_cv,   evts_cv,   gix_cv   = _run_cascade(ts, [_START_CELL], [cv];
+                                                                inflow, infiltration)
 
-    nt_bare = length(net_bare.traps)
-    nt_cv   = length(net_cv.traps)
-    np_bare = length(net_bare.flow_paths)
-    np_cv   = length(net_cv.flow_paths)
+    nt_bare = length(gix_bare)
+    nt_cv   = length(gix_cv)
 
-    @info "Without culvert : $nt_bare traps, $np_bare paths"
-    @info "With culvert     : $nt_cv traps, $np_cv paths, 1 culvert  r=$(_CV_RADIUS) m"
+    @info "Without culvert : $nt_bare traps"
+    @info "With culvert     : $nt_cv traps, 1 culvert  r=$(_CV_RADIUS) m"
 
-    times_bare, fracs_bare, evts_bare = _run_cascade(ts, net_bare; inflow, infiltration)
-    times_cv,   fracs_cv,   evts_cv   = _run_cascade(ts, net_cv;   inflow, infiltration)
-
-    # local indices for the culvert inlet / outlet traps
-    ti_in  = findfirst(t -> !isempty(t.culvert_inlets),  net_cv.traps)
-    ti_out = findfirst(t -> !isempty(t.culvert_outlets), net_cv.traps)
+    # For the culvert network, find the local row indices of the inlet / outlet traps.
+    # (We know them by their global trap_ix via the culvert endpoints.)
+    cv_nets = setup_network(ts, [_START_CELL], Int[]; culverts=[cv])
+    cv_net  = isempty(cv_nets) ? nothing : cv_nets[1]
+    ti_in   = cv_net === nothing ? nothing :
+              findfirst(i -> !isempty(cv_net.traps[i].culvert_inlets),  eachindex(gix_cv))
+    ti_out  = cv_net === nothing ? nothing :
+              findfirst(i -> !isempty(cv_net.traps[i].culvert_outlets), eachindex(gix_cv))
 
     nfill_bare   = count(e -> e.kind == :fill,    evts_bare)
     nfill_cv     = count(e -> e.kind == :fill,    evts_cv)
@@ -128,7 +178,7 @@ function verify_culvert_network(; inflow=0.02, infiltration=0.0)
 
     # --- left panel: reference (no culvert) ---
     ax_bare = GLMakie.Axis(fig[1, 1];
-        title   = "Without culvert — $nt_bare traps, $np_bare paths",
+        title   = "Without culvert — $nt_bare traps",
         xlabel  = "cumulative time",
         ylabel  = "fill fraction  V / capacity",
         limits  = (nothing, (-0.04, 1.12)))
@@ -142,9 +192,8 @@ function verify_culvert_network(; inflow=0.02, infiltration=0.0)
         GLMakie.vlines!(ax_bare, fill_ts; color=(:black, 0.12), linewidth=0.7)
 
     # --- right panel: with culvert ---
-    cv_label = "culvert r=$(_CV_RADIUS) m · inlet trap → outlet trap"
     ax_cv = GLMakie.Axis(fig[1, 2];
-        title   = "With culvert (r=$(_CV_RADIUS) m) — $nt_cv traps, $np_cv paths",
+        title   = "With culvert (r=$(_CV_RADIUS) m) — $nt_cv traps",
         xlabel  = "cumulative time",
         ylabel  = "fill fraction  V / capacity",
         limits  = (nothing, (-0.04, 1.12)))

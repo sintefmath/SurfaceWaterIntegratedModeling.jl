@@ -171,8 +171,7 @@ water level above the cell invert; the settled simplifications are recorded unde
 consume negative rates.  The outlet-control friction term uses the HDS-5
 hydraulic-radius form `Kf = Ku·n²·L / R^(4/3)` (`Ku = 19.63` SI, `R = D/4` for a
 full circular pipe); the 1 m/cell grid-resolution assumption is still taken on
-trust and flagged in-code with `@@@`.  The function is *not yet wired into the
-solver* — `_route_flow` does not call it yet (that is the remaining part of task 2).
+trust and flagged in-code with `@@@`.  The function is wired into the solver via `_culvert_flow` → `_path_delivered!` → `_route_flow`.
 
 ## Local paths
 
