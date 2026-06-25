@@ -622,9 +622,10 @@ end
     end
 
     @testset "solveDynNetwork!: :empty registered only for parent traps" begin
-        # _event_conditions must add :fill + :stagnation for ALL evolving traps, but
-        # :empty only for those whose trap_ix > numregions (parent/merged traps).
-        # Leaf traps at V=0 are at their physical floor — no topology changes there.
+        # _event_conditions must add :fill + :stagnation for evolving traps with
+        # non-zero initial rate, but :empty only for those whose trap_ix > numregions
+        # (parent/merged traps).  Leaf traps at V=0 are at their physical floor —
+        # no topology changes there.
         nreg = numregions(ts)
         p_ec = SWIM._build_rate_params(ts, net, zeros(size(ts.topography)), fill(1.0, nt))
 
@@ -633,7 +634,13 @@ end
         li = nt
         @assert pi !== nothing "test requires a parent trap in the :long chain"
 
-        conds = SWIM._event_conditions(p_ec, [pi, li], nreg)
+        # Use half-capacity state so both pi and li have dv0 > abstol (each gets
+        # inflow=1.0, no infiltration, not spilling → dV=1.0 for every trap).
+        caps_ec = [g.capacity for g in p_ec.geom]
+        V0_ec   = caps_ec .* 0.5
+        dv0_ec  = zeros(nt)
+        SWIM.dynNetworkRateFunction!(dv0_ec, V0_ec, p_ec, 0.0)
+        conds = SWIM._event_conditions(p_ec, [pi, li], nreg, dv0_ec, 1e-8)
 
         @test  any(c -> c.trap == li && c.kind == :fill,       conds)
         @test  any(c -> c.trap == li && c.kind == :stagnation, conds)
