@@ -316,8 +316,7 @@ See also: [`identify_flat_areas`](@ref)
 """
 function flatten_grid!(grid::Matrix{<:Real},  # will be modified
                        mask::Matrix{<:Bool},  # constant
-                       height_choice::Symbol) # constan
-t
+                       height_choice::Symbol) # constant
     cl = _identify_clusters(mask)
 
     hchoice = Dict([(:min, minimum),
