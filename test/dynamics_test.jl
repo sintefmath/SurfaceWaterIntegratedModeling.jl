@@ -258,6 +258,68 @@ source_traps(net) = count(ti -> all(p -> p.target_trap != ti, net.flow_paths),
     @test disjoint_cells(separate)
 end
 
+# a network must never contain a trap whose ancestor (supertrap) is also present:
+# a parent is always a single node subsuming its whole subtree (the subsume-parents
+# invariant).
+function subsumed_consistently(net, ts)
+    present = Set(t.trap_ix for t in net.traps)
+    return all(t -> !any(s != t.trap_ix && SWIM._is_descendant(ts, t.trap_ix, s)
+                         for s in present),
+               net.traps)
+end
+
+@testset "setup_network subsumes terminal parent (B1)" begin
+    grid = loadgrid(joinpath(artifact"swim_testdata", "data", "small", "mini.txt"))
+    ts = spillanalysis(grid, usediags=true)
+    CIidx = CartesianIndices(size(ts.topography))
+
+    # Parent 414 has leaf children 9 and 18.  With both children full but the parent
+    # unfilled, the parent must appear as ONE node subsuming its children — not as the
+    # three separate nodes [9, 18, 414] the old constructor produced.
+    @test 414 in SWIM.parentof.(Ref(ts), [9, 18])
+
+    # (a) start inside a child -> the whole composite collapses to a lone parent node
+    inside = setup_network(ts, [CIidx[ts.footprints[9][1]]], [9, 18])
+    @test length(inside) == 1
+    net_in = inside[1]
+    @test [t.trap_ix for t in net_in.traps] == [414]
+    @test net_in.traps[1].spill_path == 0          # terminal
+    @test isempty(net_in.flow_paths)
+    @test subsumed_consistently(net_in, ts)
+    @test valid_network(net_in)
+
+    # (b) start upstream on the slope (region 9, outside the basin) -> an external path
+    # feeds the single parent node, and no cell internal to the parent footprint
+    # survives in any flow path.
+    fp9  = Set(ts.footprints[9])
+    ext  = findfirst(i -> ts.regions[i] == 9 && !(i in fp9), eachindex(ts.regions))
+    outn = setup_network(ts, [CIidx[ext]], [9, 18])[1]
+    @test [t.trap_ix for t in outn.traps] == [414]
+    @test subsumed_consistently(outn, ts)
+    @test valid_network(outn)
+    fp414 = Set(CIidx[k] for k in ts.footprints[414])
+    @test all(c -> !(c in fp414), (c for p in outn.flow_paths for c in p.cells))
+
+    # (c) broad scan: for every multi-child parent, fill its whole subtree but not the
+    # parent, start inside each leaf child — never a subsumption violation.
+    nreg = numregions(ts); nt = numtraps(ts)
+    for P in (nreg + 1):nt
+        kids = SWIM.subtrapsof(ts, P)
+        length(kids) < 2 && continue
+        sub = Int[]; stack = copy(kids)
+        while !isempty(stack)
+            x = pop!(stack); push!(sub, x); append!(stack, SWIM.subtrapsof(ts, x))
+        end
+        for k in kids
+            k > nreg && continue
+            for net in setup_network(ts, [CIidx[ts.footprints[k][1]]], sub)
+                @test subsumed_consistently(net, ts)
+                @test valid_network(net)
+            end
+        end
+    end
+end
+
 @testset "setup_network culverts on mini.txt" begin
     grid = loadgrid(joinpath(artifact"swim_testdata", "data", "small", "mini.txt"))
     ts = spillanalysis(grid, usediags=true)

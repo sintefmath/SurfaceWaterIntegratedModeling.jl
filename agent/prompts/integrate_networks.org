@@ -1,0 +1,26 @@
+The current task is to integrate the `fill_sequence` and `solveDynNetwork!` processes.
+
+- The purpose and workings of `fill_sequence` is explained in the report `fill_sequence_explainer.md`
+- The purpose and workings of `solvDynNetwork!` is explained in the report `solve_dyn_network_explainer.md`.
+
+The reason we want to integrate `solveDynNetwork!` into `fill_sequence` is as follows:
+
+Currently, fill_sequence assumes (piecewise) constant precipitation and infiltration rates.  This means that between events, inflows and outflows can be accurately predicted.
+
+However, with the introduction of rate-limited culverts, and (later) NBS-systems, flow rates between traps/entities can no longer be assumed (piecewise) constant.  We need to isolate the parts of the system that's affected by variable rates, and solve them as separate sub-systems to identify the timings where the associated traps would fill or start emptying.
+
+For the moment, this includes traps that are directly or indirectly connected to rate-limited culverts, but later it could also be NBS-systems.
+
+We do not want to use `solveDynNetwork!` for all traps, though, since solving this network requires solving and ODE that can be more time consuming than directly identifying the next event through the use of the current `fill_sequence` machinery.  Hence, we want to isolate the affected traps/flow paths as necessary, solve these as a DynNetwork, and feed the output into the `fill_sequence` algorithm at the right place(s).
+
+The modified `fill_sequence` function should take an additional argument containing a list of gridcells that we know would need to be part of a dynamic network.
+
+The DynNetworks would then be caluclated and set up somewhere inside `fill_sequence`.  These networks would likely need to be updated whenever flow topology changes.
+
+Solving the DynNetwork would provide the `ChangeTimeEstimate` for the affected traps.  In practice, it is probably only the most immediate ChangeTimeEstimate that matters, since the network might have to be updated afterwards.  Contrary to most ChangeTimeEstimates currently used, the esimates coming from the `solveDynNetwork!` solvers would be exact, i.e. the `min` and `max` fields would be equal.
+
+The direct inflow to traps in the network would be specified by the inflows from terrain and non-network traps in the full model.  (Inflow from other traps in the network would be modeled directly in the network.)
+
+Likely 'hotspots' where the code might need to change is the `_set_initial_changetime_estimates` and `update_flow!`.
+
+Could you have a look at the related code and come up with/propose a way to properly implement this.  Do not start implementation, but show me the proposed plan.  We might need to iterate on it before modifying any code.

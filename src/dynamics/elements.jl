@@ -252,10 +252,65 @@ function _subnetwork(tstruct, coord::CartesianIndex, full_traps)
                      (starts_with_trap && length(paths) == length(ftraps))
     if ends_with_path
         tix = _unfilled_trap_at(tstruct, paths[end][end], full_traps)
-        tix > 0 && push!(traps, tix)
+        if tix > 0
+            # Subsume-parents invariant: a parent trap is always a single node that
+            # subsumes its whole subtree.  When the terminal unfilled trap `tix` is a
+            # parent, its already-full children may have been recorded as separate nodes
+            # (they spill into the parent inside its own footprint).  Collapse them into
+            # the single parent node, dropping the path segments internal to its
+            # footprint.  (A *full* parent is already subsumed by `flow_path_from`, which
+            # records the uppermost full supertrap and deletes its footprint cells.)
+            paths, traps, starts_with_trap =
+                _subsume_terminal_parent(tstruct, paths, ftraps, tix, starts_with_trap)
+        end
     end
 
     return _build_network(paths, traps, starts_with_trap, tstruct)
+end
+
+# Is `t` a (transitive) subtrap of `P`?  Walk the agglomeration hierarchy upward from
+# `t` until `P` is reached (descendant) or the root is passed (not a descendant).
+function _is_descendant(tstruct, t::Int, P::Int)
+    cur = t
+    while true
+        par = parentof(tstruct, cur)
+        par === nothing && return false
+        par == P && return true
+        cur = par
+    end
+end
+
+# Collapse a terminal unfilled parent `P` and its in-chain full descendants into a
+# single node.  `ftraps` are the full traps recorded downstream (a prefix of upstream
+# non-descendants followed by a contiguous suffix of `P`'s descendants); `paths` are the
+# segments between them.  Returns `(paths, traps, starts_with_trap)` for `_build_network`
+# with the descendant traps and the path segments internal to `P`'s footprint removed,
+# and the last surviving path retargeted into `P`.
+function _subsume_terminal_parent(tstruct, paths, ftraps, P::Int, starts_with_trap::Bool)
+    d = findfirst(t -> _is_descendant(tstruct, t, P), ftraps)
+    if d === nothing
+        # `P` has no recorded descendants: keep the original chain, `P` as terminal.
+        return paths, push!(collect(ftraps), P), starts_with_trap
+    end
+
+    # Keep the upstream non-descendant traps, then the single parent node `P`.
+    new_traps = vcat(ftraps[1:d-1], P)
+
+    # Paths that feed into `ftraps[d]` (the first descendant): with a leading trap the
+    # path into trap i is path i-1, otherwise it is path i.
+    npath_keep = starts_with_trap ? d - 1 : d
+    new_paths = [copy(paths[i]) for i in 1:npath_keep]
+
+    # The last kept path enters `P`; drop its cells that lie inside `P`'s footprint
+    # (those are internal to the composite and carry no external flow).
+    if !isempty(new_paths)
+        fpP = Set(tstruct.footprints[P])
+        last = new_paths[end]
+        cut = findfirst(c -> c ∈ fpP, last)
+        cut !== nothing && (new_paths[end] = last[1:cut-1])
+    end
+
+    return new_paths, new_traps, starts_with_trap
 end
 
 # Return the index of the uppermost unfilled trap that `cell` drains into, or 0 if
