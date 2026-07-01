@@ -229,16 +229,8 @@ end
 # ----------------------------------------------------------------------------
 function _compute_changetime_estimate(trap, cur_amounts, cur_time, rateinfo, filled_traps, tstruct)
 
-    new_inflow = getinflow(rateinfo, trap)
-    # NB: when computing min_net_inflow and max_net_inflow, we must keep in mind
-    # that the flow into a parent trap has already had the infiltration of the
-    # subtrap deducted.  The maximum inflow is therefore equal the inflow, and
-    # the minimum inflow will have the additional amount deducted that is the
-    # max infiltration of the parent trap (Smax) less the quantity that has
-    # already been deducted from the inflow (Smin).
-    min_net_inflow = tr -> getinflow(rateinfo, tr) -
-                           (getsmax(rateinfo, tr) - getsmin(rateinfo, tr))
-    max_net_inflow = tr -> getinflow(rateinfo, tr)
+    min_net_inflow = tr -> getinflow(rateinfo, tr) - getsmax(rateinfo, tr)
+    max_net_inflow = tr -> getinflow(rateinfo, tr) - getsmin(rateinfo, tr)
 
     if filled_traps[trap]
         # Trap is currently full.  Return time when trap starts emptying
@@ -268,15 +260,14 @@ function _compute_changetime_estimate(trap, cur_amounts, cur_time, rateinfo, fil
                 return ChangeTimeEstimate(false, Inf, Inf)
             else
                 parent_volume = cur_amounts[parent].amount
-                starttime = cur_amounts[parent].time
                 min_time =
                     (parent_volume > 0.0) ? -parent_volume / parent_min_net_inflow : 0.0
                 max_time =
                     (parent_volume > 0.0) ? -parent_volume / parent_max_net_inflow : 0.0
 
                 return ChangeTimeEstimate(false,
-                                          min_time + starttime,
-                                          max_time + starttime)
+                                          cur_time + min_time,
+                                          cur_time + max_time)
             end
         end
     else
@@ -412,7 +403,7 @@ function _identify_next_status_change!(changetimeest, cur_amounts, rateinfo,
         children = subtrapsof(tstruct, cand)
         for c in children
             changetimeest[c] =
-                _compute_changetime_estimate(c, cur_amounts, cur_time,
+                _compute_changetime_estimate(c, cur_amounts, earliest_changetime,
                                              rateinfo, filled_traps, tstruct)
         end
         filled_traps[cand] = !filled_traps[cand] # flip it back so as not to have
@@ -528,7 +519,7 @@ function fill_trap_until(trap, rateinfo, cur_amount, endtime, tstruct, z_vol_tab
     if Smax == Smin
         # net rate will not depend on the degree of fill, and we do not need to
         # solve an ODE to get the time to trap filled (or emptied)
-        accum_rate = inflow # NB: Smin (=Smax) has already been deducted from inflow
+        accum_rate = inflow - Smax
         (accum_rate == 0.0) && return (cur_amount.amount, nothing) # no change in fill
                                                                    # amount
         dt = (accum_rate > 0) ?
@@ -548,8 +539,7 @@ function fill_trap_until(trap, rateinfo, cur_amount, endtime, tstruct, z_vol_tab
         use_saved ? [-min(getsavedrunoff(rateinfo, i), 0.0) for i in footprint] :
                     -min.(getrunoff(rateinfo, footprint), 0.0)
 
-    infilfun = ixs -> sum(fprint_infil[ixs]) - Smin # discount Smin since it has been
-                                                    # deducted when computing inflow
+    infilfun = ixs -> sum(fprint_infil[ixs])
     v0 = [cur_amount.amount]
     dvdt = _setup_dvdt(trap_bottom, tvolume, infilfun, inflow,
                        tstruct.spillpoints[trap], z_vol_tables[trap])
@@ -576,7 +566,10 @@ function fill_trap_until(trap, rateinfo, cur_amount, endtime, tstruct, z_vol_tab
         terminate!(integrator)
     end
     cb = VectorContinuousCallback(condition, affect!, 3)
-    dt = endtime - cur_amount.time
+    # Cap dt: Inf tspan causes DiffEq's adaptive stepper to reach t ~ 1e307, at which
+    # point the internal event-check range(t, Inf, n) overflows.  1e12 is far beyond
+    # any physical horizon; if no callback fires within it, the caller sees tstop=nothing.
+    dt = min(endtime - cur_amount.time, 1e12)
     sol = solve(ODEProblem(dvdt, v0, [0, dt]), callback = cb, abstol=1e-6, reltol=1e-4)
 
     return (sol.u[end][1], # amount of water at end of integration

@@ -44,9 +44,12 @@ end
 # ----------------------------------------------------------------------------
 # Per-node gross composite external inflow (plan §4): for each node, the sum of
 # `trap_inflow` over its leaf descendants (= `trap_inflow[node]` for a leaf node).
-# `lowest_subtraps_for[t]` lists exactly those leaf descendants ( == [t] for a
-# leaf).  This matches the solver's composite-footprint geometry, so no double
-# counting of child infiltration occurs.
+# `lowest_subtraps_for[t]` lists exactly those leaf descendants (== [t] for a
+# leaf).  The leaf-sum is used rather than `getinflow(rateinfo, t.trap_ix)`
+# directly: `_reconcile_spillgraph!` removes covered children from the spillgraph
+# and withdraws their flow from `trap_inflow[parent]`, so that value is stale by
+# the time `_external_inflow` is called.  Leaf `trap_inflow` values are unaffected
+# and always current.
 function _external_inflow(net::DynNetwork, rateinfo, tstruct)
     return Float64[sum(getinflow(rateinfo, leaf)
                        for leaf in tstruct.lowest_subtraps_for[t.trap_ix])
@@ -316,9 +319,18 @@ function _touch_networks!(net_contexts, changetimeest, sgraph, tstruct, dyn_trap
 
     # 4. Build the contexts (external inflow now reads the reconciled rateinfo) and
     #    predict each.
+    # For traps newly absorbed into the network (not in committed and not full), the
+    # cur_amounts entry is stale — it holds the volume at the last committed event, not
+    # at cur_time.  Project it forward to cur_time using the pre-reconcile (saved) inflow,
+    # the same inflow that was active while the plain path was accumulating water there.
+    function _state0_project(g)
+        vol, _ = fill_trap_until(g, rateinfo, cur_amounts[g], cur_time,
+                                 tstruct, z_vol_tables, use_saved=true)
+        return vol
+    end
     state0(g) = g in full_set        ? _own_capacity(tstruct, g) :
                 haskey(committed, g) ? committed[g]              :
-                                       cur_amounts[g].amount
+                                       _state0_project(g)
     new_contexts = DynNetworkContext[]
     for net in components
         c = _make_context(net, tstruct, rateinfo, seeds, state0, cur_time)

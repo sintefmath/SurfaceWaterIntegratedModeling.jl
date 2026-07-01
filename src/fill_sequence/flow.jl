@@ -50,14 +50,14 @@ function compute_flow(spillgraph::SpillGraph,
         end
         targetnode = targetnode[1]
 
-        signed_flow = getinflow(rateinfo, sourcenode) - getsmax(rateinfo, sourcenode)
         if _is_parent(targetnode, sourcenode, tstruct)
             # target is parent, no flow tracking over terrain necessary
             setinflow!(rateinfo,
                        targetnode,
-                       getinflow(rateinfo, targetnode) + signed_flow)
+                       getinflow(rateinfo, targetnode) + getinflow(rateinfo, sourcenode))
         else
             # track flow downstream until trap, sink or domain boundary is encountered
+            signed_flow = getinflow(rateinfo, sourcenode) - getsmax(rateinfo, sourcenode)
             outflow = max(signed_flow, 0.0) # outflow is always positive
             _track_flow!(rateinfo, sourcenode, outflow, tstruct) # update 'rateinfo'
         end
@@ -236,7 +236,7 @@ function _update_flow!(rateinfo, graph_updates, tstruct, sgraph)
         signed_outflow = getinflow(rateinfo, trap) - getsmax(rateinfo, trap)
 
         if from > 0
-            outflow = _is_parent(from, trap, tstruct) ? signed_outflow :
+            outflow = _is_parent(from, trap, tstruct) ? getinflow(rateinfo, trap) :
                                                         max(signed_outflow, 0.0)
             _propagate_amount!(rateinfo, trap, -1 * outflow, tstruct,
                                sgraph, old_edges=old_edges)
@@ -254,7 +254,7 @@ function _update_flow!(rateinfo, graph_updates, tstruct, sgraph)
         signed_outflow = getinflow(rateinfo, trap) - getsmax(rateinfo, trap)
         
         if to > 0
-            outflow = _is_parent(to, trap, tstruct) ? signed_outflow :
+            outflow = _is_parent(to, trap, tstruct) ? getinflow(rateinfo, trap) :
                                                       max(signed_outflow, 0.0)
             _propagate_amount!(rateinfo, trap, outflow, tstruct, sgraph)
         end

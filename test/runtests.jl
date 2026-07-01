@@ -116,13 +116,13 @@ end
 @testset "Sequencing" begin
 
     @test test_sequencing(grid1, false, 462, 0.04491857143)
-    @test test_sequencing(grid2, false, 1090, 0.227784433)
-    @test test_sequencing(grid2, false, 1124, 0.231848557) mask=mask2
+    @test test_sequencing(grid2, false, 1084, 0.227784433)
+    @test test_sequencing(grid2, false, 1119, 0.231848557) mask=mask2
     @test test_sequencing(grid3, false, 5, 0.4528216)
 
-    @test test_sequencing(grid1, true, 512, 1.51723914) 
-    @test test_sequencing(grid2, true, 1313, 5.0519047) 
-    @test test_sequencing(grid2, true, 1353, 5.0519047) mask=mask2
+    @test test_sequencing(grid1, true, 512, 1.644382996)
+    @test test_sequencing(grid2, true, 1302, 14.419380500)
+    @test test_sequencing(grid2, true, 1344, 14.419380500) mask=mask2
     @test test_sequencing(grid3, true, 8, 4.5241752066)
 
 end

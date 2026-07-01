@@ -1056,9 +1056,16 @@ function solveDynNetwork!(state::AbstractVector{Float64},
     # overshoots V = 0 to ~-1e307 in one move — and the step's internal time range then
     # overflows before any callback can fire.  Rejecting out-of-box states forces the
     # stepper down so the trap settles cleanly at its floor / capacity.
+    #
+    # isoutofdomain only guards against negative V; it cannot prevent the stepper from
+    # wandering to t ~ 1e307 when the drain is so slow that V stays positive throughout.
+    # Cap tmax at a large but finite value so DiffEq never receives Inf as a tspan
+    # endpoint (which triggers an internal range(t, Inf, n) that Julia rejects).  1e12
+    # is many orders of magnitude beyond any physical simulation horizon.
+    tmax_ode = min(tmax, 1e12)
     isoutofdomain(u, pp, t) =
         any(u[i] < -1e-9 || u[i] > pp.geom[i].capacity + 1e-9 for i in eachindex(u))
-    sol = solve(ODEProblem(dynNetworkRateFunction!, V0, (0.0, tmax), p);
+    sol = solve(ODEProblem(dynNetworkRateFunction!, V0, (0.0, tmax_ode), p);
                 callback = CallbackSet(cb_topo, cb_ss),
                 isoutofdomain = isoutofdomain,
                 abstol = abstol, reltol = reltol)
@@ -1067,12 +1074,12 @@ function solveDynNetwork!(state::AbstractVector{Float64},
     state .= sol.u[end]
 
     # No topology event fired.  Two sub-cases, distinguished by the stop time:
-    #   - reached the `tmax` cutoff (sol.t[end] == tmax): the window elapsed with the
-    #     network still evolving — report `tmax`, with `state` at `tmax`.
-    #   - cb_ss terminated earlier (sol.t[end] < tmax): genuine steady state — `Inf`.
+    #   - reached the `tmax_ode` cutoff (sol.t[end] ≈ tmax_ode): the window elapsed with
+    #     the network still evolving — report the caller's `tmax`, with `state` at tmax_ode.
+    #   - cb_ss terminated earlier (sol.t[end] < tmax_ode): genuine steady state — `Inf`.
     if event.kind == :none
-        return sol.t[end] >= tmax ? (time = tmax, trap = 0, kind = :none) :
-                                    (time = Inf,  trap = 0, kind = :none)
+        return sol.t[end] >= tmax_ode ? (time = tmax, trap = 0, kind = :none) :
+                                        (time = Inf,  trap = 0, kind = :none)
     end
 
     # Clamp the triggering trap to its exact threshold so the validator passes on the

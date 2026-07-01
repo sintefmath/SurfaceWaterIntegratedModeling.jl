@@ -1159,15 +1159,75 @@ end
     ftF  = filltimes(seqF)
     @test length(seqF) == length(seqP)
     @test Set(keys(ftF)) == Set(keys(ftP))
-    @test maxΔ(ftP, ftF) < 1e-5
+    @test maxΔ(ftP, ftF) < 1e-6
 
-    # MIXED coverage (subset networked) — same traps fill; timings agree to a looser
-    # tolerance.  @@@ a ~5e-4 discrepancy remains at a confluence fed by both a
-    # networked and a non-networked branch; tighten once that boundary effect is
-    # resolved.
+    # MIXED coverage (subset networked) — same traps fill; timings agree to floating-point
+    # precision.  Boundary traps newly absorbed by the network are projected to cur_time
+    # before initialising their ODE state, so no accumulation-lag is introduced.
     ftM = filltimes(fill_sequence(ts, weather; dyn_traps=[233, 220]))
     @test Set(keys(ftM)) == Set(keys(ftP))
-    @test maxΔ(ftP, ftM) < 2e-3
+    @test maxΔ(ftP, ftM) < 1e-6
+
+    # Subtrap-hierarchy seed (trap 414 seeds a network that later absorbs sibling trap 18).
+    ft414 = filltimes(fill_sequence(ts, weather; dyn_traps=[414]))
+    @test Set(keys(ft414)) == Set(keys(ftP))
+    @test maxΔ(ftP, ft414) < 1e-6
+
+    @testset "drought drain ordering and parity (staletime regression)" begin
+        infil2 = fill(0.05, size(ts.topography))
+
+        # Run rain until every trap is filled, then switch to drought.
+        T_fill   = maximum(values(filltimes(
+                       fill_sequence(ts, [WeatherEvent(0.0, 1.0)]; infiltration=infil2)))) + 1.0
+        weather2 = [WeatherEvent(0.0, 1.0), WeatherEvent(T_fill, 0.0)]
+
+        # Weather-period boundary events carry e.filled::Vector{Bool} (full snapshot),
+        # not Vector{IncrementalUpdate{Bool}}.  Only incremental events record the
+        # trap-by-trap transitions we care about here.
+        inc_events(seq) = Iterators.filter(
+            e -> e.filled isa Vector{IncrementalUpdate{Bool}}, seq)
+        function draintimes(seq)
+            d = Dict{Int,Float64}()
+            for e in inc_events(seq), u in e.filled
+                !u.value && !haskey(d, u.index) && (d[u.index] = e.timestamp)
+            end; d
+        end
+        function filltimes_r(seq)   # filltimes robust to multi-weather sequences
+            d = Dict{Int,Float64}()
+            for e in inc_events(seq), u in e.filled
+                u.value && !haskey(d, u.index) && (d[u.index] = e.timestamp)
+            end; d
+        end
+
+        seqP = fill_sequence(ts, weather2; infiltration=infil2)
+        dtP  = draintimes(seqP)
+
+        # (1) Every trap that filled must eventually drain.
+        # Regression: old min_net_inflow formula = getinflow − (getsmax − getsmin) gave
+        # zero drain rate during uniform-infiltration drought (smax==smin), producing
+        # Inf estimate for traps inside a filled parent → no unspill event ever fired.
+        @test Set(keys(filltimes_r(seqP))) ⊆ Set(keys(dtP))
+
+        # (2) Topological drain ordering: a child drains no earlier than its parent.
+        # Regression: the estimate anchor used cur_amounts[parent].time (drought start)
+        # instead of earliest_changetime (when the parent actually fires :unspill).
+        # For a trap submerged by a grandparent, these differ; using the stale anchor
+        # placed the child's drain estimate before the parent had even started draining.
+        nreg = numregions(ts); nt = numtraps(ts)
+        for t in (nreg+1):nt
+            haskey(dtP, t) || continue
+            for child in SWIM.subtrapsof(ts, t)
+                haskey(dtP, child) && @test dtP[child] >= dtP[t]
+            end
+        end
+
+        # (3) Dynamic path drain times match plain path.
+        dtM    = draintimes(fill_sequence(ts, weather2; infiltration=infil2,
+                                          dyn_traps=[233, 220]))
+        common = intersect(keys(dtP), keys(dtM))
+        @test !isempty(common)
+        @test maximum(abs(dtP[t] - dtM[t]) for t in common) < 1e-6
+    end
 end
 
 @testset "solveDynNetwork!: parent at its floor drains/exposes children (:empty)" begin
