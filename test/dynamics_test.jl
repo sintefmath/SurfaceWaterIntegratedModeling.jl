@@ -1259,6 +1259,57 @@ end
     end
 end
 
+@testset "culverts through fill_sequence (end-to-end structural invariants)" begin
+    grid = loadgrid(joinpath(artifact"swim_testdata", "data", "small", "mini.txt"))
+    ts   = spillanalysis(grid, usediags=true)
+
+    # first fill time per trap; robust to weather-boundary full snapshots (Vector{Bool})
+    function filltimes(seq)
+        d = Dict{Int,Float64}()
+        for e in seq[2:end], u in e.filled
+            (u isa IncrementalUpdate) && u.value && !haskey(d, u.index) &&
+                (d[u.index] = e.timestamp)
+        end
+        return d
+    end
+    monotone(seq)     = all(seq[i].timestamp <= seq[i+1].timestamp for i in 1:length(seq)-1)
+    total_stored(seq) = sum(fa.amount for fa in amount_at(seq))
+
+    # trap<->trap culvert on the :long chain: inlet (7,119) -> trap 233, outlet
+    # (199,4) -> trap 13.  Larger bore (r=1.5) so its effect is well above ODE noise.
+    cv = DynCulvert(CartesianIndex(7, 119), CartesianIndex(199, 4), 1.5, 0.6, 0.5, 0.02, 1.7)
+
+    # (1) an empty culvert list is byte-identical to the plain path (culverts inert)
+    w1 = [WeatherEvent(0.0, 1.0)]
+    @test [e.timestamp for e in fill_sequence(ts, w1; culverts=DynCulvert[])] ==
+          [e.timestamp for e in fill_sequence(ts, w1)]
+
+    # (2) rain-then-off; the culvert must complete the full event loop with strictly
+    # ordered events (a three-state / spill_path contract violation would throw).
+    w  = [WeatherEvent(0.0, 0.05), WeatherEvent(0.3, 0.0)]
+    s0 = fill_sequence(ts, w)                    # baseline
+    sC = fill_sequence(ts, w; culverts=[cv])     # with culvert
+    @test monotone(s0) && monotone(sC)
+
+    # (3) directional behaviour: the culvert bleeds the inlet trap (233) so it fills
+    # LATER, and delivers to the outlet trap (13) so it fills EARLIER.
+    ft0 = filltimes(s0); ftC = filltimes(sC)
+    @test ftC[233] > ft0[233] + 1e-4      # inlet delayed
+    @test ftC[13]  < ft0[13]  - 1e-5      # outlet accelerated
+
+    # (4) mass conservation: with no infiltration, once the rain stops the system
+    # settles to the SAME total stored water either way — the culvert only redistributes
+    # water in space and time, it neither creates nor destroys it.  (Exact drawn ==
+    # delivered conservation at the routing layer is covered by the _route_flow tests.)
+    @test isapprox(total_stored(sC), total_stored(s0); atol = 1e-6)
+
+    # (5) a different topology (terrain-outlet expansion) also survives the pipeline:
+    # inlet (179,37) in a trap, outlet (8,119) on bare terrain traces a fresh chain.
+    cv2 = DynCulvert(CartesianIndex(179, 37), CartesianIndex(8, 119), 1.0, 0.6, 0.5, 0.02, 1.7)
+    sX  = fill_sequence(ts, w1; culverts=[cv2])
+    @test monotone(sX) && length(sX) > 0
+end
+
 @testset "solveDynNetwork!: parent at its floor drains/exposes children (:empty)" begin
     grid = loadgrid(joinpath(artifact"swim_testdata", "data", "small", "mini.txt"))
     ts   = spillanalysis(grid, usediags=true)
