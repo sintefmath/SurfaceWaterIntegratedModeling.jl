@@ -62,7 +62,7 @@ A `DynTrap` wraps one trap from the `TrapStructure`:
 | Field | Meaning |
 |---|---|
 | `trap_ix` | Global index into `TrapStructure.trapvolumes` etc. |
-| `spill_path` | Network-local index of the flow path this trap spills into when full (0 if none — only valid while not yet full) |
+| `spill_path` | Network-local index of the flow path this trap spills into when full; `0` if the trap is not yet full (no spill path); `-1` if it is full and spills straight out of the domain (out-of-domain sentinel, no in-network successor) |
 | `culvert_inlets` | Culvert indices that draw from this trap |
 | `culvert_outlets` | Culvert indices that deliver into this trap |
 
@@ -108,14 +108,21 @@ Every trap in the network must be in exactly one of three states on entry to
 
 | State | Condition | `DynTrap.spill_path` | Trap type |
 |---|---|---|---|
-| **FULL** | `V == C` exactly | `> 0` | Any |
+| **FULL** | `V == C` exactly | `!= 0` (`> 0`, or `-1` out of domain) | Any |
 | **TRANSITORY** | `0 < V < C` strictly | `== 0` | Any |
 | **EMPTY** | `V == 0` exactly | — | Leaf only (`trap_ix <= numregions`) |
 
 The rationale:
 
-- A FULL trap is actively spilling; it must have a downstream path (`spill_path >
-  0`) to route its overflow.  A parent trap can only be FULL if all its in-network
+- A FULL trap is actively spilling, so it must have somewhere for its overflow to
+  go: either an in-network downstream path (`spill_path > 0`) or the domain
+  boundary (`spill_path == -1`, the out-of-domain sentinel).  Only `spill_path == 0`
+  is forbidden for a FULL trap — that is the signature of a trap that filled
+  without the network being rebuilt to give it a successor, and `_validate_network`
+  rejects it.  The routing (`_route_flow`) and ordering (`_network_order`) layers
+  treat any `spill_path <= 0` identically as "no in-network successor" (a FULL
+  trap's spill is simply dropped when it exits the domain), so the sentinel matters
+  only to state validation.  A parent trap can only be FULL if all its in-network
   children are also FULL (water only accumulates in the parent's own volume once
   the children's spillpoints are submerged).
 - A TRANSITORY trap is still filling; it has no outgoing spill path yet.
@@ -322,7 +329,8 @@ state to the TRANSITORY state: `V < capacity` strictly, consistent with
 ### Three-state contract (entry)
 
 Enforced by `_validate_network` before every call:
-- FULL traps have `spill_path > 0`; parent FULL traps have all in-network children FULL.
+- FULL traps have `spill_path != 0` — `> 0` (in-network path) or `-1` (spills out
+  of the domain); parent FULL traps have all in-network children FULL.
 - TRANSITORY traps have `spill_path == 0`.
 - EMPTY traps are leaf traps only.
 

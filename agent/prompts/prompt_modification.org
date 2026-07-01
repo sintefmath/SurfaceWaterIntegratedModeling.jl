@@ -1,0 +1,340 @@
+The implemenation of ~solveDynNetwork()~ needs to be modified a bit, as it should
+reflect the higher-level logic I try to clarify below.
+
+- The point with terminating triggers is to stop integration whenever network
+  topology will change.
+- In that respect, there are only three trap states that are truly relevant:
+  FULL, TRANSITORY (or "ACCUMULATING", though that name is misleading as water
+  content may as well be decreasing as increasing) and EMPTY.  Whether a trap is
+  "stagnant" or not is not really interesting, though the ~solveDynNetwork~
+  function needs to be able to terminate if there are no more evolving traps in
+  the network.
+- For ~solveDynNetwork~ to make an initial distinction between full, transitory
+  and empty traps upon calling:
+  - an EMPTY trap is recognized by having a water content V===0  (exactly equal
+    to zero)
+  - a FULL trap is recognized by having a water content V===C, where C is the
+    trap's capacity  (here, there's an unclarity whether the tstruct's trap
+    capacity or the corresponding TrapGeometry's capacity is the one to compare
+    against - whatever is chosen must be consistent and documented.
+  - a trap that is neither EMPTY nor FULL is transitory.
+- For ~solveDynNetwork()~, it is the _caller's_ responsibility to provide a
+  valid network.  ~solveDynNetwork()~ should check this before doing any further
+  work, and throw an error if the contract is unfulfilled.  The contract for a
+  valid network is:
+  - any FULL trap should have designated a spill path (DynFlowPath) out of it.
+  - no TRANSITORY trap should have a spill path out of it (since it is not
+    spilling)
+  - the only EMPTY traps allowed in the network are lowest-level traps
+    (according to tstruct).  If the trap has subtraps AND is EMPTY, it should
+    not be present in the network - instead the relevant subtrap should be (if
+    ~setup_network()~ is correct, this should have been taken care of when
+    network was constructed).
+
+- The state transitions that may occur for a trap are:
+  - FULL -> TRANSITORY (if a trap with status FULL has a net negative inflow
+    (whatever flows in less whatever is abstracted through infiltration and
+    culverts)
+  - TRANSITORY -> FULL (if water content of a trap reaches/surpasses the trap's
+    capacity during integration.
+  - TRANSITORY -> EMPTY (if water content reaches zero during integration - and
+    only interesting for traps with subtraps)
+  - Note that the event EMPTY -> TRANSITORY is never interesting, since the only
+    traps that may ever be EMPTY in a valid network are lowest-level traps (no
+    children), and for those, there is no topology change associated with the
+    transitions between EMPTY/TRANSITORY.
+
+- After having verified that the network passed as argument is indeed valid,
+  ~solveDynNetwork~ will check if there are already occurrences of
+  FULL->TRANSITORY from the start.  If so, it will return a special object that
+  flags these to the caller, so the caller may take note.
+- NB: General note: do not play around with infinitesimals or small tolerances
+  inside ~solveDynNetwork()~ to "flag" changes in a trap's status.  Just report
+  status changes to user and let it be handled outside.
+- If network is valid and there are no immediate incidences of
+  FULL->TRANSITORY, the actual integration may start, until an event is
+  triggered, or until it is recognized that the system will not further evolve.
+- The _caller_ should keep track of which traps are currently full/empty and
+  reflect this when sending a network along with its state to ~solveDynNetwork~.
+
+- The logic discussed here aims to be closely aligned with the logic used by the
+  ~fill_sequence()~ function and associated machinery.  In time, the plan is
+  that the network code should be closely integrated with ~fill_sequence()~ to
+  handle those trap systems (including culverts, NBS, etc.) that cannot be
+  purely predicted by the fixed rates that ~fill_sequence()~ currently assumes.
+  Therefore, if you see any obvious inconsistencies between the logic described
+  above and the corresponding logic in ~fill_sequence()~, report it before doing
+  any further planning or implementation, so we can discuss how to reconcile it.
+
+
+* Discussion
+
+** DONE Q1: Simultaneous fills — who detects them?
+
+*Claude's question:* The ODE callback fires for one trap at a time.  If traps A
+and B both hit capacity in the same ODE step, ~solveDynNetwork~ returns ~:fill~
+for A, with ~state[B] ≈ C_B~ (within ODE error, but not exactly C_B).  The
+caller receives a state where B is not yet FULL by the exact-equality
+definition — but B will fill "instantaneously" on the very next call.
+
+Two options: (a) caller scans ~state~ for any ~V >= C~ after each event and
+clamps those to exactly C; (b) ~solveDynNetwork~ returns all simultaneously
+filled traps at once (changes return type).
+
+*User answer:* The _caller_ is responsible to keep track of which traps are
+considered filled or not.  The caller may want to update only the single trap
+that was identified as newly FILLed.  If so, the caller should make sure that
+any trap not yet "logically" filled should have a state consistent with their
+status (i.e. not _exactly_ equal to trap capacity).  As such, the trap that was
+simultaneously filled but not reported will be the next one to trigger as it
+will fill up practically instantly.
+
+More concretely: after registering A as full, the caller sends
+~min(V_i, C_i - epsilon)~ for all other traps not yet registered as full.  This
+ensures B (which overshot to V_B ≈ C_B or V_B > C_B) is sent as TRANSITORY on
+the next call and fires ~:fill~ immediately.  Option (a) — no return type
+change.
+
+*Claude's response:* Agreed.  In Julia, ~prevfloat(C_i)~ is the right
+"C minus one ULP" — no magic constant needed, and it is the largest float
+strictly less than C.  Resolved.
+
+** DONE Q2: What "has a spill path" means for validation
+
+*Claude's question:* How does the validator determine that a specific FULL trap
+has a designated spill path?  ~DynFlowPath~ records ~target_trap~ but not a
+~source_trap~.
+
+*User answer:* A full trap has a spill path if its ~DynTrap.spill_path~ is a
+valid (positive) index.  It could be set to 0 if the trap does not (yet) have a
+spill path out of it.
+
+*Claude's response:* ~DynTrap.spill_path~ already exists as a field
+(~elements.jl:60~).  Validation is simply: for every FULL trap in the network,
+assert ~trap.spill_path > 0~.  No new fields needed.  Resolved.
+
+** DONE Q3: TRANSITORY→EMPTY — which traps get the empty callback?
+
+*Claude's question:* The spec says TRANSITORY→EMPTY is only relevant for traps
+with subtraps.  Should only those traps register the ~:empty~ callback?
+
+*User answer:*
+- Test 1: is ~trap_ix > numregions(tstruct)~? (is it a parent trap?)  Only
+  parent traps get the ~:empty~ callback.
+- Test 2 (if parent): is V == 0?  If so, the event triggers.
+
+Important invariant: a *nonempty* parent trap will *always* have all its
+subtraps filled.  This is part of the contract — you cannot have water in the
+parent unless the subtraps (which are submerged under it) are already at
+capacity.
+
+*Claude's response:* The two-test structure is clear.  ~subtrapsof(tstruct,
+trap_ix)~ returning non-empty is equivalent to
+~trap_ix > numregions(tstruct)~ and slightly more readable, but either works.
+
+The "nonempty parent → all children full" invariant is physically correct and
+important.  Should the validator in ~solveDynNetwork~ check it explicitly?
+
+*User answer:* Unless computational concerns become an issue, it's probably fine
+to check this invariant in the validator.  (It is a very fundamental
+requirement, encountered many places in the SWIM package, not just the dynamics
+code.)
+
+*Claude's response:* Agreed — add the invariant check to the validator.  Cost
+is O(n_traps) via ~subtrapsof~, well within acceptable overhead.  The
+implementation will assert that for every FULL parent trap in the network, all
+its immediate children (from ~subtrapsof~) are also in the network and FULL.
+Resolved.
+
+** DONE Q4: Exactly what the caller does after each event
+
+*Claude's question:* Does a ~:fill~ event trigger a topology rebuild (option a),
+or is the same network reused (option b)?
+
+*User answer:* Option (a) — topology rebuild after every fill.  The caller:
+1. Updates its own record of filled traps.
+2. Calls ~setup_network~ to rebuild network topology.
+3. Ensures the filled trap has state set to exactly the trap's capacity; any
+   non-filled trap has state lower than capacity (even if only by epsilon).
+
+*Claude's follow-up for unspill:* After a FULL→TRANSITORY (~:unspill~) event,
+the returned state has ~state[T] = C[T]~ (detected at t=0).  Passing ~C[T]~
+again on the next call would classify T as FULL again (infinite loop).
+
+*User answer (option b for unspill):* After an ~:unspill~ event, the trap is no
+longer considered FULL but TRANSITORY.  The caller is responsible for setting
+its state to something infinitesimally smaller than full capacity upon the next
+call.  Concretely: ~prevfloat(C[T])~.  Resolved.
+
+** DONE Q5: Reduced-dimensional ODE — can FULL traps be safely excluded?
+
+*Claude's question:* If the ODE state vector contains only TRANSITORY traps, is
+this compatible with detecting FULL→TRANSITORY transitions?
+
+*User concern:* The only reason a FULL trap may stay full could be that it is
+being constantly supplied by the outlet of a culvert from a different
+(TRANSITORY) trap.  But this supply is nonconstant, and at some point this
+could trigger an unspill event.  Also, NBS systems may introduce other
+nonconstant rates.
+
+*Claude's first response (incorrect):* Argued that with downhill culverts,
+FULL trap stability increases as the downstream TRANSITORY trap fills.
+
+*User rebuttal:* The upstream TRANSITORY trap Y might not be filling but
+*emptying*.  As Y drains, the culvert supply from Y to FULL trap X diminishes.
+At some point X's net inflow goes negative and it should unspill — a
+FULL→TRANSITORY transition that happens mid-integration, not at t=0.
+
+*Claude's revised response:* The user is correct.  The earlier argument only
+considered TRANSITORY traps filling; but a trap Y can have net negative rate
+(drain > inflow) and be emptying during integration.  In that case:
+- Y→X downhill culvert: as Y empties, h_Y drops → culvert head h_Y − h_X
+  decreases → culvert inflow to X decreases → X's net inflow decreases
+- If X's net inflow crosses zero mid-integration: FULL→TRANSITORY for X occurs
+  during the solve, not at t=0
+
+The t=0 check alone is therefore insufficient.  The correct solution is to add
+*unspill callback conditions* for each FULL trap, monitoring their net inflow as
+a function of the TRANSITORY trap state vector ~u~.  Since FULL trap levels are
+fixed at their capacity for the duration of a call, their net inflow is a pure
+function of ~u_transitory~.  A ~VectorContinuousCallback~ entry can monitor
+this: ~condition_unspill_X(u, t, integrator) = net_inflow_X(u)~, firing when
+the value crosses zero from positive to negative.  This detects FULL→TRANSITORY
+at any point during integration without needing FULL traps in the ODE state
+vector.
+
+The reduced-dimensional ODE architecture (state vector = TRANSITORY traps only)
+is preserved; unspill callbacks are added as extra conditions on FULL traps.
+
+*Open question (placeholder for user answer):* Does this unspill-callback
+architecture satisfy your intent?  In particular: the callback computes
+net_inflow for FULL trap X as a function of the TRANSITORY state ~u~ — this
+requires the rate function logic to be callable with the partial state.  Is it
+acceptable to make ~dynNetworkRateFunction!~ (or a helper) callable from within
+the callback to evaluate FULL trap rates?
+
+*** TODO User response
+Why not just include the full trap in the ODE integration process, and cap their
+value at the trap's capacity?  Isn't that a less complex solution?  Though I'm open to counterarguments.
+
+*** DONE Claude's response
+Agreed — Option B is simpler and the right choice.  No counterargument.
+
+One implementation detail that must be recorded: the ODE solver evaluates
+intermediate Runge-Kutta stages, and for a FULL trap starting at exactly
+V = C, those stages can produce V > C (overshoot into physically impossible
+territory).  The rate function must guard against this by using
+~min(V_j, C_j)~ when deriving the water-level ~h_j~ from volume for a FULL
+trap.  This is the only clamp needed, and it is physically justified (the trap
+cannot hold more than capacity).  It is NOT the same as the old ~abstol~ drift
+hack — it is a hard physical boundary.
+
+With that guard in place:
+- When net_inflow_X >= 0: rate function gives dV_X = 0; V_X stays at C_X.
+- When net_inflow_X < 0 (mid-integration, after Y has drained enough): rate
+  function gives dV_X = net_inflow_X < 0; V_X begins to drop below C_X.
+- Callback ~C_X - V_X~ crosses from 0 to positive → FULL→TRANSITORY event
+  fires.
+
+The t=0 check is still useful as a fast path (avoids starting the ODE when a
+FULL trap is already draining), but the callback makes it no longer the *only*
+detection mechanism.  Resolved.
+
+** DONE Q6: fill_sequence wrinkle — parent emptied, children full
+
+*Claude's question:* When a parent trap is EMPTY and its children are FULL,
+~_unfilled_trap_at~ returns the parent (children are in ~full_traps~ and
+filtered out; parent is not in ~full_traps~).  I believed this is correct —
+the parent is the active leaf node.  Is that right?
+
+*User clarification:* In the TRANSITORY→EMPTY case, the water content is
+overall *decreasing* (net drain).  When the parent empties and exposes its
+subtraps, the children should be considered to instantly become "un-filled".
+The answer might be to remove the children's filled status too when
+reconstructing the network after this event.
+
+*Claude's first interpretation:* Suggested removing children from
+~full_traps~ and setting ~V_children = prevfloat(C_children)~.
+
+*User clarification:* In the call to ~setup_network()~, the children could be
+flagged as not filled, so that the correct topology will be set up.  However,
+in the subsequent call to the solver, it might be useful to treat the children
+as still "filled", since it is not clear that they will all start to drain.
+One child might end up having positive inflow after being exposed, and another
+might still have negative inflow and start draining.  As such, if any of them
+are about to become transitory, the solver will detect this early on (before
+starting integration).
+
+*Claude's response:* Understood — the protocol after TRANSITORY→EMPTY for
+parent P with children A, B is:
+1. Remove P from ~full_traps~.
+2. Remove A and B from ~full_traps~ before calling ~setup_network~.
+3. Call ~setup_network~ with the updated ~full_traps~ (without P, A, B).
+   This builds a network where A and B have their own natural spill paths
+   (downstream paths from their regions) rather than the parent's path.
+4. Before calling ~solveDynNetwork~, add A and B back to the state at
+   ~V_A = C_A~, ~V_B = C_B~ exactly (FULL by the V == C rule).
+   Since ~setup_network~ was called without them in ~full_traps~, this step
+   relies on A and B having been given spill paths by the network construction
+   (because ~flow_path_from~ traces downstream from each region regardless of
+   full status — the spill paths for A and B will be their natural downstream
+   paths, not the parent's path).
+5. ~solveDynNetwork~ validates: A and B are FULL with spill paths → valid.  It
+   then checks net inflows for A and B at t=0 via the FULL→TRANSITORY check.
+   Any child with negative net inflow immediately triggers ~:unspill~; children
+   with positive net inflow stay FULL and continue spilling downstream.
+
+*Open question (placeholder for user answer):* Step 4 assumes that
+~setup_network~ gives A and B valid spill paths even when they are *not* in
+~full_traps~ during the construction.  Looking at ~_subnetwork~ /
+~_build_network~: a trap only gets a nonzero ~spill_path~ if it is followed by
+a downstream path segment in the chain.  If A is the last (leaf) trap in the
+chain, it gets ~spill_path = 0~.  Passing ~V_A = C_A~ with ~spill_path = 0~
+would fail the validator.
+
+Is the expected behaviour that A and B should also be returned to ~full_traps~
+before calling ~setup_network~ (so they are given proper full-trap spill paths),
+and only removed from ~full_traps~ after ~setup_network~ returns and we are
+about to call ~solveDynNetwork~?  Or is there another mechanism ensuring A and B
+receive valid spill paths?
+*** TODO User response
+Good observation.  Perhaps it is a bad idea to use different statuses for traps
+when calling ~setup_network~ and ~solveDynNetwork~. I suggest they lose their
+"filled" status both in the call to ~setup_network~ and ~solveDynNetwork~ (which
+means setting water content to just below trap capacity).  If any of them were
+actually not emptying, this will be corrected by an almost immediate event
+when re-running the solver.   Does that make sense?
+
+*** DONE Claude's response
+Agreed.  The consistent protocol after TRANSITORY→EMPTY for parent P with
+children A, B:
+
+1. Remove P, A, and B from ~full_traps~.
+2. Call ~setup_network~ without P, A, B in ~full_traps~.  A and B become
+   natural leaf nodes in the new network with ~spill_path = 0~.
+3. Set ~V_A = prevfloat(C_A)~, ~V_B = prevfloat(C_B)~ (one ULP below
+   capacity → TRANSITORY).  No discrepancy between network status and state.
+4. Call ~solveDynNetwork~ with the new network and this state.
+   - If A has positive net inflow: V_A increases from ~prevfloat(C_A)~ to
+     ~C_A~ almost immediately → ~:fill~ event fires → caller adds A to
+     ~full_traps~ and rebuilds network (now with A's proper spill path).
+   - If A has negative net inflow: A drains normally.
+
+The "almost immediate fill" in case (a) is physically correct: if A was
+genuinely still receiving more inflow than it drains, it was effectively still
+full and the next call confirms that by filling in one tiny step.  Resolved.
+
+** DONE Q7: Capacity definition — which C does V == C compare against?
+
+*Claude's question:* Two candidates: ~TrapGeometry.capacity~ (net of subtraps)
+vs. raw ~trapvolumes[t]~ (total including subtraps).  Current code uses
+~TrapGeometry.capacity~.
+
+*User answer:* ~TrapGeometry.capacity~ is fine.  It must be properly
+documented/explained.
+
+*Claude's response:* Agreed.  ~TrapGeometry.capacity = trapvolumes[t] -
+subvolumes[t]~ for a trap with subtraps (zero subvol for lowest-level traps).
+This is the physically meaningful quantity — the volume the trap can accumulate
+on its own, above whatever its subtraps already hold.  Will add a docstring
+clarifying this when ~TrapGeometry~ is used in the revised code.  Resolved.

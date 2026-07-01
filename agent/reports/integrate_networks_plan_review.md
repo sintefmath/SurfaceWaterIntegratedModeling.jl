@@ -74,6 +74,46 @@ descendants are also excluded from the standard changetime machinery (plan §7,
 
 ---
 
+### B2. `flow_path_from` change broke `_subnetwork`'s terminal-parent subsume (RESOLVED)
+
+**Status: fixed & tested on this branch.**
+
+`flow_path_from` was changed in two ways: (A) when the trace wraps back among the
+full subtraps of a not-yet-full common parent, the returning segment is popped and
+the trace stops on a *trap* (not a path); and (B) a full trap whose spill reaches
+the domain boundary via terrain now returns that final out-of-domain segment,
+*except* when the trap spills straight out (`current_region_cell ==
+downstream_region_cell`).  Both are sound.
+
+Change (A) moved the terminal-unfilled-parent case from a *path*-terminated chain
+to a *trap*-terminated chain, so `_subnetwork`'s `ends_with_path` guard no longer
+fired and `_subsume_terminal_parent` was skipped — reintroducing the B1 symptom
+(full children as separate nodes, parent absent; e.g. mini.txt `[9,18]` instead of
+`[414]`, with a full trap left at `spill_path == 0`).
+
+**Fix (constructor).**  `_subnetwork` now also handles the trap-terminated case:
+when the chain ends on a full trap that did *not* spill out of the domain, it
+recovers the unfilled parent via `_unfilled_parent_of` (helpers `_spills_out_of_domain`,
+`_unfilled_parent_of` added) and subsumes into it.  Both B1 cases collapse to
+`[414]` again; full dynamics suite green (B1 161/161).
+
+**Mode-4 / out-of-domain full trap — `spill_path == -1` sentinel.**  Change (B)
+leaves a full trap that spills *straight* out of the domain as the terminal node.
+Such a trap is FULL but has no in-network successor.  Rather than overload
+`spill_path == 0` (which also means TRANSITORY, and is the integrity tripwire for
+"filled but not rebuilt"), it now carries the explicit sentinel `spill_path == -1`:
+
+- `_build_network` emits `-1` for a terminal trap flagged `terminal_exits_domain`
+  (set by `_subnetwork`); the merge path (`remap`, `_build_component`) preserves it.
+- `_validate_network` accepts FULL with `spill_path != 0` (`> 0` or `-1`) and still
+  rejects FULL with `0`; TRANSITORY still requires `0`.
+- `_route_flow` / `_network_order` already guard on `spill_path > 0`, so a `-1`
+  trap drops its spill at the boundary with no further change.
+
+Folded into `solve_dyn_network_explainer.md` (DynTrap field, three-state contract).
+
+---
+
 ## Agreed & folded into the plan
 
 These are resolved and now live in `integrate_networks_plan.md`; kept here only
@@ -133,5 +173,8 @@ None currently open — all have been folded into the plan, resolved, or withdra
 
 `B1` is resolved: corrected to an infiltration double-count (plus constructor
 inconsistency), with Design A (always subsume) chosen and folded into the plan.
-Everything raised in this review has now been agreed and folded into the plan,
-resolved, or withdrawn — no outstanding items.
+`B2` is resolved: the `flow_path_from` changes shifted the terminal-unfilled-parent
+case to a trap-terminated chain (fixed in `_subnetwork`), and the out-of-domain
+full-trap case now uses an explicit `spill_path == -1` sentinel.  Everything raised
+in this review has now been agreed and folded into the plan, resolved, or
+withdrawn — no outstanding items.
