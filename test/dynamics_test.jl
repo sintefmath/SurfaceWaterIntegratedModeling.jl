@@ -1052,6 +1052,69 @@ end
     @test res.trap == net.traps[ti_in].trap_ix
 end
 
+# ---------------------------------------------------------------------------
+# Zeno-chatter guard: the localized event-time slack that lets a culvert network
+# drain during drought without hanging (a culvert outlet pinned at its spillpoint by
+# a balancing through-flow).  These cover the mechanism pieces; the full end-to-end
+# drought that used to hang is validated manually (it is slow — the stiff culvert ODE,
+# not the guard — so it is not run in CI).  See network_context.jl LOCAL_SLACK note.
+# ---------------------------------------------------------------------------
+@testset "Zeno guard: noise-floor steady-state and blind-advance" begin
+    grid = loadgrid(joinpath(artifact"swim_testdata", "data", "small", "mini.txt"))
+    ts   = spillanalysis(grid, usediags=true)
+    sz   = size(ts.topography)
+
+    @testset "_reverses fill-state transition pairs" begin
+        @test  SWIM._reverses(:fill, :unspill)
+        @test  SWIM._reverses(:unspill, :fill)
+        @test  SWIM._reverses(:fill, :empty)
+        @test  SWIM._reverses(:empty, :fill)
+        @test !SWIM._reverses(:fill, :fill)          # same direction, not a reversal
+        @test !SWIM._reverses(:unspill, :empty)      # both non-fill, not a reversal
+        @test !SWIM._reverses(:none, :fill)          # :none never reverses
+    end
+
+    @testset "-abstol dead-band: a full trap balanced within abstol stays steady" begin
+        # Single full trap (57, 11 cells).  Its net inflow = external_inflow − footprint
+        # infiltration.  Tune the inflow so the net sits just INSIDE ±abstol (balanced,
+        # must NOT unspill) vs just OUTSIDE (must unspill).  abstol default = 1e-8.
+        # spill_path = -1 (exits domain): a FULL trap must carry the non-zero sentinel.
+        net57  = DynNetwork([DynFlowPath(CartesianIndex{2}[], 0)], [DynTrap(57, -1)], DynCulvert[])
+        infil  = zeros(sz); infil[ts.footprints[57]] .= 0.1
+        F      = SWIM._build_rate_params(ts, net57, infil, [0.0]).footprint_infil[1]  # Σ infil
+        C      = SWIM._build_trap_geometry(ts, net57, infil)[1].capacity
+
+        # net = −0.5e-8 (|net| < abstol): steady equilibrium at capacity, no event
+        @test solveDynNetwork!([C], ts, net57, infil, [F - 0.5e-8]).kind == :none
+        # net = −2e-8 (< −abstol): meaningfully draining -> :unspill
+        @test solveDynNetwork!([C], ts, net57, infil, [F - 2e-8]).kind == :unspill
+    end
+
+    @testset "topology_events=false blind-advance ignores boundary crossings" begin
+        # A leaf trap (233) filling under unit inflow.  With topology detection ON it
+        # stops at :fill when it reaches capacity; with it OFF (the blind-advance mode
+        # used to march past Zeno chatter) it integrates straight to tmax, clamped to
+        # the physical box, and reports no event.
+        net   = setup_network(ts, [CartesianIndex(7, 119)], Int[])[1]
+        @test net.traps[1].trap_ix == 233
+        C     = SWIM._build_trap_geometry(ts, net, zeros(sz))[1].capacity
+
+        # tmax well past the fill time: topology ON fires :fill; OFF advances to C, :none
+        s_on  = [0.0]
+        @test solveDynNetwork!(s_on, ts, net, zeros(sz), [1.0]; tmax = C * 2).kind == :fill
+        s_off = [0.0]
+        r_off = solveDynNetwork!(s_off, ts, net, zeros(sz), [1.0]; tmax = C * 2,
+                                 topology_events = false)
+        @test r_off.kind == :none
+        @test isapprox(s_off[1], C; atol = 1e-3)      # clamped at capacity, no event fired
+
+        # tmax short of the fill: OFF simply advances by inflow*tmax (no event either way)
+        s_sh  = [0.0]
+        solveDynNetwork!(s_sh, ts, net, zeros(sz), [1.0]; tmax = C / 2, topology_events = false)
+        @test isapprox(s_sh[1], C / 2; rtol = 1e-3)
+    end
+end
+
 @testset "DynNetworkContext build / predict / commit (slice 2)" begin
     grid = loadgrid(joinpath(artifact"swim_testdata", "data", "small", "mini.txt"))
     ts   = spillanalysis(grid, usediags=true)

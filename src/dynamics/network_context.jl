@@ -246,6 +246,75 @@ function _reconcile_spillgraph!(sgraph, rateinfo, filled_traps, covered, tstruct
 end
 
 # ----------------------------------------------------------------------------
+# Localized minimum event interval (Zeno guard) for the dynamic-network solver.
+#
+# A trap held exactly at a topology boundary by a balancing through-flow — the
+# canonical case being a culvert OUTLET during drought, whose culvert supply almost
+# exactly equals its infiltration so it sits at its spillpoint with a net rate at the
+# numerical noise floor (~1e-8) — cannot be resolved by the event machinery at the
+# scale it tries to.  The ODE stepper's floating-point rounding walks such a trap's
+# volume back and forth across the boundary by ULPs, firing :fill then :unspill then
+# :fill … at PICOSECOND spacing: an infinite (Zeno) event loop that hangs the fill
+# sequence.  (See agent memory `dynnetwork-integration-status.md` for the full
+# diagnosis and the several solver-level fixes that do NOT work — the event
+# root-finder locates the boundary crossing regardless of step size or rate clamp.)
+#
+# The physical resolution: events separated by nanoseconds are meaningless in a
+# surface-water model — millisecond resolution is already far finer than the terrain,
+# rainfall and culvert data warrant.  So we impose a LOCAL minimum event interval.
+# When a freshly rebuilt network predicts an event that would REVERSE the transition
+# its trap just fired, within `LOCAL_SLACK` of it, we treat that as the Zeno signature
+# and step the network forward by a whole `LOCAL_SLACK` with topology detection off
+# (`solveDynNetwork!(...; topology_events = false)`) before re-predicting.  Over a
+# full slack interval even a noise-floor rate produces a REPRESENTABLE volume change,
+# so the pinned trap drifts physically off the boundary and the re-prediction lands on
+# real dynamics — the ULP-scale walk simply cannot happen at millisecond scale.
+#
+# Keying on the REVERSAL-within-slack signature (not on raw sub-slack event spacing)
+# is what makes this safe: genuine fast events never reverse the SAME trap within a
+# millisecond, so ordinary sub-millisecond fills — which do occur, and which the
+# parity tests check to 1e-6 — are left completely untouched.
+#
+# @@@ LOCAL_SLACK is deliberately independent of `fill_sequence`'s global `time_slack`
+# argument, which is not yet implemented.  When `time_slack` is built out holistically
+# it should SUBSUME this constant: the minimum resolvable event interval ought to be a
+# single, coherent, user-visible quantity, not a hidden default buried here.
+const LOCAL_SLACK    = 1e-2       # 10 ms — minimum resolvable event interval (see above)
+const ZENO_MAX_STEPS = 10_000     # safety bound on consecutive blind-advances
+
+# Whether transition `a` is the fill-state reverse of `b`: `:fill` makes a trap full,
+# while `:unspill` and `:empty` make it non-full, so those two reverse `:fill` (and it
+# reverses them).
+_reverses(a::Symbol, b::Symbol) =
+    (a === :fill && (b === :unspill || b === :empty)) ||
+    ((a === :unspill || a === :empty) && b === :fill)
+
+# If context `c`'s freshly predicted `next_event` would reverse the transition its trap
+# just fired (recorded in `fired_kind`) within `LOCAL_SLACK` of the committed time, that
+# is the Zeno chatter signature (see the LOCAL_SLACK note above).  Step the committed
+# state forward by `LOCAL_SLACK` with topology events off and re-predict, repeating while
+# the prediction remains an immediate reversal (bounded by `ZENO_MAX_STEPS`).  A no-op
+# when there is no chatter, so it is safe to call after every prediction.
+function _resolve_zeno_chatter!(c::DynNetworkContext, fired_kind, tstruct,
+                                infiltration, z_vol_tables, endtime)
+    steps = 0
+    while steps < ZENO_MAX_STEPS
+        ev = c.next_event
+        (ev.kind !== :none && haskey(fired_kind, ev.trap) &&
+         _reverses(ev.kind, fired_kind[ev.trap]) &&
+         ev.time - c.last_solve_time < LOCAL_SLACK) || break
+        steps += 1
+        # Advance the committed state one whole LOCAL_SLACK with NO topology detection,
+        # letting the pinned trap drift physically off its boundary, then re-predict.
+        solveDynNetwork!(c.state, tstruct, c.net, infiltration, c.extern_inflow;
+                         tmax = LOCAL_SLACK, zvt = z_vol_tables, topology_events = false)
+        c.last_solve_time += LOCAL_SLACK
+        _predict_network!(c, tstruct, infiltration, z_vol_tables, endtime)
+    end
+    return c
+end
+
+# ----------------------------------------------------------------------------
 # Advance every network to `cur_time` and rebuild the whole set after a status
 # change, per plan §3.  Each context is committed to `cur_time` under its cached
 # external inflow (full pass-through traps pinned back to exact capacity), then the
@@ -335,6 +404,9 @@ function _touch_networks!(net_contexts, changetimeest, sgraph, tstruct, dyn_trap
     for net in components
         c = _make_context(net, tstruct, rateinfo, seeds, state0, cur_time)
         _predict_network!(c, tstruct, infiltration, z_vol_tables, endtime)
+        # Break any picosecond-scale Zeno chatter (a trap pinned at a topology boundary
+        # by a balancing through-flow) by marching past it at the LOCAL_SLACK resolution.
+        _resolve_zeno_chatter!(c, fired_kind, tstruct, infiltration, z_vol_tables, endtime)
         push!(new_contexts, c)
     end
 
