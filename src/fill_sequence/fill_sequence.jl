@@ -190,8 +190,11 @@ function _fill_sequence_for_weather_event!(seq, sgraph, rateinfo, changetimeest,
                               getrunoffupdates(rateinfo)))
     end
 
-    # make sure all amounts are exactly computed at end
+    # make sure all amounts are exactly computed at end.  Network-covered traps are
+    # excluded here — their end-of-period volumes follow the multi-trap ODE, not the
+    # constant-rate projection, and are set by _finalize_networks! below (§10).
     for (trap, cur_fill) ∈ enumerate(cur_amounts)
+        (trap ∈ net_covered_set) && continue
         if cur_fill.time < endtime
             cur_amounts[trap] =
                 FilledAmount(_compute_exact_fill(rateinfo, cur_amounts, trap,
@@ -200,6 +203,11 @@ function _fill_sequence_for_weather_event!(seq, sgraph, rateinfo, changetimeest,
                              min(cur_time, endtime))
         end
     end
+
+    # advance every network to `endtime` and read its traps' boundary volumes from the
+    # settled ODE state — the exact amounts the next weather period rebuilds from (§10)
+    _finalize_networks!(cur_amounts, net_contexts, tstruct, infiltration,
+                        z_vol_tables, cur_time, endtime)
 end
 
 # ----------------------------------------------------------------------------

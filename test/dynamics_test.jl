@@ -1228,6 +1228,35 @@ end
         @test !isempty(common)
         @test maximum(abs(dtP[t] - dtM[t]) for t in common) < 1e-6
     end
+
+    @testset "weather-boundary handoff of partially-filled network traps (§10)" begin
+        # A weather boundary that changes nothing physically (identical rain rate)
+        # must reproduce the single-period result — but only if each network trap's
+        # volume is carried across the boundary from its multi-trap ODE state, not a
+        # single-trap constant-rate projection (§10).  The projection omits in-network
+        # upstream spill (network traps read only terrain inflow, §4), so a partially
+        # filled network trap that is fed by an upstream network trap would be handed
+        # the wrong boundary volume.  FULL coverage with the boundary placed mid-run
+        # exercises this for every partially filled trap at once.
+        inc_only(seq) = Iterators.filter(
+            e -> e.filled isa Vector{IncrementalUpdate{Bool}}, seq)
+        function ft_multi(seq)
+            d = Dict{Int,Float64}()
+            for e in inc_only(seq), u in e.filled
+                u.value && !haskey(d, u.index) && (d[u.index] = e.timestamp)
+            end; d
+        end
+        t_mid = 0.02                     # within (0, 0.0449): the single-period fill span
+        w2    = [WeatherEvent(0.0, 1.0), WeatherEvent(t_mid, 1.0)]
+
+        # sanity: the plain path with the (inert) boundary already reproduces ftP
+        @test maxΔ(ftP, ft_multi(fill_sequence(ts, w2))) < 1e-9
+
+        # full-coverage dynamic path across the boundary must match to ODE tolerance
+        ftF2 = ft_multi(fill_sequence(ts, w2; dyn_traps=collect(1:numtraps(ts))))
+        @test Set(keys(ftF2)) == Set(keys(ftP))
+        @test maxΔ(ftP, ftF2) < 1e-6
+    end
 end
 
 @testset "solveDynNetwork!: parent at its floor drains/exposes children (:empty)" begin

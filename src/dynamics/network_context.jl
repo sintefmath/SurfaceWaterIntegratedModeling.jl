@@ -345,6 +345,37 @@ function _touch_networks!(net_contexts, changetimeest, sgraph, tstruct, dyn_trap
 end
 
 # ----------------------------------------------------------------------------
+# Weather-period boundary finalization (plan §10).  A network trap follows the
+# multi-trap ODE and cannot be projected to `endtime` with the constant-rate
+# `fill_trap_until`, so each context is advanced to `endtime` under its cached
+# external inflow and the network traps' amounts are read from the settled state.
+# The advance is event-free by construction — any network event ≤ `endtime` was
+# already processed before the event loop broke — so it settles cleanly.  These
+# exact boundary volumes are what the NEXT weather period rebuilds its networks
+# from, so they must not use the constant-rate projection.
+#
+# Runs for EVERY context, including ones whose state still sits at an earlier
+# `last_solve_time` (the commit's `tmax` guard makes advancing an already-current
+# context a no-op).  A node takes its settled ODE volume (net of subtraps); a
+# subsumed full descendant sits at its own capacity — matching `_network_amount_updates`.
+function _finalize_networks!(cur_amounts, net_contexts, tstruct, infiltration,
+                             z_vol_tables, cur_time, endtime)
+    isempty(net_contexts) && return cur_amounts
+    stamp = min(cur_time, endtime)
+    for ctx in net_contexts
+        ctx.last_solve_time < endtime &&
+            _commit_network!(ctx, tstruct, infiltration, z_vol_tables, endtime)
+        for (i, g) in enumerate(ctx.global_ix)
+            cur_amounts[g] = FilledAmount(ctx.state[i], stamp)
+            for d in _descendants(tstruct, g)   # subsumed full descendants
+                cur_amounts[d] = FilledAmount(_own_capacity(tstruct, d), stamp)
+            end
+        end
+    end
+    return cur_amounts
+end
+
+# ----------------------------------------------------------------------------
 # A network *parent* that fired :empty exposes its immediate children as transitory
 # (draining) traps.  Without this they stay in `filled_traps`, the rebuild re-subsumes
 # them under the parent at V == 0, and the parent re-fires :empty at the same instant
