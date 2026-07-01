@@ -33,8 +33,14 @@ function fill_sequence(tstruct::TrapStructure{<:Real},
             weather_events::Vector{WeatherEvent};
             time_slack::Real = 0.0,
             infiltration::Union{Matrix{<:Real}, Nothing} = nothing,
-            verbose::Bool=false)::Vector{SpillEvent} 
+            dyn_traps::Union{Nothing, Vector{Int}} = nothing,
+            culverts = nothing,
+            verbose::Bool=false)::Vector{SpillEvent}
     @assert !isempty(weather_events)
+    # `DynCulvert` is defined in a later-included file, so the empty default is
+    # resolved here (in the body) rather than in the signature.
+    dyn_traps = isnothing(dyn_traps) ? Int[] : dyn_traps
+    culverts  = isnothing(culverts)  ? DynCulvert[] : culverts
 
     num_traps = numtraps(tstruct)
     (num_traps == 0) && return # if the terrain has no traps, there is nothing to do
@@ -68,11 +74,19 @@ function fill_sequence(tstruct::TrapStructure{<:Real},
         # graph and new rain rate
         rateinfo = compute_flow(sgraph, we.rain_rate, infiltration, tstruct, verbose)
 
+        # build the dynamic networks for this weather period (§3); empty when no
+        # dyn_traps/culverts are supplied, in which case behaviour is unchanged
+        net_contexts, net_trap_set, net_covered_set =
+            _build_dyn_networks(tstruct, dyn_traps, culverts, findall(filled_traps),
+                                cur_amounts, rateinfo, infiltration, z_vol_tables,
+                                cur_time, end_time)
+
         # compute initial time estimates for when a trap become filled, or split
-        # into subtraps
+        # into subtraps (network traps are overridden from their network prediction)
         changetimeest = _set_initial_changetime_estimates(rateinfo, cur_amounts,
                                                           cur_time, filled_traps,
-                                                          tstruct)
+                                                          tstruct, net_contexts,
+                                                          net_covered_set)
 
         # register the start of this weather event as a new, fully computed, spill event
         push!(seq, SpillEvent(cur_time, copy(cur_amounts), copy(filled_traps),
@@ -84,7 +98,8 @@ function fill_sequence(tstruct::TrapStructure{<:Real},
         _fill_sequence_for_weather_event!(seq, sgraph, rateinfo, changetimeest,
                                           filled_traps, cur_amounts, z_vol_tables,
                                           tstruct, infiltration, end_time, time_slack,
-                                          verbose)
+                                          net_contexts, net_trap_set, net_covered_set,
+                                          dyn_traps, culverts, verbose)
     end
 
     return seq
@@ -94,7 +109,8 @@ end
 function _fill_sequence_for_weather_event!(seq, sgraph, rateinfo, changetimeest,
                                            filled_traps, cur_amounts, z_vol_tables,
                                            tstruct, infiltration, endtime, time_slack,
-                                           verbose)
+                                           net_contexts, net_trap_set, net_covered_set,
+                                           dyn_traps, culverts, verbose)
     cur_time = cur_amounts[1].time
 
     fill_updates = Vector{IncrementalUpdate{Bool}}()
@@ -107,28 +123,63 @@ function _fill_sequence_for_weather_event!(seq, sgraph, rateinfo, changetimeest,
         cur_time, fill_updates =
             _identify_next_status_change!(changetimeest, cur_amounts, rateinfo,
                                           filled_traps, tstruct, z_vol_tables,
-                                          cur_time, endtime)
+                                          cur_time, endtime,
+                                          net_trap_set, net_covered_set)
 
         (cur_time > endtime || isempty(fill_updates)) && break # do not register
                                                                # more events
+        # A network parent that emptied exposes its immediate children as transitory
+        # traps; add them to the fill updates so they leave `filled_traps` too (§:empty).
+        fill_updates = _expand_empty_fill_updates(fill_updates, net_contexts, tstruct)
         for u in fill_updates
             filled_traps[u.index] = u.value
         end
-        # given changes in fill state, update spill graph
-        graph_updates = update_spillgraph!(sgraph, fill_updates, tstruct)
+        # given changes in fill state, update spill graph.  Network traps (nodes AND
+        # subsumed descendants) are kept out of the spillgraph — their routing is handled
+        # by the ODE — so only non-covered fill updates drive it (§4/§8).
+        non_net_fill_updates = filter(u -> u.index ∉ net_covered_set, fill_updates)
+        graph_updates = update_spillgraph!(sgraph, non_net_fill_updates, tstruct)
 
         # given the updates ot the spill graph, update flow information in `rateinfo`
         setsavepoint!(rateinfo)
         _update_flow!(rateinfo, graph_updates, tstruct, sgraph)
-        
-        # update water amount in traps whose inflow rate is about to change, or
-        # that just filled
+
+        # touch every affected network (commit → clamp → rebuild → refresh → predict);
+        # this also refreshes net_trap_set / net_covered_set and the network entries of
+        # changetimeest.  Runs AFTER _update_flow!.
+        old_covered = net_covered_set
+        net_committed = Dict{Int,Float64}()
+        if !isempty(net_contexts)
+            net_contexts, net_trap_set, net_covered_set, net_committed =
+                _touch_networks!(net_contexts, changetimeest, sgraph, tstruct,
+                                 dyn_traps, culverts, filled_traps,
+                                 cur_amounts, rateinfo, z_vol_tables, infiltration,
+                                 fill_updates, old_covered, cur_time, endtime)
+            # traps that LEFT the networks need a fresh constant-rate changetime estimate
+            for t in setdiff(old_covered, net_covered_set)
+                changetimeest[t] = _compute_changetime_estimate(t, cur_amounts, cur_time,
+                                                                rateinfo, filled_traps, tstruct)
+            end
+        end
+
+        # update water amount in traps whose inflow rate is about to change, or that
+        # just filled.  Network-covered traps are excluded — their amounts come from the
+        # network state instead (§9).
         amount_updates = _update_affected_amounts(rateinfo, cur_amounts, filled_traps,
-                                                  tstruct, z_vol_tables, cur_time)
+                                                  tstruct, z_vol_tables, cur_time,
+                                                  net_covered_set)
         append!(amount_updates,
                 [IncrementalUpdate(tix, FilledAmount(tstruct.trapvolumes[tix] -
                     tstruct.subvolumes[tix], cur_time))
-                 for tix in [u.index for u in fill_updates]])
+                 for tix in [u.index for u in fill_updates]
+                 if tix ∉ net_covered_set && tix ∉ old_covered])
+        # network-trap amounts (nodes from ODE state, subsumed full at capacity, just
+        # exited from their committed boundary value)
+        if !(isempty(net_covered_set) && isempty(old_covered))
+            append!(amount_updates,
+                    _network_amount_updates(net_contexts, union(old_covered, net_covered_set),
+                                            net_committed, tstruct, cur_amounts, cur_time))
+        end
 
         # integrate the changes into the continously updated `cur_amounts` vector
         _apply_updates!(cur_amounts, amount_updates)
@@ -153,11 +204,14 @@ end
 
 # ----------------------------------------------------------------------------
 function _update_affected_amounts(rateinfo, cur_amounts, filled_traps, tstruct,
-                                  z_vol_tables, cur_time)
+                                  z_vol_tables, cur_time, net_covered_set = nothing)
 
     results = Vector{IncrementalUpdate{FilledAmount}}()
 
     for iu ∈ getinflowupdates(rateinfo)
+        # network-covered traps get their amount from the network state, not the
+        # constant-rate fill projection (§9)
+        net_covered_set !== nothing && iu.index ∈ net_covered_set && continue
         amount = _compute_exact_fill(rateinfo, cur_amounts, iu.index,
                                      filled_traps, tstruct, cur_time, z_vol_tables, true)
         push!(results, IncrementalUpdate(iu.index, FilledAmount(amount, cur_time)))
@@ -245,11 +299,15 @@ end
 
 # ----------------------------------------------------------------------------
 function _update_changetime_estimates!(changetimeest, cur_amounts, cur_time,
-                                       rateinfo, filled_traps, tstruct)
+                                       rateinfo, filled_traps, tstruct,
+                                       net_covered_set = nothing)
 
     inflow_updates = getinflowupdates(rateinfo)
     for update ∈ inflow_updates
         trap = update.index
+        # covered traps (network nodes + subsumed descendants) are governed by the
+        # network prediction, not the constant-rate estimate — skip them (§7)
+        net_covered_set !== nothing && trap ∈ net_covered_set && continue
         changetimeest[trap] =
             _compute_changetime_estimate(trap, cur_amounts, cur_time,
                                          rateinfo, filled_traps, tstruct)
@@ -259,28 +317,46 @@ end
 
 # ----------------------------------------------------------------------------
 function _set_initial_changetime_estimates(rateinfo, cur_amounts, cur_time,
-                                           filled_traps, tstruct)
+                                           filled_traps, tstruct,
+                                           net_contexts = nothing,
+                                           net_covered_set = nothing)
 
-    return [_compute_changetime_estimate(trap, cur_amounts, cur_time, rateinfo,
-                                         filled_traps, tstruct)
-            for trap ∈ 1:numtraps(tstruct)]
+    changetimeest =
+        [_compute_changetime_estimate(trap, cur_amounts, cur_time, rateinfo,
+                                      filled_traps, tstruct)
+         for trap ∈ 1:numtraps(tstruct)]
+
+    # override network traps from their network prediction (exact min == max), and
+    # force every covered (node + subsumed) trap that is not a predicted trigger to Inf
+    if net_contexts !== nothing && !isempty(net_contexts)
+        _apply_network_changetimeest!(changetimeest, net_contexts, net_covered_set)
+    end
+    return changetimeest
 end
 
 # ----------------------------------------------------------------------------
-function _identify_next_status_change!(changetimeest, cur_amounts, rateinfo, 
+function _identify_next_status_change!(changetimeest, cur_amounts, rateinfo,
                                        filled_traps, tstruct, z_vol_tables,
-                                       cur_time, tmax)
+                                       cur_time, tmax,
+                                       net_trap_set = nothing,
+                                       net_covered_set = nothing)
 
     # update changetimeest for traps that have had their inflow changed
     _update_changetime_estimates!(changetimeest, cur_amounts, cur_time,
-                                  rateinfo, filled_traps, tstruct)
+                                  rateinfo, filled_traps, tstruct, net_covered_set)
     # initialize return variables
     earliest_changetime = tmax
+
+    # whether `ix` is a network node (keeps its exact prediction as a candidate)
+    is_node(ix) = net_trap_set !== nothing && ix ∈ net_trap_set
+    # whether `ix` is a subsumed descendant (covered but not a node): never a candidate
+    is_subsumed(ix) = net_covered_set !== nothing && ix ∈ net_covered_set && !is_node(ix)
 
     # identify traps that may change their status before the earliest identified
     # changetime
     num_traps = numtraps(tstruct)
-    candidates = findall([all(filled_traps[subtrapsof(tstruct, ix)]) && 
+    candidates = findall([!is_subsumed(ix) &&
+                          all(filled_traps[subtrapsof(tstruct, ix)]) &&
                           changetimeest[ix].min < earliest_changetime
                           for ix ∈ 1:num_traps])
     
@@ -323,6 +399,11 @@ function _identify_next_status_change!(changetimeest, cur_amounts, rateinfo,
         # this trap will not change again unless there is a weather change (in which
         # case all changetime estimates will be recomputed), so set it to infinity
         changetimeest[cand] = ChangeTimeEstimate(false, Inf, Inf)
+
+        # Network nodes are re-predicted by the touch step (which also resets their
+        # subsumed children), so the constant-rate subtrap recompute below is both
+        # unnecessary and wrong for them — skip it.
+        is_node(cand) && continue
 
         # Recompute changetimes for subtraps (which may change when parent
         # change its filled status)

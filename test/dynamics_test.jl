@@ -22,7 +22,7 @@ function valid_network(net)
         ok &= all(1 <= ci <= nc && 1 <= pos <= length(p.cells) for (ci, pos) in p.culvert_outlets)
     end
     for t in net.traps
-        ok &= 0 <= t.spill_path <= np
+        ok &= -1 <= t.spill_path <= np      # -1 = full trap spilling out of domain
         ok &= all(1 <= ci <= nc for ci in t.culvert_inlets)
         ok &= all(1 <= ci <= nc for ci in t.culvert_outlets)
     end
@@ -46,30 +46,36 @@ end
 @testset "_build_network" begin
     mock = (topography = zeros(3, 3),)  # only .topography is used (for CartesianIndices)
 
-    # normal: a path flowing into a trap that spills out of the domain
-    net = SWIM._build_network([[1, 2, 3]], [100], false, mock)
+    # normal: a path flowing into a (full) trap that spills out of the domain ->
+    # terminal trap gets the out-of-domain sentinel spill_path == -1
+    net = SWIM._build_network([[1, 2, 3]], [100], false, mock; terminal_exits_domain=true)
     @test length(net.flow_paths) == 1
     @test length(net.traps) == 1
     @test net.flow_paths[1].target_trap == 1          # path -> trap
-    @test net.traps[1].spill_path == 0                # trap exits domain
+    @test net.traps[1].spill_path == -1               # full trap exits domain
     @test net.traps[1].trap_ix == 100
     @test net.flow_paths[1].cells == [c(1,1), c(2,1), c(3,1)]
     @test eltype(net.flow_paths[1].cells) == CartesianIndex{2}
 
+    # same chain but the terminal trap is the unfilled frontier (not exiting the
+    # domain): spill_path stays 0 (TRANSITORY), the default
+    net = SWIM._build_network([[1, 2, 3]], [100], false, mock)
+    @test net.traps[1].spill_path == 0                # terminal unfilled trap
+
     # start point inside the first full trap: chain begins with a trap that spills
     # into the first path (regression test for the inverted-wiring bug)
-    net = SWIM._build_network([[1, 2, 3]], [100, 200], true, mock)
+    net = SWIM._build_network([[1, 2, 3]], [100, 200], true, mock; terminal_exits_domain=true)
     @test length(net.flow_paths) == 1
     @test length(net.traps) == 2
     @test net.traps[1].spill_path == 1                # trap A spills into the path
     @test net.flow_paths[1].target_trap == 2          # path flows into trap B
-    @test net.traps[2].spill_path == 0                # trap B exits domain
+    @test net.traps[2].spill_path == -1               # full trap B exits domain
 
     # start inside a trap that spills straight out of the domain: lone trap, no path
-    net = SWIM._build_network(Vector{Int}[], [100], true, mock)
+    net = SWIM._build_network(Vector{Int}[], [100], true, mock; terminal_exits_domain=true)
     @test isempty(net.flow_paths)
     @test length(net.traps) == 1
-    @test net.traps[1].spill_path == 0
+    @test net.traps[1].spill_path == -1               # full lone trap exits domain
 end
 
 @testset "_unfilled_trap_at" begin
@@ -320,6 +326,27 @@ end
     end
 end
 
+@testset "out-of-domain full trap uses spill_path == -1 sentinel" begin
+    grid = loadgrid(joinpath(artifact"swim_testdata", "data", "small", "mini.txt"))
+    ts   = spillanalysis(grid, usediags=true)
+
+    # With every trap full, the chain from (7,119) ends on a full trap that spills
+    # straight out of the domain: it carries the out-of-domain sentinel spill_path == -1,
+    # while every upstream full trap has a real in-network spill path (> 0).
+    net = setup_network(ts, [CartesianIndex(7, 119)], collect(1:numtraps(ts)))[1]
+    @test net.traps[end].spill_path == -1
+    @test all(t.spill_path > 0 for t in net.traps[1:end-1])
+    @test valid_network(net)
+
+    # solveDynNetwork! must ACCEPT a FULL trap carrying the -1 sentinel (it satisfies
+    # the FULL contract spill_path != 0).  All traps full with infiltration > inflow
+    # drains immediately -> :unspill via the t=0 fast path, not a validator throw.
+    caps = [g.capacity for g in SWIM._build_trap_geometry(ts, net, zeros(size(ts.topography)))]
+    res  = solveDynNetwork!(copy(caps), ts, net,
+                            fill(0.1, size(ts.topography)), zeros(length(net.traps)))
+    @test res.kind == :unspill
+end
+
 @testset "setup_network culverts on mini.txt" begin
     grid = loadgrid(joinpath(artifact"swim_testdata", "data", "small", "mini.txt"))
     ts = spillanalysis(grid, usediags=true)
@@ -534,7 +561,14 @@ end
 @testset "networksolver: geometry / rate / solve on mini.txt" begin
     grid = loadgrid(joinpath(artifact"swim_testdata", "data", "small", "mini.txt"))
     ts   = spillanalysis(grid, usediags=true)
-    net  = setup_network(ts, [CartesianIndex(7, 119)], collect(1:numtraps(ts)))[1]
+    # This testset models a chain of full traps feeding one evolving frontier leaf
+    # (`net.traps[end]`).  Build with every trap full EXCEPT that leaf, so the leaf is
+    # the terminal TRANSITORY node (spill_path == 0).  An all-full build would instead
+    # mark the leaf as a full trap spilling out of the domain (spill_path == -1);
+    # making it evolve afterwards would then violate the three-state contract.
+    all_traps   = collect(1:numtraps(ts))
+    leaf_trapix = setup_network(ts, [CartesianIndex(7, 119)], all_traps)[1].traps[end].trap_ix
+    net  = setup_network(ts, [CartesianIndex(7, 119)], setdiff(all_traps, [leaf_trapix]))[1]
     nt   = length(net.traps)
 
     @testset "geometry helpers (wetted-area infiltration)" begin
@@ -784,6 +818,51 @@ end
         @test res_pf.trap == 233
         @test isapprox(s_pf[1], C_u; rtol=1e-3)
     end
+
+    @testset "solveDynNetwork!: tmax bounds the integration" begin
+        # Single leaf trap (233), empty, inflow 1.0, zero infiltration -> dV/dt = 1,
+        # so it fills exactly at t_e = capacity.
+        start = CartesianIndex(7, 119)
+        net   = setup_network(ts, [start], Int[])[1]
+        @test net.traps[1].trap_ix == 233
+        infil = zeros(size(ts.topography))
+        C     = SWIM._build_trap_geometry(ts, net, infil)[1].capacity
+
+        # unbounded (tmax = Inf default): :fill at t_e ≈ C, state clamped to C
+        s = [0.0]
+        res = solveDynNetwork!(s, ts, net, infil, [1.0])
+        @test res.kind == :fill && res.trap == 233
+        t_e = res.time
+        @test isapprox(t_e, C; rtol=1e-3) && isapprox(s[1], C; rtol=1e-3)
+
+        # tmax short of the event: no event; return (tmax, 0, :none) with state at tmax.
+        # With dV/dt = 1 the volume at tmax is exactly tmax.
+        tm  = t_e / 2
+        s2  = [0.0]
+        res2 = solveDynNetwork!(s2, ts, net, infil, [1.0]; tmax = tm)
+        @test res2.kind == :none && res2.trap == 0
+        @test res2.time == tm
+        @test isapprox(s2[1], tm; rtol=1e-3) && 0.0 < s2[1] < C
+
+        # tmax past the event: the event still fires (state clamped to C).
+        s3  = [0.0]
+        res3 = solveDynNetwork!(s3, ts, net, infil, [1.0]; tmax = t_e * 1.5)
+        @test res3.kind == :fill && res3.trap == 233
+        @test isapprox(res3.time, t_e; rtol=1e-3) && isapprox(s3[1], C; rtol=1e-3)
+
+        # tmax == 0: nothing advances, state unchanged, no event.
+        s0  = [0.3]
+        res0 = solveDynNetwork!(s0, ts, net, infil, [1.0]; tmax = 0.0)
+        @test res0.kind == :none && res0.time == 0.0 && s0 == [0.3]
+
+        # Steady state below a finite tmax must still report Inf (not tmax): trap 57
+        # settles at a sub-capacity equilibrium (inflow 0.3 < max infiltration 1.1).
+        net_s   = DynNetwork([DynFlowPath(CartesianIndex{2}[], 0)], [DynTrap(57, 0)], DynCulvert[])
+        infil_s = zeros(size(ts.topography)); infil_s[ts.footprints[57]] .= 0.1
+        s_s     = [0.0]
+        res_s   = solveDynNetwork!(s_s, ts, net_s, infil_s, [0.3]; tmax = 1e6)
+        @test res_s.kind == :none && res_s.time == Inf
+    end
 end
 
 # ---------------------------------------------------------------------------
@@ -971,4 +1050,148 @@ end
     res = solveDynNetwork!(state, ts, net, zer, zeros(nt))
     @test res.kind == :unspill
     @test res.trap == net.traps[ti_in].trap_ix
+end
+
+@testset "DynNetworkContext build / predict / commit (slice 2)" begin
+    grid = loadgrid(joinpath(artifact"swim_testdata", "data", "small", "mini.txt"))
+    ts   = spillanalysis(grid, usediags=true)
+    nt   = SWIM.numtraps(ts)
+    sz   = size(ts.topography)
+    zvt  = SWIM._compute_z_vol_tables(ts)
+    infil = zeros(sz)
+
+    ri(inflows) = (ti = zeros(nt);
+                   for (k, v) in inflows; ti[k] = v; end;
+                   SWIM.RateInfo(zeros(sz), zeros(nt), zeros(nt), ti))
+    ca(amts)    = [FilledAmount(get(amts, i, 0.0), 0.0) for i in 1:nt]
+    own(t)      = ts.trapvolumes[t] - ts.subvolumes[t]
+
+    @testset "single empty leaf: build + predict" begin
+        ctxs, nts, ncs = SWIM._build_dyn_networks(
+            ts, [233], DynCulvert[], Int[], ca(Dict{Int,Float64}()),
+            ri(Dict(233 => 1.0)), infil, zvt, 0.0, 1e9)
+        @test length(ctxs) == 1
+        c = ctxs[1]
+        @test c.global_ix == [233]
+        @test c.state == [0.0]
+        @test c.inflow_sources == Set([233])
+        @test c.extern_inflow == [1.0]
+        @test c.last_solve_time == 0.0
+        @test nts == Set([233]) && ncs == Set([233])
+        # dV/dt = 1 (zero infiltration) → fills at t = capacity
+        C = SWIM._build_trap_geometry(ts, c.net, infil)[1].capacity
+        @test c.next_event.kind == :fill && c.next_event.trap == 233
+        @test isapprox(c.next_event.time, C; rtol = 1e-3)
+    end
+
+    @testset "commit advances state, re-predict keeps absolute time" begin
+        ctxs, = SWIM._build_dyn_networks(
+            ts, [233], DynCulvert[], Int[], ca(Dict{Int,Float64}()),
+            ri(Dict(233 => 1.0)), infil, zvt, 0.0, 1e9)
+        c  = ctxs[1]
+        t_fill = c.next_event.time
+        Tc = t_fill / 2
+        SWIM._commit_network!(c, ts, infil, zvt, Tc)
+        @test c.last_solve_time == Tc
+        @test isapprox(c.state[1], Tc; rtol = 1e-3)   # V = inflow * Tc
+        SWIM._predict_network!(c, ts, infil, zvt, 1e9)
+        @test c.next_event.kind == :fill
+        @test isapprox(c.next_event.time, t_fill; rtol = 1e-3)  # absolute, unchanged
+    end
+
+    @testset "parent node: gross composite inflow + leaf-descendant sources" begin
+        amts = Dict(9 => own(9), 18 => own(18), 414 => 0.5 * own(414))
+        ctxs, _, ncs = SWIM._build_dyn_networks(
+            ts, [414], DynCulvert[], [9, 18], ca(amts),
+            ri(Dict(9 => 0.7, 18 => 0.3)), infil, zvt, 0.0, 1e9)
+        c = ctxs[1]
+        @test [t.trap_ix for t in c.net.traps] == [414]   # Design A: subsumed
+        @test c.extern_inflow ≈ [1.0]                      # gross = 0.7 + 0.3
+        @test c.inflow_sources == Set([9, 18])             # leaf descendants
+        @test ncs == Set([9, 18, 414])                     # node + subsumed subtree
+    end
+
+    @testset "invalid dyn_trap throws" begin
+        @test_throws ErrorException SWIM._build_dyn_networks(
+            ts, [nt + 1], DynCulvert[], Int[], ca(Dict{Int,Float64}()),
+            ri(Dict{Int,Float64}()), infil, zvt, 0.0, 1e9)
+    end
+
+    @testset "culvert endpoints seed a network with no dyn_traps" begin
+        full = collect(1:nt)
+        amts = Dict(i => own(i) for i in 1:nt)
+        ctxs, nts, = SWIM._build_dyn_networks(
+            ts, Int[], [cvlt(CartesianIndex(7, 119), CartesianIndex(199, 4))],
+            full, ca(amts), ri(Dict{Int,Float64}()), infil, zvt, 0.0, 1e9)
+        @test !isempty(ctxs)
+        # the culvert's inlet trap (233) and outlet trap (13) are covered
+        @test 233 in nts && 13 in nts
+        @test any(length(c.net.culverts) == 1 for c in ctxs)
+    end
+end
+
+@testset "fill_sequence dyn_traps parity (slice 3)" begin
+    grid = loadgrid(joinpath(artifact"swim_testdata", "data", "small", "mini.txt"))
+    ts   = spillanalysis(grid, usediags=true)
+    weather = [WeatherEvent(0.0, 1.0)]
+    # trap -> time it first becomes filled, reconstructed from the event log
+    filltimes(seq) = (d = Dict{Int,Float64}();
+        for e in seq[2:end], u in e.filled
+            u.value && !haskey(d, u.index) && (d[u.index] = e.timestamp)
+        end; d)
+    maxΔ(a, b) = maximum(abs(a[t] - b[t]) for t in keys(a))
+
+    seqP = fill_sequence(ts, weather)
+    ftP  = filltimes(seqP)
+
+    # no dyn_traps must be byte-identical to the default (network path is inert)
+    @test [e.timestamp for e in fill_sequence(ts, weather; dyn_traps=Int[])] ==
+          [e.timestamp for e in seqP]
+
+    # single isolated network reproduces plain fill_sequence essentially exactly
+    ft1 = filltimes(fill_sequence(ts, weather; dyn_traps=[233]))
+    @test Set(keys(ft1)) == Set(keys(ftP))
+    @test maxΔ(ftP, ft1) < 1e-6
+
+    # FULL coverage: every trap solved as a dynamic network must reproduce plain to a
+    # tight tolerance (ODE vs analytic; same event count, same set of filled traps)
+    seqF = fill_sequence(ts, weather; dyn_traps=collect(1:numtraps(ts)))
+    ftF  = filltimes(seqF)
+    @test length(seqF) == length(seqP)
+    @test Set(keys(ftF)) == Set(keys(ftP))
+    @test maxΔ(ftP, ftF) < 1e-5
+
+    # MIXED coverage (subset networked) — same traps fill; timings agree to a looser
+    # tolerance.  @@@ a ~5e-4 discrepancy remains at a confluence fed by both a
+    # networked and a non-networked branch; tighten once that boundary effect is
+    # resolved.
+    ftM = filltimes(fill_sequence(ts, weather; dyn_traps=[233, 220]))
+    @test Set(keys(ftM)) == Set(keys(ftP))
+    @test maxΔ(ftP, ftM) < 2e-3
+end
+
+@testset "solveDynNetwork!: parent at its floor drains/exposes children (:empty)" begin
+    grid = loadgrid(joinpath(artifact"swim_testdata", "data", "small", "mini.txt"))
+    ts   = spillanalysis(grid, usediags=true)
+    CI   = CartesianIndices(size(ts.topography))
+    # parent 414 (children 9, 18) as a single subsuming node
+    net  = setup_network(ts, [CI[ts.footprints[414][1]]], [9, 18])[1]
+    @test [t.trap_ix for t in net.traps] == [414]
+    C    = SWIM._build_trap_geometry(ts, net, zeros(size(ts.topography)))[1].capacity
+    infil = zeros(size(ts.topography)); infil[ts.footprints[414]] .= 1.0
+
+    # (a) draining from just-below-full down to zero fires :empty (clamped to 0)
+    s = [prevfloat(C)]
+    ra = solveDynNetwork!(s, ts, net, infil, [0.0])
+    @test ra.kind == :empty && ra.trap == 414 && s[1] == 0.0
+
+    # (b) a parent already at its floor (V == 0) with negative net inflow exposes its
+    # children immediately: :empty at t = 0, not steady state
+    s2 = [0.0]
+    rb = solveDynNetwork!(s2, ts, net, infil, [0.0])
+    @test rb.kind == :empty && rb.trap == 414 && rb.time == 0.0
+
+    # (c) a parent at its floor with positive inflow fills instead
+    s3 = [0.0]
+    @test solveDynNetwork!(s3, ts, net, zeros(size(ts.topography)), [1.0]).kind == :fill
 end

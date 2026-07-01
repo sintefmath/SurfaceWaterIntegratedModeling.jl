@@ -24,8 +24,9 @@ include("dynamics/elements.jl")
 include("dynamics/culvert_rate.jl")
 include("utils.jl")
 include("dynamics/networksolver.jl")
+include("dynamics/network_context.jl")
 # ----------------------------------------------------------------------------
-include("IOandplot.jl") 
+include("IOandplot.jl")
 # ----------------------------------------------------------------------------
 include("artifacts.jl")
 

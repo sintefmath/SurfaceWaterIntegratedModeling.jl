@@ -44,8 +44,14 @@ DynFlowPath(cells) =
         DynTrap(trap_ix, spill_path, culvert_inlets, culvert_outlets)
 
 Represent a trap in the terrain, identified by its index in the spillanalysis
-structure.  Every trap must have a spill path (spill_path) that represents the
-flow path that water would take when the trap's capacity is exceeded.
+structure.  The `spill_path` field is the flow path that water would take when the
+trap's capacity is exceeded:
+- `spill_path > 0`: the (network-local) index of that flow path;
+- `spill_path == 0`: the trap is not (yet) full, so it has no spill path;
+- `spill_path == -1`: the trap is full and spills straight out of the domain
+  (no in-network successor).  The routing and ordering layers treat any
+  `spill_path <= 0` as "no successor"; the sentinel only distinguishes a full
+  domain-exiting trap from a not-yet-full one for the solver's state validation.
 
 The trap may also have culvert inlets or outlets within its footprint, which
 would add or subtract water from the trap respectively, depending on the current
@@ -250,22 +256,42 @@ function _subnetwork(tstruct, coord::CartesianIndex, full_traps)
     traps = collect(ftraps)
     ends_with_path = length(paths) > length(ftraps) ||
                      (starts_with_trap && length(paths) == length(ftraps))
-    if ends_with_path
-        tix = _unfilled_trap_at(tstruct, paths[end][end], full_traps)
-        if tix > 0
-            # Subsume-parents invariant: a parent trap is always a single node that
-            # subsumes its whole subtree.  When the terminal unfilled trap `tix` is a
-            # parent, its already-full children may have been recorded as separate nodes
-            # (they spill into the parent inside its own footprint).  Collapse them into
-            # the single parent node, dropping the path segments internal to its
-            # footprint.  (A *full* parent is already subsumed by `flow_path_from`, which
-            # records the uppermost full supertrap and deletes its footprint cells.)
-            paths, traps, starts_with_trap =
-                _subsume_terminal_parent(tstruct, paths, ftraps, tix, starts_with_trap)
-        end
+
+    # Identify the unfilled trap the chain ultimately pools into (0 = exits the domain).
+    # Two terminations require subsuming the trailing full descendants into that parent:
+    #   * the chain ends on a path discharging into an unfilled trap, or
+    #   * the chain ends on a full trap that wrapped back among full siblings of an
+    #     unfilled parent (flow_path_from's wrap-around termination).  In that case the
+    #     final returning segment was popped, so `ends_with_path` is false and we instead
+    #     recover the parent from the hierarchy.  A full trap that spills straight out of
+    #     the domain is *not* such a case and is left as the terminal node.
+    # A chain that ends on a *full* trap spilling straight out of the domain has that
+    # trap as its terminal node (no subsume, no onward path); it is flagged so
+    # `_build_network` emits the out-of-domain sentinel spill_path (-1) for it.
+    terminal_exits_domain = !ends_with_path && !isempty(ftraps) &&
+                            _spills_out_of_domain(tstruct, ftraps[end])
+
+    tix = if ends_with_path
+        _unfilled_trap_at(tstruct, paths[end][end], full_traps)
+    elseif !isempty(ftraps) && !_spills_out_of_domain(tstruct, ftraps[end])
+        _unfilled_parent_of(tstruct, ftraps[end], full_traps)
+    else
+        0
+    end
+    if tix > 0
+        # Subsume-parents invariant: a parent trap is always a single node that
+        # subsumes its whole subtree.  When the terminal unfilled trap `tix` is a
+        # parent, its already-full children may have been recorded as separate nodes
+        # (they spill into the parent inside its own footprint).  Collapse them into
+        # the single parent node, dropping the path segments internal to its
+        # footprint.  (A *full* parent is already subsumed by `flow_path_from`, which
+        # records the uppermost full supertrap and deletes its footprint cells.)
+        paths, traps, starts_with_trap =
+            _subsume_terminal_parent(tstruct, paths, ftraps, tix, starts_with_trap)
     end
 
-    return _build_network(paths, traps, starts_with_trap, tstruct)
+    return _build_network(paths, traps, starts_with_trap, tstruct;
+                          terminal_exits_domain=terminal_exits_domain)
 end
 
 # Is `t` a (transitive) subtrap of `P`?  Walk the agglomeration hierarchy upward from
@@ -313,6 +339,22 @@ function _subsume_terminal_parent(tstruct, paths, ftraps, P::Int, starts_with_tr
     return new_paths, new_traps, starts_with_trap
 end
 
+# True when trap `t`'s spillpoint sits on the domain boundary, i.e. `t` spills
+# straight out of the domain.  `_add_outer_bounderies!` encodes this as a spillpoint
+# whose current and downstream cells coincide (see spillpoints.jl).
+_spills_out_of_domain(tstruct, t::Int) =
+    (sp = tstruct.spillpoints[t]; sp.current_region_cell == sp.downstream_region_cell)
+
+# Lowest ancestor (supertrap) of `t` that is not full, or 0 if none exists.  This is
+# the trap whose basin a wrapped-around chain of full siblings actually pools into.
+function _unfilled_parent_of(tstruct, t::Int, full_traps)
+    p = parentof(tstruct, t)
+    while p !== nothing && p ∈ full_traps
+        p = parentof(tstruct, p)
+    end
+    return p === nothing ? 0 : p
+end
+
 # Return the index of the uppermost unfilled trap that `cell` drains into, or 0 if
 # the cell drains out of the domain or only into already-full traps.
 function _unfilled_trap_at(tstruct, cell::Int, full_traps)
@@ -327,14 +369,27 @@ end
 # `starts_with_trap` fixes the offset between a path and the trap it flows into:
 # when the chain starts with a trap, path i flows into trap i+1 and trap i spills
 # into path i; otherwise path i flows into trap i and trap i spills into path i+1.
-function _build_network(paths, traps, starts_with_trap, tstruct)
+function _build_network(paths, traps, starts_with_trap, tstruct;
+                        terminal_exits_domain::Bool=false)
     CI = CartesianIndices(tstruct.topography)
     link(i, off, n) = i + off <= n ? i + off : 0
     pt = starts_with_trap ? 1 : 0  # offset from a path to the trap it flows into
 
+    # spill_path for trap i.  A terminal trap (no in-network downstream path) gets 0
+    # by default, which the solver reads as TRANSITORY (not yet full).  When that
+    # terminal trap is instead a *full* trap spilling straight out of the domain, it
+    # is flagged with the sentinel -1 so the solver can tell the two apart (a FULL
+    # trap must spill somewhere; -1 says "out of the domain").  Routing and ordering
+    # already treat any spill_path <= 0 as "no in-network successor", so only the
+    # FULL/TRANSITORY validation distinguishes -1 from 0.
+    function spill_path_of(i)
+        sp = link(i, 1 - pt, length(paths))
+        (sp == 0 && terminal_exits_domain && i == length(traps)) ? -1 : sp
+    end
+
     dyn_paths = [DynFlowPath([CI[k] for k in paths[i]], link(i, pt, length(traps)))
                  for i in eachindex(paths)]
-    dyn_traps = [DynTrap(traps[i], link(i, 1 - pt, length(paths)))
+    dyn_traps = [DynTrap(traps[i], spill_path_of(i))
                  for i in eachindex(traps)]
 
     return DynNetwork(dyn_paths, dyn_traps, DynCulvert[])
@@ -440,7 +495,9 @@ function _combine_subnets(subnets::Vector{DynNetwork})
     path_offsets = [0; cumsum([length(n.flow_paths) for n in subnets])[1:end-1]]
     trap_offsets = [0; cumsum([length(n.traps)      for n in subnets])[1:end-1]]
 
-    remap(idx, off)      = idx == 0 ? 0 : idx + off
+    # Non-positive references are sentinels, not indices: 0 = none, -1 = spills out
+    # of the domain (trap spill_path only); both pass through an offset unchanged.
+    remap(idx, off)      = idx <= 0 ? idx : idx + off
     remap_merges(v, off) = [(m + off, j) for (m, j) in v]
 
     all_paths = DynFlowPath[]
@@ -660,9 +717,12 @@ function _build_component(all_paths, all_traps, cv_objs, inlet_owner, outlet_own
         [(path_map[m], j) for (m, j) in all_paths[gpi].merges if m ∈ path_set]
     ) for gpi in global_path_ids]
 
+    # spill_path < 0 is the out-of-domain sentinel (-1): keep it as-is rather than
+    # remapping it as a path index.
+    remap_spill(sp) = sp < 0 ? sp : get(path_map, sp, 0)
     local_traps = [DynTrap(
         all_traps[gti].trap_ix,
-        get(path_map, all_traps[gti].spill_path, 0),
+        remap_spill(all_traps[gti].spill_path),
         get(trap_inlets,  gti, Int[]),
         get(trap_outlets, gti, Int[])
     ) for gti in global_trap_ids]

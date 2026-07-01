@@ -194,6 +194,7 @@ function flow_path_from(tstruct::TrapStructure{<:Real},
             if largest_full_supertrap ∈ downstream_filled_traps
                 # trap spilling into already-visited trap.  These are both subtraps
                 # of the same, unfilled supertrap, so the path ends here
+                pop!(paths) # remove last segment, as we just returned to sibling subtrap
                 break
             end
             push!(downstream_filled_traps, largest_full_supertrap)
@@ -213,7 +214,9 @@ function flow_path_from(tstruct::TrapStructure{<:Real},
             cur_node = tstruct.spillpoints[largest_full_supertrap].downstream_region_cell
 
             # if the spillpoint of the trap is directly spilling out of the domain
-            if tstruct.spillpoints[largest_full_supertrap].downstream_region == 0
+            spt = tstruct.spillpoints[largest_full_supertrap]
+            if spt.current_region_cell == spt.downstream_region_cell
+                # the trap is spilling directly out of the domain, so we stop
                 break
             end
         end
