@@ -797,8 +797,7 @@ Steady-state termination is handled by a separate `DiscreteCallback` built by
 function _build_event_callback(p::DynNetworkRateParams,
                                evolving::AbstractVector{<:Integer},
                                V0::AbstractVector{<:Real},
-                               nreg::Int,
-                               abstol::Real)
+                               nreg::Int)
 
     conds = _event_conditions(p, evolving, nreg)
     event = DynNetworkEvent()
@@ -816,14 +815,8 @@ function _build_event_callback(p::DynNetworkRateParams,
                 out[k] = p.geom[ec.trap].capacity - V[ec.trap]
             elseif ec.kind == :empty
                 out[k] = V[ec.trap]
-            else   # :unspill: fire only once the net inflow is MEANINGFULLY negative
-                # (past -abstol), not merely below zero.  A full trap whose net rate sits
-                # within abstol of zero — e.g. a culvert outlet during drought whose supply
-                # nearly balances its infiltration — is in steady state AT its spillpoint;
-                # unspilling it on a ~1e-9 rate makes it flip to transitory and then refill
-                # on solver noise, chattering.  Shifting the root to net = -abstol keeps such
-                # a trap full and matches the steady-state callback's |dV/dt| < abstol test.
-                out[k] = inflow[ec.trap] - p.footprint_infil[ec.trap] + abstol
+            else   # :unspill: fire when the full trap's net inflow drops below its losses
+                out[k] = inflow[ec.trap] - p.footprint_infil[ec.trap]
             end
         end
     end
@@ -949,15 +942,8 @@ the event time (or at `tmax` if no event fires first).
   on path cells), indexed as `net.flow_paths`.  Defaults to zeros if `nothing`.
 - `zvt`: pre-computed volume↔level tables from [`_compute_z_vol_tables`](@ref).
   Pass a cached value when solving many networks over the same [`TrapStructure`](@ref).
-- `abstol`: topology noise-floor threshold (NOT the ODE integrator tolerance).  A
-  trap whose net rate sits within `abstol` of zero is treated as balanced (steady),
-  not draining/filling — this governs the `:unspill`/`:empty` dead-bands and the
-  steady-state cutoff.  Kept tight (`1e-8`) so topology classification is precise.
-- `ode_abstol`, `ode_reltol`: absolute/relative error tolerances handed to the ODE
-  integrator.  Decoupled from `abstol` so the integrator can run looser (faster)
-  than the topology threshold.  Loosening these trades trajectory accuracy for
-  speed; keep them tight enough that event times stay inside the caller's parity
-  tolerance.
+- `abstol`, `reltol`: ODE solver tolerances.  `abstol` also sets the |dV/dt|
+  threshold of the steady-state cutoff.
 
 # Returns
 A named tuple (no `state` field — state is updated in place):
@@ -1002,10 +988,8 @@ function solveDynNetwork!(state::AbstractVector{Float64},
                           inflow::AbstractVector{<:Real};
                           tmax = Inf,
                           path_inflow = nothing,
-                          abstol = 1e-8,
-                          ode_abstol = 1e-8, ode_reltol = 1e-7,
-                          zvt = nothing,
-                          topology_events = true)
+                          abstol = 1e-8, reltol = 1e-8,
+                          zvt = nothing)
 
     nt = length(net.traps)
     @assert length(state) == nt "state must have one entry per trap in net.traps"
@@ -1016,55 +1000,29 @@ function solveDynNetwork!(state::AbstractVector{Float64},
 
     _validate_network(tstruct, net, V0, p.geom)
 
-    # BLIND-ADVANCE mode (`topology_events = false`): integrate straight to `tmax` with NO
-    # topology callbacks and NO steady-state cutoff — just the physical-box guard — and
-    # report no event.  This is the "localized slack" escape hatch used by `_touch_networks!`
-    # to step a Zeno-chattering network forward by a fixed LOCAL_SLACK interval (see the
-    # reversal-detection block there).  The point is that over a whole slack interval even a
-    # noise-floor rate produces a representable volume change, so a trap pinned one ULP from
-    # a topology boundary drifts physically off it instead of being walked back and forth
-    # across it by sub-ULP stepper rounding.  We deliberately skip the steady-state callback:
-    # its whole job is to stop early when |dV/dt| < abstol, which is exactly the near-zero
-    # rate we need to let accumulate here.
-    if !topology_events
-        tmax_ode = min(tmax, 1e12)
-        tmax_ode <= 0.0 && return (time = max(tmax, 0.0), trap = 0, kind = :none)
-        sol = solve(ODEProblem(dynNetworkRateFunction!, V0, (0.0, tmax_ode), p);
-                    isoutofdomain = (u, pp, t) ->
-                        any(u[i] < -1e-9 || u[i] > pp.geom[i].capacity + 1e-9
-                            for i in eachindex(u)),
-                    abstol = ode_abstol, reltol = ode_reltol)
-        state .= sol.u[end]
-        return (time = tmax, trap = 0, kind = :none)
-    end
-
     # Compute initial rates once: used for the t=0 fast-path checks.
     du0 = similar(V0, Float64)
     dynNetworkRateFunction!(du0, V0, p, 0.0)
 
     nreg = numregions(tstruct)
 
-    # t=0 FULL→TRANSITORY fast path.  If any FULL trap already has du0 MEANINGFULLY negative
-    # (net inflow below its footprint losses by more than abstol), it begins draining right
-    # now.  Return :unspill immediately without running the ODE.  `state` is left unchanged —
-    # the caller sets state[trap] = prevfloat(C) before the next call to make it TRANSITORY.
-    # The -abstol threshold (matching the :unspill root and the steady-state callback) keeps
-    # a trap balanced at capacity by a through-flow — a culvert outlet during drought — from
-    # flip-flopping full↔transitory on sub-ULP stepper noise.
+    # t=0 FULL→TRANSITORY fast path.  If any FULL trap already has du0 < 0 (net inflow
+    # below its footprint losses), it begins draining right now.  Return :unspill
+    # immediately without running the ODE.  `state` is left unchanged — the caller sets
+    # state[trap] = prevfloat(C) before the next call to make it TRANSITORY.
     for i in 1:nt
-        V0[i] == p.geom[i].capacity && du0[i] < -abstol || continue
+        V0[i] == p.geom[i].capacity && du0[i] < 0.0 || continue
         return (time = 0.0, trap = net.traps[i].trap_ix, kind = :unspill)
     end
 
     # t=0 parent-EMPTY fast path.  A parent node sitting at its floor (V == 0, its
-    # children submerged/full) whose net inflow is meaningfully negative cannot keep that
-    # floor — its children must be exposed now, so report :empty immediately.  The floor
-    # guard zeroes `du0` at V == 0, so recompute the unclamped net rate here.  Same -abstol
-    # dead-band as the FULL fast path, for the symmetric floor equilibrium.
+    # children submerged/full) whose net inflow is negative cannot keep that floor —
+    # its children must be exposed now, so report :empty immediately.  The floor guard
+    # zeroes `du0` at V == 0, so recompute the unclamped net rate here.
     inflow0, _ = _routed_inflow(V0, p)
     for i in 1:nt
         (V0[i] == 0.0 && net.traps[i].trap_ix > nreg) || continue
-        inflow0[i] - wetted_infiltration(p.geom[i], 0.0) < -abstol || continue
+        inflow0[i] - wetted_infiltration(p.geom[i], 0.0) < 0.0 || continue
         return (time = 0.0, trap = net.traps[i].trap_ix, kind = :empty)
     end
 
@@ -1092,26 +1050,15 @@ function solveDynNetwork!(state::AbstractVector{Float64},
     # cb_ss   (DiscreteCallback): fires at the first accepted step where max|dV/dt| < abstol
     #         across all evolving traps (step-function infil → must check at accepted steps,
     #         not interpolated points).
-    cb_topo, event = _build_event_callback(p, evolving, V0, nreg, abstol)
+    cb_topo, event = _build_event_callback(p, evolving, V0, nreg)
     cb_ss = _build_steadystate_callback(p, evolving, abstol, du0)
-    # Keep the integrator inside the physical box 0 <= V <= capacity.  Without this, a
-    # smooth drain under `tmax = Inf` lets the adaptive stepper take a gigantic step that
-    # overshoots V = 0 to ~-1e307 in one move — and the step's internal time range then
-    # overflows before any callback can fire.  Rejecting out-of-box states forces the
-    # stepper down so the trap settles cleanly at its floor / capacity.
-    #
-    # isoutofdomain only guards against negative V; it cannot prevent the stepper from
-    # wandering to t ~ 1e307 when the drain is so slow that V stays positive throughout.
     # Cap tmax at a large but finite value so DiffEq never receives Inf as a tspan
     # endpoint (which triggers an internal range(t, Inf, n) that Julia rejects).  1e12
     # is many orders of magnitude beyond any physical simulation horizon.
     tmax_ode = min(tmax, 1e12)
-    isoutofdomain(u, pp, t) =
-        any(u[i] < -1e-9 || u[i] > pp.geom[i].capacity + 1e-9 for i in eachindex(u))
     sol = solve(ODEProblem(dynNetworkRateFunction!, V0, (0.0, tmax_ode), p);
                 callback = CallbackSet(cb_topo, cb_ss),
-                isoutofdomain = isoutofdomain,
-                abstol = ode_abstol, reltol = ode_reltol)
+                abstol = abstol, reltol = reltol)
 
     # Write ODE result back into state in place (saves one nt-length allocation per call).
     state .= sol.u[end]
