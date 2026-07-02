@@ -40,10 +40,47 @@ NOT yet committed** (working tree has the three `src/` edits below).
   #2 is a genuine 3.6× solve-count cut that will dominate in multi-network / less-stiff
   scenarios and bounds worst case.
 
-**Next step:** lever #3.  Make `dynNetworkRateFunction!` (and the `water_level` /
-`_surface_level` / interpolation path it calls) AD-clean, then try
-`AutoTsit5(Rosenbrock23())` or `Rodas5P()` with an `ADTypes` Jacobian; re-measure the
-318 stiff solves.  See "Runtime levers, ranked" §3 below.
+## UPDATE 2026-07-02 (session 2b): lever #3 is a DEAD END — real cost is the blind advance
+
+Investigated lever #3 (stiff/auto-switching solver) with a profiling harness (all
+experimental code reverted; tree clean at commit `e6f6df3`).  **Conclusion: a stiff
+solver does not help, and the AD-clean rewrite is NOT worth doing.**  Evidence:
+
+- Added an `alg` kwarg + `AutoFiniteDiff` Jacobian (no rate-fn rewrite needed for FD).
+  On the *main* solve: `Rosenbrock23(FD)` is **3× slower** (104 s, FD Jacobian = nt+1
+  rate calls/step); `Rodas5P(FD)`/`FBDF(FD)` **break the three-state contract** (their
+  interpolants misresolve the ±ULP balance at trap 13/233); `AutoTsit5(Rosenbrock23FD)`
+  only ~12% (38→33 s).
+- **Profiled where the time actually goes** (counters on solves + rate-fn calls):
+  **21.8M rate calls / run**, ~1.7 µs each.  The 318 main solves are CHEAP (~73 steps
+  each).  **~62 blind-advance solves (the Zeno-resolution path, `topology_events=false`)
+  take up to 128,211 steps each and account for ~100% of the rate calls.**  So the
+  bottleneck is the blind advance, not the main ODE.
+- The blind advance's step count is limited by the **`isoutofdomain` box guard** (cap ±
+  1e-9), not by stiffness — a trap pinned at capacity with a ~1e-8 rate can't take a
+  step >1e-9 without rejection, so dt collapses to ~1e-8 over a 10 ms window.  Stiff
+  solvers made it WORSE (375k steps).  Dropping the box + clamping breaks the contract
+  (trap 13's 1e-8 rate moves it only ~1e-10 in 10 ms, so the clamp pins it back to full).
+
+**So the real remaining lever is the blind-advance mechanism, and it is delicate
+hybrid-system territory** (the memory file's "sliding-mode / minimum-dwell-time
+regularisation" note).  Candidate directions, none quick:
+1. **Cap blind-advance step count / use a coarse fixed-step integrator.**  It only needs
+   to nudge the pinned trap off its boundary over 10 ms; it does NOT need adaptive
+   accuracy.  A handful of fixed Euler/RK steps with a post-clamp that sends a
+   *draining* trap to `prevfloat(cap)` (not `cap`) may suffice — but must not force a
+   genuinely-steady trap off the boundary (that's the trap the current box guard avoids).
+2. **Freeze the pinned trap during the blind advance** (mutable per-solve `frozen` flag
+   the rate fn honours) and integrate only the rest — kills the 1e-9-ceiling stepping.
+3. **Detect the steady case up front:** if the pinned trap's rate is within `abstol`,
+   it should be classified `:none` (steady at cap) and never enter chatter — check
+   whether the `-abstol` dead-band is being applied on the rebuilt-network prediction
+   that triggers the blind advance.
+
+**Recommended next step:** direction #2 or #3, not a solver swap.  Do NOT invest in the
+AD-clean rate-fn rewrite — profiling shows it cannot help this scenario.  (`alg` kwarg
+plumbing was prototyped and reverted; re-add only if a future non-culvert case wants a
+stiff solver on the MAIN solve.)
 
 ## TL;DR
 
