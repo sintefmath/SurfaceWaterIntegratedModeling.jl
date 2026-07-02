@@ -224,7 +224,7 @@ function _identify_new_spillpoint!(grid, subtraps, spillregions, boundaries)
     if isempty(zvals)
         # No outer boundary of trap.  This may happen if the merged traps are
         # enclosed within building footprints.
-        return Spillpoint();
+        return Spillpoint{eltype(grid)}();
     end
 
     ix = argmin(zvals)

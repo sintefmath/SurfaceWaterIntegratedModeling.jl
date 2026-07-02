@@ -27,7 +27,7 @@ See also [`spillregions`](@ref), [`spillpoints`](@ref) and [`sshierarchy!`](@ref
 """
 function trapvolumes(grid::Matrix{<:Real},
                      spillregions::Matrix{Int},
-                     spillpoints::Vector{Spillpoint},
+                     spillpoints::Vector{<:Spillpoint},
                      lowest_regions::Vector{Vector{Int}})
 
     num_lowlevel_regions = maximum(spillregions)

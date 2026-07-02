@@ -3,30 +3,33 @@ export Spillpoint, spillpoints
 
 # --------------------------- Spillpoint structure ---------------------------
 """
-    struct Spillpoint
+    struct Spillpoint{T<:Real}
 
-A struct representing the spillpoint of a trap.  It has the following fields:
+A struct representing the spillpoint of a trap.  Parametrised on the elevation type
+`T` (matching the terrain grid), so a concrete `Spillpoint{Float64}` is an isbits type
+with no per-access boxing.  It has the following fields:
 - `downstream_region::Int`: index of the downstream region.
-- `current_region_cell::Int`: index of the cell in the current region bordering on 
+- `current_region_cell::Int`: index of the cell in the current region bordering on
                               the spillpoint
-- `downstream_region_cell::Int`: index of the cell in the downstream region 
+- `downstream_region_cell::Int`: index of the cell in the downstream region
                                  bordering on the spillpoint
-- `elevation::Real`: the elevation (vertical height) of the spillpoint
+- `elevation::T`: the elevation (vertical height) of the spillpoint
 
 """
-struct Spillpoint
+struct Spillpoint{T<:Real}
     downstream_region::Int
     current_region_cell::Int
     downstream_region_cell::Int
-    elevation::Real
-
+    elevation::T
 end
 
-""" 
-Default constructor of a Spillpoint instance sets all indices to zero
-and elevation to infinity.
 """
-Spillpoint() = Spillpoint(0, 0, 0, Inf)
+Default constructor of a `Spillpoint{T}` sets all indices to zero and elevation to
+`typemax(T)` (a sentinel above any real elevation, so the first candidate always wins).
+`Spillpoint()` defaults the elevation type to `Float64`.
+"""
+Spillpoint{T}() where {T<:Real} = Spillpoint{T}(0, 0, 0, typemax(T))
+Spillpoint() = Spillpoint{Float64}()
     
 
 
@@ -80,7 +83,7 @@ function spillpoints(grid::Matrix{<:Real}, spillregions::Matrix{Int};
             _process_domain(grid, spillregions, usediags, domain, cut_edges)
     else
         tiles, = tiledomain(domain, tiling...)
-        spoints_vec = Vector{Vector{Spillpoint}}(undef, length(tiles))
+        spoints_vec = Vector{Vector{Spillpoint{eltype(grid)}}}(undef, length(tiles))
         boundaries_vec = Vector{Vector{Vector{Tuple{Int, Int}}}}(undef, length(tiles))
 
         Threads.@threads for i = 1:length(tiles)
@@ -117,7 +120,7 @@ function _process_domain(grid::Matrix{<:Real}, spillregions::Matrix{Int},
     # Note: we do not care about the number of distinct spillregions, only the
     # number of distinct _positive_ spillregions, since negative spill regions
     # are spilling out of the domain anyway.
-    result = fill(Spillpoint(), max(maximum(spillregions), 0))
+    result = fill(Spillpoint{eltype(grid)}(), max(maximum(spillregions), 0))
     
     LI = LinearIndices(spillregions)
     IFirst = CartesianIndex(domain.xrange[1], domain.yrange[1])
