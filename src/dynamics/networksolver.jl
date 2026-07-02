@@ -109,6 +109,16 @@ function _build_trap_geometry(tstruct::TrapStructure,
 
         infil = Float64.(infiltration[footprint])
 
+        # Remove infiltration capacity from spillpoint cell(s).  Reason: One
+        # waterlevel reaches this (these), water spills out, and there is never
+        # a positive water depth over this cell when considered part of the trap.
+        # Endowing these cells with infiltraiton capacity will confuse the solver and may
+        # in edge cases lead to trap switching constantly between full and not-full.
+        sp_level_cells = findall(bottom .>= tstruct.spillpoints[tix].elevation)
+        @show sp_level_cells
+        infil[sp_level_cells] .= 0.0
+        @show infil
+        
         geom[i] = TrapGeometry(tix, capacity, footprint, bottom, infil, zmin, v2z)
     end
     return geom
@@ -468,16 +478,15 @@ end
 """
     _footprint_infiltration(tstruct, net, infiltration) -> Vector{Float64}
 
-Whole-footprint infiltration rate of each trap in `net` (in `net.traps` order):
-the infiltration grid summed over every cell of the trap's footprint.  This is the
+Whole-footprint infiltration rate of each trap This is the
 loss a full, submerged trap incurs, used by [`_route_flow`](@ref).
 """
-function _footprint_infiltration(tstruct::TrapStructure,
-                                 net::DynNetwork,
-                                 infiltration::AbstractMatrix{<:Real})
-    return [sum(@view infiltration[tstruct.footprints[t.trap_ix]]) for t in net.traps]
+function _footprint_infiltration(geom::Vector{TrapGeometry})
+    return [sum(g.infil) for g in geom]
 end
 
+
+    
 # ----------------------------------------------------------------------------
 """
     _path_cell_infiltration(net, infiltration) -> Vector{Vector{Float64}}
@@ -580,11 +589,12 @@ function _build_rate_params(tstruct::TrapStructure,
     sorted_tribs    = [sort([(j, m) for (m, j) in fp.merges]) for fp in net.flow_paths]
     cvplan = isempty(net.culverts) ? nothing : _build_culvert_plan(net, tstruct)
     events = cvplan === nothing ? nothing : _path_event_templates(net)
+    tgeom = _build_trap_geometry(tstruct, net, infiltration; zvt=zvt)
     return DynNetworkRateParams(net,
-                                _build_trap_geometry(tstruct, net, infiltration; zvt=zvt),
+                                tgeom,
                                 Float64.(external_inflow),
                                 path_inflow_vec,
-                                _footprint_infiltration(tstruct, net, infiltration),
+                                _footprint_infiltration(tgeom),
                                 prefix,
                                 sorted_tribs,
                                 order,
@@ -1003,7 +1013,7 @@ function solveDynNetwork!(state::AbstractVector{Float64},
     # Compute initial rates once: used for the t=0 fast-path checks.
     du0 = similar(V0, Float64)
     dynNetworkRateFunction!(du0, V0, p, 0.0)
-
+    @show du0
     nreg = numregions(tstruct)
 
     # t=0 FULL→TRANSITORY fast path.  If any FULL trap already has du0 < 0 (net inflow
