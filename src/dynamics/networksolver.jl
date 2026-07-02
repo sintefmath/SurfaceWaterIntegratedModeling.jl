@@ -949,7 +949,15 @@ the event time (or at `tmax` if no event fires first).
   on path cells), indexed as `net.flow_paths`.  Defaults to zeros if `nothing`.
 - `zvt`: pre-computed volume↔level tables from [`_compute_z_vol_tables`](@ref).
   Pass a cached value when solving many networks over the same [`TrapStructure`](@ref).
-- `abstol`, `reltol`: ODE solver tolerances.
+- `abstol`: topology noise-floor threshold (NOT the ODE integrator tolerance).  A
+  trap whose net rate sits within `abstol` of zero is treated as balanced (steady),
+  not draining/filling — this governs the `:unspill`/`:empty` dead-bands and the
+  steady-state cutoff.  Kept tight (`1e-8`) so topology classification is precise.
+- `ode_abstol`, `ode_reltol`: absolute/relative error tolerances handed to the ODE
+  integrator.  Decoupled from `abstol` so the integrator can run looser (faster)
+  than the topology threshold.  Loosening these trades trajectory accuracy for
+  speed; keep them tight enough that event times stay inside the caller's parity
+  tolerance.
 
 # Returns
 A named tuple (no `state` field — state is updated in place):
@@ -994,7 +1002,8 @@ function solveDynNetwork!(state::AbstractVector{Float64},
                           inflow::AbstractVector{<:Real};
                           tmax = Inf,
                           path_inflow = nothing,
-                          abstol = 1e-8, reltol = 1e-8,
+                          abstol = 1e-8,
+                          ode_abstol = 1e-8, ode_reltol = 1e-7,
                           zvt = nothing,
                           topology_events = true)
 
@@ -1024,7 +1033,7 @@ function solveDynNetwork!(state::AbstractVector{Float64},
                     isoutofdomain = (u, pp, t) ->
                         any(u[i] < -1e-9 || u[i] > pp.geom[i].capacity + 1e-9
                             for i in eachindex(u)),
-                    abstol = abstol, reltol = reltol)
+                    abstol = ode_abstol, reltol = ode_reltol)
         state .= sol.u[end]
         return (time = tmax, trap = 0, kind = :none)
     end
@@ -1102,7 +1111,7 @@ function solveDynNetwork!(state::AbstractVector{Float64},
     sol = solve(ODEProblem(dynNetworkRateFunction!, V0, (0.0, tmax_ode), p);
                 callback = CallbackSet(cb_topo, cb_ss),
                 isoutofdomain = isoutofdomain,
-                abstol = abstol, reltol = reltol)
+                abstol = ode_abstol, reltol = ode_reltol)
 
     # Write ODE result back into state in place (saves one nt-length allocation per call).
     state .= sol.u[end]

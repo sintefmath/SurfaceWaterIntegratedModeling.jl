@@ -147,9 +147,28 @@ function _fill_sequence_for_weather_event!(seq, sgraph, rateinfo, changetimeest,
         # touch every affected network (commit → clamp → rebuild → refresh → predict);
         # this also refreshes net_trap_set / net_covered_set and the network entries of
         # changetimeest.  Runs AFTER _update_flow!.
-        old_covered = net_covered_set
+        #
+        # Touch gate (plan D4/§8): a network can only change when a member trap fired
+        # (a topology change) or its external inflow changed (a dynamics change).  A
+        # network's growth/merge boundary is a member — the terminal unfilled trap is
+        # itself a network node (see `_subnetwork`) — so `fired` captures every
+        # topology change and `inflow_changed` every dynamics change.  When NO network
+        # meets either condition, none can have changed this event, so the whole
+        # commit/rebuild/predict pass is skipped: every context keeps its cached state,
+        # prediction, and changetimeest entries, which stay exact because the external
+        # inflow they evolve under is unchanged.  Quiet events then cost no ODE solves —
+        # the dominant runtime win, especially while a distant network drains.
+        old_covered   = net_covered_set
         net_committed = Dict{Int,Float64}()
+        network_touched = false
         if !isempty(net_contexts)
+            inflow_updated = Set(u.index for u in getinflowupdates(rateinfo))
+            network_touched = any(net_contexts) do ctx
+                any(u.index ∈ ctx.global_ix for u in fill_updates) ||
+                    !isdisjoint(ctx.inflow_sources, inflow_updated)
+            end
+        end
+        if network_touched
             net_contexts, net_trap_set, net_covered_set, net_committed =
                 _touch_networks!(net_contexts, changetimeest, sgraph, tstruct,
                                  dyn_traps, culverts, filled_traps,
@@ -174,8 +193,10 @@ function _fill_sequence_for_weather_event!(seq, sgraph, rateinfo, changetimeest,
                  for tix in [u.index for u in fill_updates]
                  if tix ∉ net_covered_set && tix ∉ old_covered])
         # network-trap amounts (nodes from ODE state, subsumed full at capacity, just
-        # exited from their committed boundary value)
-        if !(isempty(net_covered_set) && isempty(old_covered))
+        # exited from their committed boundary value).  Only emitted when the networks
+        # were touched: an untouched network's `state` is not committed to `cur_time`,
+        # so its amounts are left to interpolate between touch events (plan §9).
+        if network_touched && !(isempty(net_covered_set) && isempty(old_covered))
             append!(amount_updates,
                     _network_amount_updates(net_contexts, union(old_covered, net_covered_set),
                                             net_committed, tstruct, cur_amounts, cur_time))

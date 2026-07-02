@@ -324,10 +324,14 @@ end
 # `rateinfo`).  Returns the new context vector and refreshed `net_trap_set` /
 # `net_covered_set`.
 #
-# @@@ This commits and re-predicts ALL contexts on every event.  The touch-gating
-# optimisation (skip networks whose inflow did not change, via `getinflowupdates`)
-# is deferred — it needs context-merge handling to remain correct when growing
-# networks overlap.  See agent/reports/integrate_networks_plan.md §3/§8.
+# The call site gates entry to this function (plan D4/§8): it is invoked only when at
+# least one network was touched this event (a member fired or its external inflow
+# changed).  Quiet events skip it entirely, so no ODE solves run when nothing changed.
+#
+# @@@ Once entered, this still commits and re-predicts ALL contexts, not only the
+# touched ones.  Finer-grained PER-CONTEXT gating (rebuild only the touched subset) is
+# deferred — it needs context-merge handling to remain correct when growing networks
+# overlap.  See agent/reports/integrate_networks_plan.md §3/§8.
 function _touch_networks!(net_contexts, changetimeest, sgraph, tstruct, dyn_traps, culverts,
                           filled_traps, cur_amounts, rateinfo, z_vol_tables, infiltration,
                           fill_updates, old_covered, cur_time, endtime)
