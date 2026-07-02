@@ -521,6 +521,18 @@ function _compute_z_vol_tables(tstruct)
 end
 
 # ----------------------------------------------------------------------------
+# Spillpoint-exclusion rule for a trap's infiltration: a footprint cell whose (raised)
+# terrain bottom lies at or above the trap's spillpoint never ponds as part of the trap
+# (water reaching that level spills out rather than pooling), so it carries no trap
+# infiltration.  The canonical, allocation-free implementation is `_ponding_infiltration`
+# (flow.jl), used where no local bottom is at hand (Smax updates, the
+# `_compute_Smin_Smax_for_specific_trap!` utility).  The per-trap/per-event hot paths that
+# already compute the raised bottom — `fill_trap_until` below and the network solver's
+# `_build_trap_geometry` — apply the same `bottom >= spillpoint` test to that bottom
+# directly.  (Excluding these cells is what keeps the wetted-area loss continuous at
+# V = capacity and removes the fill/unfill chatter of a trap pinned at its spillpoint.)
+
+# ----------------------------------------------------------------------------
 # first return value: new amount of water in trap: any value between 0.0 (empty) and
 #                     the trap volume (or trap self-volume, if subtraps are excluded)
 # second return value: timepoint where the trap filled (if it became full) or emptied
@@ -567,6 +579,15 @@ function fill_trap_until(trap, rateinfo, cur_amount, endtime, tstruct, z_vol_tab
     fprint_infil =
         use_saved ? [-min(getsavedrunoff(rateinfo, i), 0.0) for i in footprint] :
                     -min.(getrunoff(rateinfo, footprint), 0.0)
+    # Cells whose terrain lies at or above the spillpoint never pond as part of the trap:
+    # drop their infiltration so the wetted-area loss is continuous at V = capacity
+    # (removing the fill/unfill chatter the discontinuity used to cause), consistent with
+    # `_ponding_infiltration` and the network solver.  Test the actual terrain height, not
+    # the raised `trap_bottom` (which would over-null a degenerate zero-own-volume parent).
+    _sp = Float64(tstruct.spillpoints[trap].elevation)   # concrete: Spillpoint.elevation is ::Real
+    @inbounds for k in eachindex(fprint_infil)
+        tstruct.topography[footprint[k]] >= _sp && (fprint_infil[k] = 0.0)
+    end
 
     infilfun = ixs -> sum(fprint_infil[ixs])
     v0 = [cur_amount.amount]

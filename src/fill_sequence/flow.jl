@@ -197,13 +197,32 @@ function _compute_initial_rateinfo(precipitation, infiltration, tstruct)
 end
 
 # ----------------------------------------------------------------------------
+# Maximum remaining infiltration capacity of a trap: the infiltration summed over its
+# footprint, EXCLUDING cells whose terrain lies at or above the trap's spillpoint.  Such
+# a cell never holds standing water while it is part of the trap (water reaching the spill
+# level flows out rather than pooling), so it carries no trap infiltration; excluding it
+# keeps the full-trap loss continuous at capacity and consistent with the dynamic network
+# solver (removing the fill/unfill chatter the discontinuity used to cause).  The test is
+# on the cell's actual terrain height — no need to raise the bottom to the subtrap
+# spillpoint as the volume/level code does, because a child's spillpoint is always <= the
+# parent's, so `max(topo, child_sp) < sp` reduces to `topo < sp` (and where they'd differ,
+# a degenerate zero-own-volume parent, the plain test is the correct one).  Explicit,
+# allocation-free loop — this runs per trap and is refreshed per event, so it must stay
+# cheap on large terrains.  `fill_trap_until` and `_build_trap_geometry` apply the same
+# `topography >= spillpoint` rule to their own footprints.
+function _ponding_infiltration(rateinfo, tstruct, trap)
+    sp = Float64(tstruct.spillpoints[trap].elevation)   # concrete: Spillpoint.elevation is ::Real
+    s  = 0.0
+    @inbounds for c in tstruct.footprints[trap]
+        Float64(tstruct.topography[c]) < sp && (s -= min(getrunoff(rateinfo, c), 0.0))
+    end
+    return s
+end
+
 function _update_Smin_Smax!(rateinfo, tstruct, traps)
-        
+
     for i in traps
-        # maximum remaining infiltration capacity rate within trap footprints
-        setsmax!(rateinfo,
-                 i,
-                 -sum(min.(getrunoff(rateinfo, tstruct.footprints[i]), 0.0)))
+        setsmax!(rateinfo, i, _ponding_infiltration(rateinfo, tstruct, i))
     end
 
     for i in traps

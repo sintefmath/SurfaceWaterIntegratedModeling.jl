@@ -120,9 +120,12 @@ end
     @test test_sequencing(grid2, false, 1119, 0.231848557) mask=mask2
     @test test_sequencing(grid3, false, 5, 0.4528216)
 
-    @test test_sequencing(grid1, true, 512, 1.644382996)
-    @test test_sequencing(grid2, true, 1302, 14.419380500)
-    @test test_sequencing(grid2, true, 1344, 14.419380500) mask=mask2
+    # Timestamps updated for the spillpoint-cell infiltration exclusion (a cell at or
+    # above a trap's spillpoint no longer infiltrates as part of that trap); event counts
+    # are unchanged.  The no-infiltration cases above are unaffected.
+    @test test_sequencing(grid1, true, 512, 1.645974715)
+    @test test_sequencing(grid2, true, 1302, 14.415639097)
+    @test test_sequencing(grid2, true, 1344, 14.415639097) mask=mask2
     @test test_sequencing(grid3, true, 8, 4.5241752066)
 
 end

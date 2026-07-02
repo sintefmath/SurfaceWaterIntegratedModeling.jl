@@ -588,7 +588,13 @@ end
             # empty: level at bottom; full: level Inf and whole footprint wetted
             @test SWIM.water_level(g, 0.0) == g.zmin
             @test isinf(SWIM.water_level(g, g.capacity))
-            @test SWIM.wetted_infiltration(g, g.capacity) ≈ 0.5 * nfp
+            # full: wetted infiltration = 0.5 over the PONDING cells only.  Cells at or
+            # above the spillpoint never pond as part of the trap, so they carry no
+            # infiltration (see `_ponding_mask`); the full-capacity loss is therefore
+            # <= the whole-footprint value and equals 0.5 times the ponding-cell count.
+            nland = count(<(ts.spillpoints[g.trap_ix].elevation), g.bottom)
+            @test SWIM.wetted_infiltration(g, g.capacity) ≈ 0.5 * nland
+            @test SWIM.wetted_infiltration(g, g.capacity) <= 0.5 * nfp + 1e-12
             # half-full: level within the trap, infiltration monotone in fill
             Vh = g.capacity / 2
             @test g.zmin <= SWIM.water_level(g, Vh) <= ts.spillpoints[g.trap_ix].elevation + 1e-9

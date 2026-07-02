@@ -109,16 +109,19 @@ function _build_trap_geometry(tstruct::TrapStructure,
 
         infil = Float64.(infiltration[footprint])
 
-        # Remove infiltration capacity from spillpoint cell(s).  Reason: One
-        # waterlevel reaches this (these), water spills out, and there is never
-        # a positive water depth over this cell when considered part of the trap.
-        # Endowing these cells with infiltraiton capacity will confuse the solver and may
-        # in edge cases lead to trap switching constantly between full and not-full.
-        sp_level_cells = findall(bottom .>= tstruct.spillpoints[tix].elevation)
-        @show sp_level_cells
-        infil[sp_level_cells] .= 0.0
-        @show infil
-        
+        # Cells whose terrain lies at or above the spillpoint never pond as part of the
+        # trap: water reaching that level spills out rather than pooling, so there is never
+        # standing depth over them and they carry no trap infiltration.  Dropping them keeps
+        # the wetted-area loss continuous at V = capacity — otherwise a trap pinned at its
+        # spillpoint by a balancing through-flow (e.g. a culvert outlet during drought)
+        # chatters full<->not-full on the jump.  Same `topography >= spillpoint` rule as
+        # `_ponding_infiltration` / `fill_trap_until`; test the actual terrain height, not
+        # the raised `bottom` (which would over-null a degenerate zero-own-volume parent).
+        _sp = Float64(tstruct.spillpoints[tix].elevation)   # concrete: Spillpoint.elevation is ::Real
+        @inbounds for k in eachindex(infil)
+            tstruct.topography[footprint[k]] >= _sp && (infil[k] = 0.0)
+        end
+
         geom[i] = TrapGeometry(tix, capacity, footprint, bottom, infil, zmin, v2z)
     end
     return geom
@@ -476,17 +479,18 @@ end
 
 # ----------------------------------------------------------------------------
 """
-    _footprint_infiltration(tstruct, net, infiltration) -> Vector{Float64}
+    _footprint_infiltration(geom) -> Vector{Float64}
 
-Whole-footprint infiltration rate of each trap This is the
-loss a full, submerged trap incurs, used by [`_route_flow`](@ref).
+Whole-footprint infiltration rate of each trap: the infiltration summed over every
+cell of the trap's footprint (already net of the spillpoint-level cells excluded by
+[`_build_trap_geometry`]).  This is the loss a full, submerged trap incurs, used by
+[`_route_flow`](@ref).  Reads the per-cell `infil` from the precomputed geometry so it
+stays consistent with `wetted_infiltration`.
 """
 function _footprint_infiltration(geom::Vector{TrapGeometry})
     return [sum(g.infil) for g in geom]
 end
 
-
-    
 # ----------------------------------------------------------------------------
 """
     _path_cell_infiltration(net, infiltration) -> Vector{Vector{Float64}}
@@ -1013,7 +1017,6 @@ function solveDynNetwork!(state::AbstractVector{Float64},
     # Compute initial rates once: used for the t=0 fast-path checks.
     du0 = similar(V0, Float64)
     dynNetworkRateFunction!(du0, V0, p, 0.0)
-    @show du0
     nreg = numregions(tstruct)
 
     # t=0 FULL→TRANSITORY fast path.  If any FULL trap already has du0 < 0 (net inflow

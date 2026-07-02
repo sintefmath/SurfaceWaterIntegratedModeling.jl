@@ -154,8 +154,10 @@ end
 function _compute_Smin_Smax_for_specific_trap!(rateinfo, trap, tstruct)
     children = subtrapsof(tstruct, trap)
     for c in vcat(children, trap)
-        # we need these in order to compute Smin for the requested trap
-        setsmax!(rateinfo, c, -sum(min.(getrunoff(rateinfo, tstruct.footprints[c]), 0.0)))
+        # we need these in order to compute Smin for the requested trap.  `_ponding_infiltration`
+        # excludes the cells at or above each trap's spillpoint (they never pond as part of
+        # that trap), matching `_update_Smin_Smax!` and the dynamic network solver.
+        setsmax!(rateinfo, c, _ponding_infiltration(rateinfo, tstruct, c))
     end
     setsmin!(rateinfo, trap, sum(getsmax(rateinfo, children)))
 end
