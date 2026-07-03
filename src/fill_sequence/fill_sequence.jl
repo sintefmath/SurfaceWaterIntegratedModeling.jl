@@ -115,6 +115,8 @@ function _fill_sequence_for_weather_event!(seq, sgraph, rateinfo, changetimeest,
 
     fill_updates = Vector{IncrementalUpdate{Bool}}()
     graph_updates = Vector{IncrementalUpdate{Int}}()
+    # Per-period cache for the incremental (culvert-free) network retrace in _touch_networks!.
+    subnet_cache = SubnetCache()
 
     count = 0
     while cur_time < endtime
@@ -173,7 +175,7 @@ function _fill_sequence_for_weather_event!(seq, sgraph, rateinfo, changetimeest,
                 _touch_networks!(net_contexts, changetimeest, sgraph, tstruct,
                                  dyn_traps, culverts, filled_traps,
                                  cur_amounts, rateinfo, z_vol_tables, infiltration,
-                                 fill_updates, old_covered, cur_time, endtime)
+                                 fill_updates, old_covered, cur_time, endtime, subnet_cache)
             # traps that LEFT the networks need a fresh constant-rate changetime estimate
             for t in setdiff(old_covered, net_covered_set)
                 changetimeest[t] = _compute_changetime_estimate(t, cur_amounts, cur_time,

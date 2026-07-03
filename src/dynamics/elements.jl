@@ -185,11 +185,56 @@ Do not pass the (infinite-rate) culverts stored in the `TrapStructure` here —
 those are a different concept; `culverts` must be dynamic [`DynCulvert`](@ref)s.
 """
 function setup_network(tstruct, dyn_coords, full_traps; culverts::Vector{DynCulvert}=DynCulvert[])
-    subnets = DynNetwork[_subnetwork(tstruct, c, full_traps) for c in dyn_coords]
+    subnets = DynNetwork[first(_subnetwork(tstruct, c, full_traps)) for c in dyn_coords]
     isempty(culverts) && return _merge_networks(subnets)
 
     subnets, included = _expand_with_culverts(tstruct, subnets, culverts, full_traps)
     return _merge_networks(subnets, DynCulvert[culverts[ci] for ci in included], tstruct)
+end
+
+# ----------------------------------------------------------------------------
+# Incremental subnet cache (culvert-free setup path).  `setup_network` re-traces every
+# seed's downstream chain on every touched event, but a fired trap changes only the few
+# chains that pass through it.  This caches each seed's traced subnet together with the
+# set of traps whose fill-state the trace inspected (`_subnet_deps`); an entry stays valid
+# until one of those traps changes fill-state.  `full_snapshot` records the full-trap set
+# the cache is consistent with, so the delta since the last trace ("dirty") is computed
+# robustly even across intervening quiet events (which skip `_touch_networks!`).
+mutable struct SubnetCache
+    net          ::Dict{Int, DynNetwork}
+    dep          ::Dict{Int, Set{Int}}
+    full_snapshot::Set{Int}
+end
+SubnetCache() = SubnetCache(Dict{Int,DynNetwork}(), Dict{Int,Set{Int}}(), Set{Int}())
+
+# @@@ set true (e.g. in a test run) to assert the incremental component partition equals
+# a full `setup_network` on every call — the correctness harness for the cache.
+const _VERIFY_INCR = Ref(false)
+_partition(comps) = Set(Set(t.trap_ix for t in net.traps) for net in comps)
+
+# Culvert-free `setup_network` replacement that reuses `cache`.  Traces only the seeds
+# whose dependency set intersects the traps changed since the cache's last trace; reuses
+# the rest.  Mutates `cache`.  Returns the merged components (same as `setup_network`).
+function setup_network_cached(tstruct, seeds, full_traps, cache::SubnetCache)
+    LI    = LinearIndices(tstruct.topography)
+    cur   = Set{Int}(full_traps)
+    dirty = symdiff(cur, cache.full_snapshot)
+    subnets = Vector{DynNetwork}(undef, length(seeds))
+    for (i, c) in enumerate(seeds)
+        key = LI[c]
+        if haskey(cache.net, key) && isdisjoint(cache.dep[key], dirty)
+            subnets[i] = cache.net[key]
+        else
+            net, dep      = _subnetwork(tstruct, c, full_traps)
+            cache.net[key] = net
+            cache.dep[key] = dep
+            subnets[i]     = net
+        end
+    end
+    cache.full_snapshot = cur
+    comps = _merge_networks(subnets)
+    _VERIFY_INCR[] && @assert _partition(comps) == _partition(setup_network(tstruct, seeds, full_traps)) "incremental subnet cache diverged from a full setup_network"
+    return comps
 end
 
 # All grid cells currently covered by the given subnetworks: every flow-path cell
@@ -224,8 +269,8 @@ function _expand_with_culverts(tstruct, subnets, culverts, full_traps)
             ci in incl_set && continue
             if cv.inlet in occ || cv.outlet in occ
                 push!(included, ci); push!(incl_set, ci); changed = true
-                cv.inlet  ∉ occ && push!(subnets, _subnetwork(tstruct, cv.inlet,  full_traps))
-                cv.outlet ∉ occ && push!(subnets, _subnetwork(tstruct, cv.outlet, full_traps))
+                cv.inlet  ∉ occ && push!(subnets, first(_subnetwork(tstruct, cv.inlet,  full_traps)))
+                cv.outlet ∉ occ && push!(subnets, first(_subnetwork(tstruct, cv.outlet, full_traps)))
             end
         end
     end
@@ -238,6 +283,30 @@ end
 Create a simple line-like network associated with the complete flow path from a
 point in the terrain.
 """
+# Traps whose fill-state the trace from `coord` inspected: the union of the supertraps
+# of every region a path segment ends in (what `flow_path_from`/`_unfilled_trap_at`
+# query), plus the ancestors `_unfilled_parent_of` walks in the wrap-around case.  The
+# traced subnet is a pure function of `full_traps` restricted to this set, so the cached
+# subnet stays valid until one of these traps changes fill-state (see `_traced_subnets`).
+function _subnet_deps(tstruct, paths, ftraps, tix, ends_with_path, full_traps)
+    dep = Set{Int}(ftraps)                    # every followed full trap (draining any collapses the chain)
+    tix > 0 && push!(dep, tix)                # the terminal pool trap (filling it extends the chain)
+    for seg in paths                          # supertraps of each region a segment ends in
+        isempty(seg) && continue
+        r = tstruct.regions[seg[end]]
+        r > 0 && union!(dep, tstruct.supertraps_of[r])
+    end
+    if !ends_with_path && !isempty(ftraps)    # wrap-around: _unfilled_parent_of walks up
+        a = parentof(tstruct, ftraps[end])
+        while a !== nothing
+            push!(dep, a)
+            a in full_traps || break          # first unfilled ancestor is inspected, then stop
+            a = parentof(tstruct, a)
+        end
+    end
+    return dep
+end
+
 function _subnetwork(tstruct, coord::CartesianIndex, full_traps)
     LI = LinearIndices(tstruct.topography)
 
@@ -278,6 +347,11 @@ function _subnetwork(tstruct, coord::CartesianIndex, full_traps)
     else
         0
     end
+
+    # Dependency set for incremental caching, captured from the RAW paths/ftraps/tix
+    # before `_subsume_terminal_parent` mutates `paths` below.
+    deps = _subnet_deps(tstruct, paths, ftraps, tix, ends_with_path, full_traps)
+
     if tix > 0
         # Subsume-parents invariant: a parent trap is always a single node that
         # subsumes its whole subtree.  When the terminal unfilled trap `tix` is a
@@ -291,7 +365,7 @@ function _subnetwork(tstruct, coord::CartesianIndex, full_traps)
     end
 
     return _build_network(paths, traps, starts_with_trap, tstruct;
-                          terminal_exits_domain=terminal_exits_domain)
+                          terminal_exits_domain=terminal_exits_domain), deps
 end
 
 # Is `t` a (transitive) subtrap of `P`?  Walk the agglomeration hierarchy upward from

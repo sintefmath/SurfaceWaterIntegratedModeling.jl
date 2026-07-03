@@ -161,13 +161,14 @@ function _build_dyn_networks(tstruct, dyn_traps, culverts, full_traps, cur_amoun
     seeds = _dyn_seeds(tstruct, dyn_traps, culverts)
     isempty(seeds) && return (DynNetworkContext[], Set{Int}(), Set{Int}())
 
+    # Returns a vector of DynNetwork
     components = setup_network(tstruct, seeds, full_traps; culverts=culverts)
 
     contexts = DynNetworkContext[]
     for net in components
         ctx = _make_context(net, tstruct, rateinfo, seeds,
                             g -> cur_amounts[g].amount, cur_time)
-        _predict_network!(ctx, tstruct, infiltration, z_vol_tables, endtime)
+        _predict_network!(ctx, tstruct, infiltration, z_vol_tables, endtime) # set ctx.next_event
         push!(contexts, ctx)
     end
 
@@ -403,7 +404,7 @@ end
 # roughly the number of changed components (typically one) rather than all of them.
 function _touch_networks!(net_contexts, changetimeest, sgraph, tstruct, dyn_traps, culverts,
                           filled_traps, cur_amounts, rateinfo, z_vol_tables, infiltration,
-                          fill_updates, old_covered, cur_time, endtime)
+                          fill_updates, old_covered, cur_time, endtime, subnet_cache)
     isempty(net_contexts) &&
         return net_contexts, Set{Int}(), Set{Int}(), Dict{Int,Float64}()
     full_traps = findall(filled_traps)
@@ -418,7 +419,11 @@ function _touch_networks!(net_contexts, changetimeest, sgraph, tstruct, dyn_trap
     # new coverage BEFORE any external inflow is read (absorbed traps' double-counted
     # deposits withdrawn; traps leaving coverage regain their edges).
     seeds       = _dyn_seeds(tstruct, dyn_traps, culverts)
-    components  = setup_network(tstruct, seeds, full_traps; culverts=culverts)
+    # Culvert-free path uses the incremental subnet cache (only chains touched by a fired
+    # trap are retraced); culverts fuse components across seeds, so they take the full path.
+    components  = isempty(culverts) ?
+        setup_network_cached(tstruct, seeds, full_traps, subnet_cache) :
+        setup_network(tstruct, seeds, full_traps; culverts=culverts)
     new_covered = _covered_of(components, tstruct)
     old_covered != new_covered &&
         _reconcile_spillgraph!(sgraph, rateinfo, filled_traps, new_covered, tstruct)
