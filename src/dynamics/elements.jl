@@ -201,11 +201,120 @@ end
 # the cache is consistent with, so the delta since the last trace ("dirty") is computed
 # robustly even across intervening quiet events (which skip `_touch_networks!`).
 mutable struct SubnetCache
-    net          ::Dict{Int, DynNetwork}
-    dep          ::Dict{Int, Set{Int}}
-    full_snapshot::Set{Int}
+    net          ::Dict{Int, DynNetwork}   # seed cell (linear) -> traced subnet
+    dep          ::Dict{Int, Set{Int}}     # seed cell -> traps whose fill-state the trace read
+    full_snapshot::Set{Int}                # full-trap set the traces are consistent with
+    # --- incremental merge state (culvert-free path); `warm` once populated ---
+    warm         ::Bool
+    scells       ::Dict{Int, Vector{Int}}  # seed cell -> its subnet's occupied cells (linear)
+    cell_cid     ::Dict{Int, Int}          # occupied cell -> component id
+    comp_net     ::Dict{Int, DynNetwork}   # component id -> built DynNetwork
+    comp_keys    ::Dict{Int, Vector{Int}}  # component id -> seed cells forming it
+    key_cid      ::Dict{Int, Int}          # seed cell -> component id
+    next_cid     ::Int
 end
-SubnetCache() = SubnetCache(Dict{Int,DynNetwork}(), Dict{Int,Set{Int}}(), Set{Int}())
+SubnetCache() = SubnetCache(Dict{Int,DynNetwork}(), Dict{Int,Set{Int}}(), Set{Int}(),
+                            false, Dict{Int,Vector{Int}}(), Dict{Int,Int}(),
+                            Dict{Int,DynNetwork}(), Dict{Int,Vector{Int}}(),
+                            Dict{Int,Int}(), 1)
+
+# Occupied cells (linear indices) of a single subnet: its flow-path cells and every
+# footprint cell of its traps.  Used to seed the cell -> component map.
+function _subnet_cells(tstruct, net::DynNetwork)
+    LI = LinearIndices(tstruct.topography)
+    cells = Int[]
+    for p in net.flow_paths, c in p.cells
+        push!(cells, LI[c])
+    end
+    for t in net.traps, k in tstruct.footprints[t.trap_ix]
+        push!(cells, k)
+    end
+    return cells
+end
+
+# Register newly-built components into the cache's merge state: assign each a fresh id and
+# map its cells to that id, then assign each merged seed cell to the component that owns it
+# (its seed cell is a footprint cell, always retained through the merge).
+function _register_components!(cache::SubnetCache, tstruct, comps, member_keys)
+    for net in comps
+        cid = cache.next_cid; cache.next_cid += 1
+        cache.comp_net[cid]  = net
+        cache.comp_keys[cid] = Int[]
+        for cell in _subnet_cells(tstruct, net)
+            cache.cell_cid[cell] = cid
+        end
+    end
+    for k in member_keys
+        cid = cache.cell_cid[k]
+        cache.key_cid[k] = cid
+        push!(cache.comp_keys[cid], k)
+    end
+    return cache
+end
+
+# Incremental merge (culvert-free).  `subnets`/`seed_keys` are this event's subnets and
+# their seed cells (in seed order); `changed` are the seed cells retraced this event.
+# Re-merges only the components a changed subnet belongs to or newly overlaps, reusing
+# cached DynNetworks for the rest.  Returns all components; updates the cache merge state.
+function _merge_incremental!(cache::SubnetCache, tstruct, subnets, seed_keys, changed)
+    # Cold start (or the seed set changed): full merge, then record the partition.
+    known = Set{Int}(k for ks in values(cache.comp_keys) for k in ks)
+    if !cache.warm || Set(seed_keys) != known
+        empty!(cache.cell_cid); empty!(cache.comp_net); empty!(cache.comp_keys)
+        empty!(cache.key_cid);  empty!(cache.scells);   cache.next_cid = 1
+        for (k, net) in zip(seed_keys, subnets)
+            cache.scells[k] = _subnet_cells(tstruct, net)
+        end
+        comps = _merge_networks(subnets)
+        _register_components!(cache, tstruct, comps, seed_keys)
+        cache.warm = true
+        return comps
+    end
+
+    # Dirty components: those a changed subnet leaves, plus those its NEW cells overlap.
+    dirty_cids = Set{Int}()
+    for k in changed
+        haskey(cache.key_cid, k) && push!(dirty_cids, cache.key_cid[k])
+    end
+    net_of = Dict(k => n for (k, n) in zip(seed_keys, subnets))
+    for k in changed
+        newcells = _subnet_cells(tstruct, net_of[k])
+        for cell in newcells
+            haskey(cache.cell_cid, cell) && push!(dirty_cids, cache.cell_cid[cell])
+        end
+        cache.scells[k] = newcells
+    end
+
+    # All seed cells whose component is dirty, taken in SEED ORDER so the re-merge resolves
+    # tributary overlaps identically to a full `_merge_networks` (first-writer-owns).
+    dirty_set = Set{Int}()
+    for cid in dirty_cids, k in cache.comp_keys[cid]
+        push!(dirty_set, k)
+    end
+    dirty_keys    = Int[k for k in seed_keys if k in dirty_set]
+    dirty_subnets = DynNetwork[net_of[k] for k in dirty_keys]
+
+    # Clean components (untouched) — snapshot their ids before teardown/registration mutate
+    # `comp_net`, so the reused set excludes the freshly-built dirty components.
+    clean_cids = Int[cid for cid in keys(cache.comp_net) if !(cid in dirty_cids)]
+
+    # Tear down the dirty components, re-merge their subnets, register the result.
+    for cid in dirty_cids
+        for cell in _subnet_cells(tstruct, cache.comp_net[cid])
+            get(cache.cell_cid, cell, 0) == cid && delete!(cache.cell_cid, cell)
+        end
+        for k in cache.comp_keys[cid]
+            delete!(cache.key_cid, k)
+        end
+        delete!(cache.comp_net, cid); delete!(cache.comp_keys, cid)
+    end
+    new_comps = _merge_networks(dirty_subnets)
+    _register_components!(cache, tstruct, new_comps, dirty_keys)
+
+    # Clean components keep their cached DynNetwork.
+    clean = DynNetwork[cache.comp_net[cid] for cid in clean_cids]
+    return vcat(clean, new_comps)
+end
 
 # @@@ set true (e.g. in a test run) to assert the incremental component partition equals
 # a full `setup_network` on every call — the correctness harness for the cache.
@@ -223,9 +332,12 @@ function setup_network_cached(tstruct, seeds, full_traps, cache::SubnetCache;
     LI    = LinearIndices(tstruct.topography)
     cur   = Set{Int}(full_traps)
     dirty = symdiff(cur, cache.full_snapshot)
-    subnets = Vector{DynNetwork}(undef, length(seeds))
+    subnets  = Vector{DynNetwork}(undef, length(seeds))
+    seedkeys = Vector{Int}(undef, length(seeds))
+    changed  = Int[]                       # seed cells retraced this event
     for (i, c) in enumerate(seeds)
         key = LI[c]
+        seedkeys[i] = key
         if haskey(cache.net, key) && isdisjoint(cache.dep[key], dirty)
             subnets[i] = cache.net[key]
         else
@@ -233,12 +345,13 @@ function setup_network_cached(tstruct, seeds, full_traps, cache::SubnetCache;
             cache.net[key] = net
             cache.dep[key] = dep
             subnets[i]     = net
+            push!(changed, key)
         end
     end
     cache.full_snapshot = cur
 
     comps = if isempty(culverts)
-        _merge_networks(subnets)
+        _merge_incremental!(cache, tstruct, subnets, seedkeys, changed)
     else
         expanded, included = _expand_with_culverts(tstruct, subnets, culverts, full_traps)
         _merge_networks(expanded, DynCulvert[culverts[ci] for ci in included], tstruct)
