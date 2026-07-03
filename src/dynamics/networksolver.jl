@@ -1069,7 +1069,17 @@ function solveDynNetwork!(state::AbstractVector{Float64},
     # endpoint (which triggers an internal range(t, Inf, n) that Julia rejects).  1e12
     # is many orders of magnitude beyond any physical simulation horizon.
     tmax_ode = min(tmax, 1e12)
-    sol = solve(ODEProblem(dynNetworkRateFunction!, V0, (0.0, tmax_ode), p);
+    # Integrate with the explicit `Tsit5`.  The rate function is non-smooth (culvert
+    # regime switches and the routing `min` are C0-but-not-C1 kinks), NOT genuinely
+    # stiff.  DiffEq's default auto-switching solver mis-reads those kinks as stiffness,
+    # switches to an implicit method, and then pays for finite-difference Jacobians on
+    # the whole (up to a few-hundred-trap) coupled system — dominating the runtime with
+    # no accuracy benefit.  On full-coverage-with-culvert this was ~4x the total time.
+    # An explicit method just takes small steps across the kinks and wins outright.
+    # @@@ If a genuinely stiff configuration ever appears (e.g. a very large-diameter
+    #     culvert draining a tiny trap: extreme timescale separation), revisit with an
+    #     auto-switching solver given a sparse/colored Jacobian rather than the dense FD.
+    sol = solve(ODEProblem(dynNetworkRateFunction!, V0, (0.0, tmax_ode), p), Tsit5();
                 callback = CallbackSet(cb_topo, cb_ss),
                 abstol = abstol, reltol = reltol)
 
