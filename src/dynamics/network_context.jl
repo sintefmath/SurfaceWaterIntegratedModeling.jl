@@ -246,54 +246,108 @@ function _reconcile_spillgraph!(sgraph, rateinfo, filled_traps, covered, tstruct
 end
 
 # ----------------------------------------------------------------------------
-# Advance every network to `cur_time` and rebuild the whole set after a status
-# change, per plan §3.  Each context is committed to `cur_time` under its cached
-# external inflow (full pass-through traps pinned back to exact capacity), then the
-# networks are rebuilt from the global seed pool — letting `setup_network` merge or
-# split components correctly as traps fill — with committed volumes remapped by
-# global trap index.  Must run AFTER `_update_flow!` (it reads the refreshed
-# `rateinfo`).  Returns the new context vector and refreshed `net_trap_set` /
-# `net_covered_set`.
-#
-# The call site gates entry to this function (plan D4/§8): it is invoked only when at
-# least one network was touched this event (a member fired or its external inflow
-# changed).  Quiet events skip it entirely, so no ODE solves run when nothing changed.
-#
-# @@@ Once entered, this still commits and re-predicts ALL contexts, not only the
-# touched ones.  Finer-grained PER-CONTEXT gating (rebuild only the touched subset) is
-# deferred — it needs context-merge handling to remain correct when growing networks
-# overlap.  See agent/reports/integrate_networks_plan.md §3/§8.
-function _touch_networks!(net_contexts, changetimeest, sgraph, tstruct, dyn_traps, culverts,
-                          filled_traps, cur_amounts, rateinfo, z_vol_tables, infiltration,
-                          fill_updates, old_covered, cur_time, endtime)
-    isempty(net_contexts) &&
-        return net_contexts, Set{Int}(), Set{Int}(), Dict{Int,Float64}()
-    full_traps = findall(filled_traps)
-    full_set   = Set(full_traps)
+# The old contexts that CHANGED this event: one whose member just fired, or whose
+# external inflow was updated (an upstream plain trap spilled into it).  These must be
+# re-committed and re-predicted; an unchanged context evolves under the same cached
+# extern_inflow, so its committed state and absolute-time prediction stay exact and it
+# can be carried over untouched.  Returns a set of indices into `net_contexts`.
+function _affected_contexts(net_contexts, fill_updates, inflow_updated)
+    return Set{Int}(ci for (ci, ctx) in enumerate(net_contexts)
+                    if any(u.index ∈ ctx.global_ix for u in fill_updates) ||
+                       !isdisjoint(ctx.inflow_sources, inflow_updated))
+end
 
-    # Capture the predicted kind of each fired trap before the contexts are mutated.
+# The predicted kind (:fill/:empty/:unspill) of each trap that fired this event,
+# captured from the contexts' predictions before anything is mutated.
+function _capture_fired_kinds(net_contexts, fill_updates)
     fired_kind = Dict{Int,Symbol}()
     for ctx in net_contexts
         ev = ctx.next_event
         ev.kind != :none && any(u.index == ev.trap for u in fill_updates) &&
             (fired_kind[ev.trap] = ev.kind)
     end
+    return fired_kind
+end
 
-    # 1. Commit every context to cur_time, pin full traps to exact capacity, and
-    #    collect the committed volumes by global trap index.
+# All traps covered by `components` (nodes plus their subsumed full descendants).
+function _covered_of(components, tstruct)
+    s = Set{Int}()
+    for net in components, t in net.traps
+        push!(s, t.trap_ix)
+        union!(s, _descendants(tstruct, t.trap_ix))
+    end
+    return s
+end
+
+# Map each node's global trap index to the index of the old context that held it.
+function _trap_owner_map(net_contexts)
+    owner = Dict{Int,Int}()
+    for (ci, ctx) in enumerate(net_contexts), g in ctx.global_ix
+        owner[g] = ci
+    end
+    return owner
+end
+
+# Per-context gate: decide which freshly-rebuilt `components` can carry over an old
+# context verbatim — skipping both its commit and its ODE re-prediction.  A component
+# is reusable iff it is byte-identical to exactly one old context (same node set), that
+# context is NOT affected, and its external inflow is unchanged after the reconcile
+# (recomputed cheaply — no ODE).  A merge/grow/split yields a node set that matches no
+# single old context, so it always rebuilds — the correctness guard against overlap.
+# Returns a vector aligned with `components`: the reusable old-context index, or 0.
+function _reuse_plan(components, net_contexts, affected, trap_owner, tstruct, rateinfo)
+    plan = zeros(Int, length(components))
+    for (k, net) in enumerate(components)
+        S      = Set(t.trap_ix for t in net.traps)
+        owners = Set(get(trap_owner, g, 0) for g in S)
+        (length(owners) == 1 && 0 ∉ owners) || continue
+        j = first(owners)
+        (j ∉ affected && Set(net_contexts[j].global_ix) == S) || continue
+        _external_inflow(net, rateinfo, tstruct) == net_contexts[j].extern_inflow &&
+            (plan[k] = j)
+    end
+    return plan
+end
+
+# The old contexts that must be committed to `cur_time`: those feeding any rebuilt
+# component (their nodes supply its initial volumes) plus every affected context (its
+# boundary/just-exited volumes are read from the committed dict).  Reused contexts are
+# deliberately excluded — leaving their state at the earlier `last_solve_time` keeps
+# `_network_amount_updates` from emitting spurious updates for them (plan §9).
+function _contexts_to_commit(components, reuse, trap_owner, affected)
+    need = Set{Int}(affected)
+    for (k, net) in enumerate(components)
+        reuse[k] == 0 || continue
+        for t in net.traps
+            j = get(trap_owner, t.trap_ix, 0)
+            j == 0 || push!(need, j)
+        end
+    end
+    return need
+end
+
+# Commit the selected old contexts to `cur_time`, pin their full traps to exact
+# capacity, and collect committed node volumes by global trap index.
+function _commit_contexts!(net_contexts, which, tstruct, infiltration, z_vol_tables,
+                           cur_time, full_set)
     committed = Dict{Int,Float64}()
-    for ctx in net_contexts
+    for ci in which
+        ctx = net_contexts[ci]
         _commit_network!(ctx, tstruct, infiltration, z_vol_tables, cur_time)
         _clamp_full_traps!(ctx, tstruct, full_set)
         for (i, g) in enumerate(ctx.global_ix)
             committed[g] = ctx.state[i]
         end
     end
-    # Boundary values for fired traps that did not just become full.  An :empty
-    # parent drops to 0 and EXPOSES its immediate children — they go from full to
-    # transitory (just below their own capacity), so they leave `full_traps` (the
-    # caller already flipped them — §`_expand_empty_fill_updates`) and start at
-    # prevfloat(C_child).  An :unspill trap drops to prevfloat(C).
+    return committed
+end
+
+# Overlay the boundary volumes of fired traps that did NOT just become full.  An :empty
+# parent drops to 0 and EXPOSES its immediate children — they go from full to transitory
+# (just below their own capacity), so they leave `full_traps` (the caller already flipped
+# them — §`_expand_empty_fill_updates`) and start at prevfloat(C_child).  An :unspill trap
+# drops to prevfloat(C).
+function _apply_fired_boundaries!(committed, fired_kind, tstruct)
     for (ft, k) in fired_kind
         if k == :empty
             committed[ft] = 0.0
@@ -304,44 +358,84 @@ function _touch_networks!(net_contexts, changetimeest, sgraph, tstruct, dyn_trap
             committed[ft] = prevfloat(_own_capacity(tstruct, ft))
         end
     end
+    return committed
+end
 
-    # 2. Rebuild the network STRUCTURE from the global seeds and compute the new
-    #    coverage.
-    seeds      = _dyn_seeds(tstruct, dyn_traps, culverts)
-    components = setup_network(tstruct, seeds, full_traps; culverts=culverts)
-    new_covered = Set{Int}()
-    for net in components, t in net.traps
-        push!(new_covered, t.trap_ix)
-        union!(new_covered, _descendants(tstruct, t.trap_ix))
+# Assemble the post-touch context vector.  A reusable component carries its old context
+# object over verbatim; a rebuilt one is constructed from `state0` — the committed node
+# value, exact capacity for a full trap, or a constant-rate projection for a trap newly
+# absorbed from the plain path (its `cur_amounts` entry is stale, holding the volume at
+# its last committed event; project it forward under the pre-reconcile saved inflow) —
+# and gets a fresh next-event prediction.
+function _assemble_contexts(components, reuse, net_contexts, committed, full_set, seeds,
+                            tstruct, rateinfo, infiltration, z_vol_tables,
+                            cur_amounts, cur_time, endtime)
+    project(g) = first(fill_trap_until(g, rateinfo, cur_amounts[g], cur_time,
+                                       tstruct, z_vol_tables, use_saved=true))
+    state0(g)  = g in full_set        ? _own_capacity(tstruct, g) :
+                 haskey(committed, g) ? committed[g]              :
+                                        project(g)
+    out = DynNetworkContext[]
+    for (k, net) in enumerate(components)
+        if reuse[k] != 0
+            push!(out, net_contexts[reuse[k]])
+        else
+            c = _make_context(net, tstruct, rateinfo, seeds, state0, cur_time)
+            _predict_network!(c, tstruct, infiltration, z_vol_tables, endtime)
+            push!(out, c)
+        end
     end
+    return out
+end
 
-    # 3. Reconcile the spillgraph + rateinfo to the new coverage BEFORE the network
-    #    external inflow is read — so absorbed traps' double-counted deposits are
-    #    withdrawn (and traps leaving coverage regain their edges).
+# ----------------------------------------------------------------------------
+# Advance the touched networks to `cur_time` and rebuild the set after a status change
+# (plan §3).  The network STRUCTURE is always retraced from the global seed pool (cheap,
+# topology only) so `setup_network` merges/splits components correctly as traps fill; the
+# expensive ODE solves (commit + predict) are then GATED per context — only components
+# that actually changed are re-solved, and unchanged ones are carried over verbatim (see
+# `_reuse_plan`).  Must run AFTER `_update_flow!` (it reads the refreshed `rateinfo`).
+# Returns the new context vector, refreshed `net_trap_set` / `net_covered_set`, and the
+# committed-volume dict (read by `_network_amount_updates` for just-exited traps).
+#
+# The call site also gates ENTRY (plan D4/§8): a quiet event with no touched network
+# skips this entirely.  Once entered, the per-context gate here keeps the solve count at
+# roughly the number of changed components (typically one) rather than all of them.
+function _touch_networks!(net_contexts, changetimeest, sgraph, tstruct, dyn_traps, culverts,
+                          filled_traps, cur_amounts, rateinfo, z_vol_tables, infiltration,
+                          fill_updates, old_covered, cur_time, endtime)
+    isempty(net_contexts) &&
+        return net_contexts, Set{Int}(), Set{Int}(), Dict{Int,Float64}()
+    full_traps = findall(filled_traps)
+    full_set   = Set(full_traps)
+
+    # Which old contexts changed this event, and what each fired trap did.
+    inflow_updated = Set(u.index for u in getinflowupdates(rateinfo))
+    affected   = _affected_contexts(net_contexts, fill_updates, inflow_updated)
+    fired_kind = _capture_fired_kinds(net_contexts, fill_updates)
+
+    # Retrace the structure from the global seeds, then reconcile the spillgraph to the
+    # new coverage BEFORE any external inflow is read (absorbed traps' double-counted
+    # deposits withdrawn; traps leaving coverage regain their edges).
+    seeds       = _dyn_seeds(tstruct, dyn_traps, culverts)
+    components  = setup_network(tstruct, seeds, full_traps; culverts=culverts)
+    new_covered = _covered_of(components, tstruct)
     old_covered != new_covered &&
         _reconcile_spillgraph!(sgraph, rateinfo, filled_traps, new_covered, tstruct)
 
-    # 4. Build the contexts (external inflow now reads the reconciled rateinfo) and
-    #    predict each.
-    # For traps newly absorbed into the network (not in committed and not full), the
-    # cur_amounts entry is stale — it holds the volume at the last committed event, not
-    # at cur_time.  Project it forward to cur_time using the pre-reconcile (saved) inflow,
-    # the same inflow that was active while the plain path was accumulating water there.
-    function _state0_project(g)
-        vol, _ = fill_trap_until(g, rateinfo, cur_amounts[g], cur_time,
-                                 tstruct, z_vol_tables, use_saved=true)
-        return vol
-    end
-    state0(g) = g in full_set        ? _own_capacity(tstruct, g) :
-                haskey(committed, g) ? committed[g]              :
-                                       _state0_project(g)
-    new_contexts = DynNetworkContext[]
-    for net in components
-        c = _make_context(net, tstruct, rateinfo, seeds, state0, cur_time)
-        _predict_network!(c, tstruct, infiltration, z_vol_tables, endtime)
-        push!(new_contexts, c)
-    end
+    # Gate the solves: carry over unchanged components; commit only the contexts feeding
+    # a rebuilt component (plus the affected ones), then overlay fired-trap boundaries.
+    trap_owner = _trap_owner_map(net_contexts)
+    reuse      = _reuse_plan(components, net_contexts, affected, trap_owner, tstruct, rateinfo)
+    to_commit  = _contexts_to_commit(components, reuse, trap_owner, affected)
+    committed  = _commit_contexts!(net_contexts, to_commit, tstruct, infiltration,
+                                   z_vol_tables, cur_time, full_set)
+    _apply_fired_boundaries!(committed, fired_kind, tstruct)
 
+    # Build the new context vector (reuse or rebuild+predict) and publish the estimates.
+    new_contexts = _assemble_contexts(components, reuse, net_contexts, committed, full_set,
+                                      seeds, tstruct, rateinfo, infiltration, z_vol_tables,
+                                      cur_amounts, cur_time, endtime)
     nts = _net_trap_set(new_contexts)
     ncs = _net_covered_set(new_contexts, tstruct)
     _apply_network_changetimeest!(changetimeest, new_contexts, ncs)
