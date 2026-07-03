@@ -857,15 +857,11 @@ function _build_event_callback(p::DynNetworkRateParams,
 
     conds = _event_conditions(p, evolving, nreg)
     event = DynNetworkEvent()
-    dubuf = similar(V0, Float64)   # scratch: rates at current time step
 
     function condition(out, V, t, integrator)
-        inflow, spilling = _routed_inflow(V, p)
-        @inbounds for i in eachindex(V)
-            dubuf[i] = spilling[i] ?
-                inflow[i] - p.footprint_infil[i] - max(inflow[i] - p.footprint_infil[i], 0.0) :
-                inflow[i] - wetted_infiltration(p.geom[i], V[i])
-        end
+        # `:unspill` conditions need the routed inflow; `:fill`/`:empty` read V directly.
+        # (Route unconditionally — a big fused component almost always has a full trap.)
+        inflow, _ = _routed_inflow(V, p)
         @inbounds for (k, ec) in enumerate(conds)
             if ec.kind == :fill
                 out[k] = p.geom[ec.trap].capacity - V[ec.trap]
