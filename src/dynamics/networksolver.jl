@@ -1044,7 +1044,14 @@ function solveDynNetwork!(state::AbstractVector{Float64},
                           inflow::AbstractVector{<:Real};
                           tmax = Inf,
                           path_inflow = nothing,
-                          abstol = 1e-8, reltol = 1e-8,
+                          # Loosened from 1e-8/1e-8: physical accuracy only needs ~mL
+                          # (abstol, m^3) and ~ms timing.  This roughly halves the ODE
+                          # step count on the culvert-heavy worst case (the run is
+                          # dominated by rate-fn evals), and the resulting fill-time
+                          # drift vs the analytic path is ~3e-5 (tens of microseconds),
+                          # far under a millisecond.  See the relaxed parity tolerances
+                          # in test/dynamics_test.jl.
+                          abstol = 1e-6, reltol = 1e-4,
                           zvt = nothing)
 
     nt = length(net.traps)
