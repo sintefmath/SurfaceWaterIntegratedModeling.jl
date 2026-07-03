@@ -442,7 +442,8 @@ function _route_flow(net::DynNetwork,
                      merge_target::AbstractVector{<:Integer},
                      cvplan = nothing,
                      trap_level = nothing,
-                     path_events = nothing)
+                     path_events = nothing;
+                     scratch = nothing)
 
     np = length(net.flow_paths)
     nt = length(net.traps)
@@ -450,11 +451,21 @@ function _route_flow(net::DynNetwork,
     @assert length(path_infil_prefix) == length(merge_target) ==
             length(external_path_inflow) == length(sorted_trib_info) == np
 
-    trap_inflow = Float64.(external_inflow)        # accumulator, seeded with external trap inflow
-    path_flow   = Float64.(external_path_inflow)   # head inflow per path (trap spills + path_inflow)
-    trib_output = zeros(Float64, np)               # delivered output of each tributary path
-    # actual flow each culvert carries (drawn at inlet == delivered at outlet)
-    culvert_actual = cvplan === nothing ? Float64[] : zeros(Float64, length(net.culverts))
+    # Working accumulators.  With a caller-supplied `scratch` (the hot per-solve path)
+    # they are reused in place; without one (the standalone/test path) they are freshly
+    # allocated.  Either way: `trap_inflow` seeded with external trap inflow, `path_flow`
+    # with per-path head inflow, `trib_output`/`culvert_actual` zeroed.
+    if scratch === nothing
+        trap_inflow = Float64.(external_inflow)
+        path_flow   = Float64.(external_path_inflow)
+        trib_output = zeros(Float64, np)
+        culvert_actual = cvplan === nothing ? Float64[] : zeros(Float64, length(net.culverts))
+    else
+        trap_inflow    = copyto!(scratch.trap_inflow, external_inflow)
+        path_flow      = copyto!(scratch.path_flow, external_path_inflow)
+        trib_output    = fill!(scratch.trib_output, 0.0)
+        culvert_actual = fill!(scratch.culvert_actual, 0.0)
+    end
 
     for node in order
         if node <= np                               # a flow path
@@ -547,7 +558,30 @@ parameter.  Indexed network-locally (same order as `net.traps` / `net.flow_paths
   sorted by junction position; empty for paths with no tributaries
 - `order`, `merge_target`: the static routing plan (see [`_network_order`](@ref),
   [`_merge_targets`](@ref))
+- `cvplan`, `path_events`: culvert routing data (or `nothing` when the net has no
+  culverts)
+- `scratch`: reusable per-solve working buffers (`RouteScratch`), so the hot rate
+  function allocates nothing per call
 """
+# Reusable per-solve scratch buffers for `_routed_inflow`/`_route_flow`.  The rate
+# function is called very many times per solve (RK stages × many small steps), so
+# allocating its working arrays afresh each call dominated GC; these are allocated once
+# per solve (in `_build_rate_params`) and overwritten in place on every call.  Safe
+# because every caller consumes the result immediately, the solver is single-threaded,
+# and no call is re-entrant (see the callers of `_routed_inflow`).
+struct RouteScratch
+    spilling      ::Vector{Bool}
+    trap_level    ::Vector{Float64}
+    trap_inflow   ::Vector{Float64}
+    path_flow     ::Vector{Float64}
+    trib_output   ::Vector{Float64}
+    culvert_actual::Vector{Float64}
+end
+RouteScratch(nt::Int, np::Int, ncv::Int) =
+    RouteScratch(Vector{Bool}(undef, nt), Vector{Float64}(undef, nt),
+                 Vector{Float64}(undef, nt), Vector{Float64}(undef, np),
+                 Vector{Float64}(undef, np), Vector{Float64}(undef, ncv))
+
 struct DynNetworkRateParams
     net::DynNetwork
     geom::Vector{TrapGeometry}
@@ -560,6 +594,7 @@ struct DynNetworkRateParams
     merge_target::Vector{Int}
     cvplan::Union{CulvertPlan,Nothing}   # culvert routing data, or nothing if none
     path_events::Union{Vector{Vector{Tuple{Int,Symbol,Int}}},Nothing}  # per-path event templates
+    scratch::RouteScratch                # reusable per-solve working buffers
 end
 
 # ----------------------------------------------------------------------------
@@ -604,7 +639,8 @@ function _build_rate_params(tstruct::TrapStructure,
                                 order,
                                 _merge_targets(net),
                                 cvplan,
-                                events)
+                                events,
+                                RouteScratch(nt, np, length(net.culverts)))
 end
 
 # ----------------------------------------------------------------------------
@@ -634,17 +670,23 @@ full traps (see [`_route_flow`](@ref)).  Mirrors `NBSNetworkRateFunction!`.
 function _routed_inflow(V, p::DynNetworkRateParams)
     geom = p.geom
     nt   = length(geom)
-    spilling = Vector{Bool}(undef, nt)
+    sc   = p.scratch
+    spilling = sc.spilling
     @inbounds for i in 1:nt
         spilling[i] = V[i] >= geom[i].capacity
     end
     # culverts need each trap's real water-surface elevation (not the Inf sentinel)
-    trap_level = p.cvplan === nothing ? nothing :
-                 [_surface_level(geom[i], V[i]) for i in 1:nt]
+    trap_level = nothing
+    if p.cvplan !== nothing
+        trap_level = sc.trap_level
+        @inbounds for i in 1:nt
+            trap_level[i] = _surface_level(geom[i], V[i])
+        end
+    end
     inflow = _route_flow(p.net, p.external_inflow, spilling,
                          p.footprint_infil, p.path_infil_prefix, p.external_path_inflow,
                          p.sorted_trib_info, p.order, p.merge_target,
-                         p.cvplan, trap_level, p.path_events)
+                         p.cvplan, trap_level, p.path_events; scratch = sc)
     return inflow, spilling
 end
 
