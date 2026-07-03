@@ -212,10 +212,14 @@ SubnetCache() = SubnetCache(Dict{Int,DynNetwork}(), Dict{Int,Set{Int}}(), Set{In
 const _VERIFY_INCR = Ref(false)
 _partition(comps) = Set(Set(t.trap_ix for t in net.traps) for net in comps)
 
-# Culvert-free `setup_network` replacement that reuses `cache`.  Traces only the seeds
-# whose dependency set intersects the traps changed since the cache's last trace; reuses
-# the rest.  Mutates `cache`.  Returns the merged components (same as `setup_network`).
-function setup_network_cached(tstruct, seeds, full_traps, cache::SubnetCache)
+# `setup_network` replacement that reuses `cache` for the base per-seed traces.  A seed's
+# subnet is a pure function of the terrain and `full_traps` (culvert-independent — culverts
+# are layered on afterwards), so each is retraced only when its dependency set intersects
+# the traps changed since the cache's last trace, and reused otherwise.  `culverts` are then
+# handled exactly as in `setup_network`: the (cheap) endpoint expansion and the culvert-aware
+# merge run on top of the cached base subnets.  Mutates `cache`.
+function setup_network_cached(tstruct, seeds, full_traps, cache::SubnetCache;
+                              culverts::Vector{DynCulvert}=DynCulvert[])
     LI    = LinearIndices(tstruct.topography)
     cur   = Set{Int}(full_traps)
     dirty = symdiff(cur, cache.full_snapshot)
@@ -232,8 +236,15 @@ function setup_network_cached(tstruct, seeds, full_traps, cache::SubnetCache)
         end
     end
     cache.full_snapshot = cur
-    comps = _merge_networks(subnets)
-    _VERIFY_INCR[] && @assert _partition(comps) == _partition(setup_network(tstruct, seeds, full_traps)) "incremental subnet cache diverged from a full setup_network"
+
+    comps = if isempty(culverts)
+        _merge_networks(subnets)
+    else
+        expanded, included = _expand_with_culverts(tstruct, subnets, culverts, full_traps)
+        _merge_networks(expanded, DynCulvert[culverts[ci] for ci in included], tstruct)
+    end
+    _VERIFY_INCR[] && @assert _partition(comps) ==
+        _partition(setup_network(tstruct, seeds, full_traps; culverts=culverts)) "incremental subnet cache diverged from a full setup_network"
     return comps
 end
 

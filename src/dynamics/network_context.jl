@@ -419,11 +419,10 @@ function _touch_networks!(net_contexts, changetimeest, sgraph, tstruct, dyn_trap
     # new coverage BEFORE any external inflow is read (absorbed traps' double-counted
     # deposits withdrawn; traps leaving coverage regain their edges).
     seeds       = _dyn_seeds(tstruct, dyn_traps, culverts)
-    # Culvert-free path uses the incremental subnet cache (only chains touched by a fired
-    # trap are retraced); culverts fuse components across seeds, so they take the full path.
-    components  = isempty(culverts) ?
-        setup_network_cached(tstruct, seeds, full_traps, subnet_cache) :
-        setup_network(tstruct, seeds, full_traps; culverts=culverts)
+    # Incremental retrace: the base per-seed subnet traces are cached (only chains a fired
+    # trap touched are retraced); the culvert endpoint-expansion and culvert-aware merge run
+    # on top, exactly as in `setup_network`.
+    components  = setup_network_cached(tstruct, seeds, full_traps, subnet_cache; culverts=culverts)
     new_covered = _covered_of(components, tstruct)
     old_covered != new_covered &&
         _reconcile_spillgraph!(sgraph, rateinfo, filled_traps, new_covered, tstruct)
