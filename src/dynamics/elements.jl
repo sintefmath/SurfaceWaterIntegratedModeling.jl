@@ -527,14 +527,24 @@ end
 # Culverts are assigned later, by cell (_culvert_owners / _build_component), so
 # paths carry none at this stage.
 function _resolve_cell_overlaps!(all_paths)
-    cell_owner = Dict{CartesianIndex{2}, Int}()  # grid cell → owning path index
+    # Owner map as a dense array over the cells' bounding box, indexed directly by the
+    # CartesianIndex (0 = unowned).  This replaces a `Dict{CartesianIndex,Int}` whose
+    # per-cell hashing dominated the merge on large flow networks; the semantics are
+    # identical (first-writer owns a cell; a later path is truncated at the first
+    # already-owned cell and registered there as a tributary).
+    # grid cell → owning path index.  The cell is packed into a single Int key
+    # (row in the low 32 bits, column in the high 32) so the Dict hashes an integer
+    # rather than a `CartesianIndex{2}` tuple — measurably cheaper on large networks,
+    # while still storing only the cells actually present (unlike a dense array).
+    key(c) = Int(c[1]) | (Int(c[2]) << 32)
+    cell_owner = Dict{Int, Int}()
 
     for pi in 1:length(all_paths)
         path = all_paths[pi]
-        merge_pos = findfirst(cell -> haskey(cell_owner, cell), path.cells)
+        merge_pos = findfirst(cell -> haskey(cell_owner, key(cell)), path.cells)
 
         if merge_pos !== nothing
-            merge_into = cell_owner[path.cells[merge_pos]]
+            merge_into = cell_owner[key(path.cells[merge_pos])]
             kept       = path.cells[1:merge_pos-1]
 
             all_paths[pi] = DynFlowPath(kept, 0, path.culvert_inlets, path.culvert_outlets, path.merges)
@@ -546,11 +556,11 @@ function _resolve_cell_overlaps!(all_paths)
                 [primary.merges; (pi, junction_pos)])
 
             for cell in kept
-                cell_owner[cell] = pi
+                cell_owner[key(cell)] = pi
             end
         else
             for cell in path.cells
-                cell_owner[cell] = pi
+                cell_owner[key(cell)] = pi
             end
         end
     end
@@ -650,16 +660,20 @@ function _topological_order(global_path_ids, global_trap_ids, all_paths, all_tra
 
     # The network must be acyclic to be ordered upstream-to-downstream.  A cycle is
     # either a terrain-flow programming error or, more commonly, an uphill/reverse
-    # culvert (inlet downstream of its outlet).  Fail loud rather than mis-route.
+    # culvert (inlet downstream of its outlet).  `topological_sort_by_dfs` itself throws
+    # on a cycle, so we rely on that rather than a separate `is_cyclic` pass (which
+    # doubled the DFS traversal); we re-raise with the specific diagnosis.  Fail loud
+    # rather than mis-route.
     # @@@ uphill / reverse culverts are deferred; revisit when task-2 routing gains
     #     direction-aware handling instead of rejecting the network here.
-    if Graphs.is_cyclic(g)
+    order = try
+        Graphs.topological_sort_by_dfs(g)
+    catch
         error("Cyclic dynamic network: flow paths, traps, and culverts form a " *
               "directed loop and cannot be ordered upstream-to-downstream.  The " *
               "usual cause is an uphill/reverse culvert (its inlet lies downstream " *
               "of its outlet), which is not yet supported.")
     end
-    order = Graphs.topological_sort_by_dfs(g)
     return ([global_path_ids[i]      for i in order if i <= np],
             [global_trap_ids[i - np] for i in order if i >  np])
 end
