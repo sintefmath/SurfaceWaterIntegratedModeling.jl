@@ -109,14 +109,11 @@ function _build_trap_geometry(tstruct::TrapStructure,
 
         infil = Float64.(infiltration[footprint])
 
-        # Cells whose terrain lies at or above the spillpoint never pond as part of the
-        # trap: water reaching that level spills out rather than pooling, so there is never
-        # standing depth over them and they carry no trap infiltration.  Dropping them keeps
-        # the wetted-area loss continuous at V = capacity — otherwise a trap pinned at its
-        # spillpoint by a balancing through-flow (e.g. a culvert outlet during drought)
-        # chatters full<->not-full on the jump.  Same `topography >= spillpoint` rule as
-        # `_ponding_infiltration` / `fill_trap_until`; test the actual terrain height, not
-        # the raised `bottom` (which would over-null a degenerate zero-own-volume parent).
+        # Cells at/above the spillpoint never pond (water spills out instead), so they carry
+        # no trap infiltration.  Excluding them keeps the wetted-area loss continuous at
+        # V = capacity — otherwise a trap pinned at its spillpoint by a balancing through-flow
+        # (e.g. a culvert outlet in drought) chatters full<->not-full.  Same rule as
+        # `_ponding_infiltration` / `fill_trap_until`; test the actual terrain, not raised `bottom`.
         _sp = Float64(tstruct.spillpoints[tix].elevation)   # concrete: Spillpoint.elevation is ::Real
         @inbounds for k in eachindex(infil)
             tstruct.topography[footprint[k]] >= _sp && (infil[k] = 0.0)
@@ -1040,13 +1037,10 @@ function solveDynNetwork!(state::AbstractVector{Float64},
                           inflow::AbstractVector{<:Real};
                           tmax = Inf,
                           path_inflow = nothing,
-                          # Loosened from 1e-8/1e-8: physical accuracy only needs ~mL
-                          # (abstol, m^3) and ~ms timing.  This roughly halves the ODE
-                          # step count on the culvert-heavy worst case (the run is
-                          # dominated by rate-fn evals), and the resulting fill-time
-                          # drift vs the analytic path is ~3e-5 (tens of microseconds),
-                          # far under a millisecond.  See the relaxed parity tolerances
-                          # in test/dynamics_test.jl.
+                          # Loosened from 1e-8: physical accuracy needs only ~mL (abstol, m^3)
+                          # and ~ms.  ~Halves the ODE step count on the culvert worst case;
+                          # fill-time drift vs the analytic path is ~3e-5 (tens of µs, far under
+                          # 1 ms).  See PARITY_TOL in test/dynamics_test.jl.
                           abstol = 1e-6, reltol = 1e-4,
                           zvt = nothing)
 
@@ -1114,16 +1108,13 @@ function solveDynNetwork!(state::AbstractVector{Float64},
     # endpoint (which triggers an internal range(t, Inf, n) that Julia rejects).  1e12
     # is many orders of magnitude beyond any physical simulation horizon.
     tmax_ode = min(tmax, 1e12)
-    # Integrate with the explicit `Tsit5`.  The rate function is non-smooth (culvert
-    # regime switches and the routing `min` are C0-but-not-C1 kinks), NOT genuinely
-    # stiff.  DiffEq's default auto-switching solver mis-reads those kinks as stiffness,
-    # switches to an implicit method, and then pays for finite-difference Jacobians on
-    # the whole (up to a few-hundred-trap) coupled system — dominating the runtime with
-    # no accuracy benefit.  On full-coverage-with-culvert this was ~4x the total time.
-    # An explicit method just takes small steps across the kinks and wins outright.
-    # @@@ If a genuinely stiff configuration ever appears (e.g. a very large-diameter
-    #     culvert draining a tiny trap: extreme timescale separation), revisit with an
-    #     auto-switching solver given a sparse/colored Jacobian rather than the dense FD.
+    # Explicit `Tsit5`: the rate function is non-smooth (culvert regime switches + routing
+    # `min` are C0 kinks) but NOT stiff.  DiffEq's default auto-switcher misreads the kinks
+    # as stiffness, goes implicit, and pays for dense finite-diff Jacobians on the whole
+    # coupled system — ~4x slower on full-coverage+culvert, no accuracy gain.  Explicit just
+    # steps across the kinks and wins.
+    # @@@ If a genuinely stiff config appears (e.g. huge culvert draining a tiny trap),
+    #     revisit with an auto-switching solver + a sparse/colored Jacobian, not dense FD.
     sol = solve(ODEProblem(dynNetworkRateFunction!, V0, (0.0, tmax_ode), p), Tsit5();
                 callback = CallbackSet(cb_topo, cb_ss),
                 abstol = abstol, reltol = reltol)

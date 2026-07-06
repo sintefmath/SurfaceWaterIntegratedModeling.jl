@@ -1,12 +1,9 @@
 # ============================================================================
 # DynNetworkContext: drives one DynNetwork between topology changes inside
-# `fill_sequence`.  This is the integration layer between the analytical
-# fill-sequence machinery and the multi-trap ODE solver `solveDynNetwork!`.
-#
-# See agent/reports/integrate_networks_plan.md (§2 state, §3 lifecycle, §4
-# external inflow, §5 bounded integration).  This file is slice 2 of the
-# implementation order: the context type and its build / predict / commit
-# helpers.  Wiring into the fill_sequence event loop is a later slice.
+# `fill_sequence` — the integration layer between the analytical fill-sequence
+# machinery and the multi-trap ODE solver `solveDynNetwork!`.
+# Design notes: agent/reports/integrate_networks_plan.md (§2 state, §3 lifecycle,
+# §4 external inflow, §5 bounded integration).
 # ============================================================================
 
 """
@@ -42,14 +39,10 @@ mutable struct DynNetworkContext
 end
 
 # ----------------------------------------------------------------------------
-# Per-node gross composite external inflow (plan §4): for each node, the sum of
-# `trap_inflow` over its leaf descendants (= `trap_inflow[node]` for a leaf node).
-# `lowest_subtraps_for[t]` lists exactly those leaf descendants (== [t] for a
-# leaf).  The leaf-sum is used rather than `getinflow(rateinfo, t.trap_ix)`
-# directly: `_reconcile_spillgraph!` removes covered children from the spillgraph
-# and withdraws their flow from `trap_inflow[parent]`, so that value is stale by
-# the time `_external_inflow` is called.  Leaf `trap_inflow` values are unaffected
-# and always current.
+# Per-node external inflow (plan §4): each node's sum of `trap_inflow` over its leaf
+# descendants (`lowest_subtraps_for[t]`, == [t] for a leaf).  Summed from the leaves,
+# not `getinflow(node)` directly, because `_reconcile_spillgraph!` withdraws covered
+# children's flow from the parent's `trap_inflow`, leaving it stale — leaf values stay current.
 function _external_inflow(net::DynNetwork, rateinfo, tstruct)
     return Float64[sum(getinflow(rateinfo, leaf)
                        for leaf in tstruct.lowest_subtraps_for[t.trap_ix])
@@ -223,14 +216,10 @@ end
 
 # ----------------------------------------------------------------------------
 # Reconcile the spillgraph (and the flow it drives in `rateinfo`) to the invariant
-# "the spillgraph contains exactly the FULL ∧ ¬COVERED traps".  A trap that filled
-# while non-network deposited its outflow downstream via the spillgraph; once it is
-# absorbed into a network its outflow is routed by the ODE instead, so that deposit
-# must be withdrawn (and vice-versa when a full trap LEAVES coverage, e.g. draining).
-# Recomputes the target spillgraph from the effective filled state (cheap — no
-# `compute_flow`), diffs it against the current one, and propagates only the changed
-# edges' flow.  Design A's subsumption keeps the effective state valid (a full
-# non-covered parent never has a covered child).
+# "spillgraph = exactly the FULL ∧ ¬COVERED traps": a trap absorbed into a network has
+# its outflow routed by the ODE, not the spillgraph, so its deposit must be withdrawn
+# (and restored when it leaves coverage).  Recomputes the target spillgraph from the
+# effective filled state, diffs it, and propagates only the changed edges' flow.
 function _reconcile_spillgraph!(sgraph, rateinfo, filled_traps, covered, tstruct)
     n         = numtraps(tstruct)
     effective = Bool[filled_traps[t] && !(t in covered) for t in 1:n]
@@ -390,18 +379,14 @@ function _assemble_contexts(components, reuse, net_contexts, committed, full_set
 end
 
 # ----------------------------------------------------------------------------
-# Advance the touched networks to `cur_time` and rebuild the set after a status change
-# (plan §3).  The network STRUCTURE is always retraced from the global seed pool (cheap,
-# topology only) so `setup_network` merges/splits components correctly as traps fill; the
-# expensive ODE solves (commit + predict) are then GATED per context — only components
-# that actually changed are re-solved, and unchanged ones are carried over verbatim (see
-# `_reuse_plan`).  Must run AFTER `_update_flow!` (it reads the refreshed `rateinfo`).
-# Returns the new context vector, refreshed `net_trap_set` / `net_covered_set`, and the
-# committed-volume dict (read by `_network_amount_updates` for just-exited traps).
-#
-# The call site also gates ENTRY (plan D4/§8): a quiet event with no touched network
-# skips this entirely.  Once entered, the per-context gate here keeps the solve count at
-# roughly the number of changed components (typically one) rather than all of them.
+# Advance the touched networks to `cur_time` and rebuild after a status change (plan §3):
+# the STRUCTURE is retraced from the seed pool (via the incremental cache) so components
+# merge/split correctly, but the expensive ODE solves (commit + predict) are GATED per
+# context — only changed components are re-solved, unchanged ones carried over verbatim
+# (`_reuse_plan`).  Two-level gating: the call site skips quiet events (plan D4/§8); this
+# per-context gate then keeps the solve count near the number of changed components (usually
+# one).  Must run AFTER `_update_flow!`.  Returns the new contexts, refreshed net_trap_set /
+# net_covered_set, and the committed-volume dict (for `_network_amount_updates`).
 function _touch_networks!(net_contexts, changetimeest, sgraph, tstruct, dyn_traps, culverts,
                           filled_traps, cur_amounts, rateinfo, z_vol_tables, infiltration,
                           fill_updates, old_covered, cur_time, endtime, subnet_cache)
@@ -447,19 +432,12 @@ function _touch_networks!(net_contexts, changetimeest, sgraph, tstruct, dyn_trap
 end
 
 # ----------------------------------------------------------------------------
-# Weather-period boundary finalization (plan §10).  A network trap follows the
-# multi-trap ODE and cannot be projected to `endtime` with the constant-rate
-# `fill_trap_until`, so each context is advanced to `endtime` under its cached
-# external inflow and the network traps' amounts are read from the settled state.
-# The advance is event-free by construction — any network event ≤ `endtime` was
-# already processed before the event loop broke — so it settles cleanly.  These
-# exact boundary volumes are what the NEXT weather period rebuilds its networks
-# from, so they must not use the constant-rate projection.
-#
-# Runs for EVERY context, including ones whose state still sits at an earlier
-# `last_solve_time` (the commit's `tmax` guard makes advancing an already-current
-# context a no-op).  A node takes its settled ODE volume (net of subtraps); a
-# subsumed full descendant sits at its own capacity — matching `_network_amount_updates`.
+# Weather-period boundary finalization (plan §10): advance every context to `endtime`
+# under its cached external inflow and read the settled volumes.  Network traps follow the
+# multi-trap ODE, so they can't use the constant-rate `fill_trap_until` projection — and
+# these exact volumes are what the NEXT period rebuilds from.  The advance is event-free
+# (any event ≤ endtime was already processed), so it settles cleanly.  A node takes its
+# settled ODE volume; a subsumed full descendant sits at capacity.
 function _finalize_networks!(cur_amounts, net_contexts, tstruct, infiltration,
                              z_vol_tables, cur_time, endtime)
     isempty(net_contexts) && return cur_amounts

@@ -206,7 +206,6 @@ mutable struct SubnetCache
     full_snapshot::Set{Int}                # full-trap set the traces are consistent with
     # --- incremental merge state (culvert-free path); `warm` once populated ---
     warm         ::Bool
-    scells       ::Dict{Int, Vector{Int}}  # seed cell -> its subnet's occupied cells (linear)
     cell_cid     ::Dict{Int, Int}          # occupied cell -> component id
     comp_net     ::Dict{Int, DynNetwork}   # component id -> built DynNetwork
     comp_keys    ::Dict{Int, Vector{Int}}  # component id -> seed cells forming it
@@ -214,9 +213,8 @@ mutable struct SubnetCache
     next_cid     ::Int
 end
 SubnetCache() = SubnetCache(Dict{Int,DynNetwork}(), Dict{Int,Set{Int}}(), Set{Int}(),
-                            false, Dict{Int,Vector{Int}}(), Dict{Int,Int}(),
-                            Dict{Int,DynNetwork}(), Dict{Int,Vector{Int}}(),
-                            Dict{Int,Int}(), 1)
+                            false, Dict{Int,Int}(), Dict{Int,DynNetwork}(),
+                            Dict{Int,Vector{Int}}(), Dict{Int,Int}(), 1)
 
 # Occupied cells (linear indices) of a single subnet: its flow-path cells and every
 # footprint cell of its traps.  Used to seed the cell -> component map.
@@ -261,10 +259,7 @@ function _merge_incremental!(cache::SubnetCache, tstruct, subnets, seed_keys, ch
     known = Set{Int}(k for ks in values(cache.comp_keys) for k in ks)
     if !cache.warm || Set(seed_keys) != known
         empty!(cache.cell_cid); empty!(cache.comp_net); empty!(cache.comp_keys)
-        empty!(cache.key_cid);  empty!(cache.scells);   cache.next_cid = 1
-        for (k, net) in zip(seed_keys, subnets)
-            cache.scells[k] = _subnet_cells(tstruct, net)
-        end
+        empty!(cache.key_cid);  cache.next_cid = 1
         comps = _merge_networks(subnets)
         _register_components!(cache, tstruct, comps, seed_keys)
         cache.warm = true
@@ -278,11 +273,9 @@ function _merge_incremental!(cache::SubnetCache, tstruct, subnets, seed_keys, ch
     end
     net_of = Dict(k => n for (k, n) in zip(seed_keys, subnets))
     for k in changed
-        newcells = _subnet_cells(tstruct, net_of[k])
-        for cell in newcells
+        for cell in _subnet_cells(tstruct, net_of[k])
             haskey(cache.cell_cid, cell) && push!(dirty_cids, cache.cell_cid[cell])
         end
-        cache.scells[k] = newcells
     end
 
     # All seed cells whose component is dirty, taken in SEED ORDER so the re-merge resolves

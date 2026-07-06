@@ -146,20 +146,14 @@ function _fill_sequence_for_weather_event!(seq, sgraph, rateinfo, changetimeest,
         setsavepoint!(rateinfo)
         _update_flow!(rateinfo, graph_updates, tstruct, sgraph)
 
-        # touch every affected network (commit → clamp → rebuild → refresh → predict);
-        # this also refreshes net_trap_set / net_covered_set and the network entries of
-        # changetimeest.  Runs AFTER _update_flow!.
+        # Touch the affected networks (commit → rebuild → predict), refreshing net_trap_set /
+        # net_covered_set and their changetimeest entries.  Runs AFTER _update_flow!.
         #
-        # Touch gate (plan D4/§8): a network can only change when a member trap fired
-        # (a topology change) or its external inflow changed (a dynamics change).  A
-        # network's growth/merge boundary is a member — the terminal unfilled trap is
-        # itself a network node (see `_subnetwork`) — so `fired` captures every
-        # topology change and `inflow_changed` every dynamics change.  When NO network
-        # meets either condition, none can have changed this event, so the whole
-        # commit/rebuild/predict pass is skipped: every context keeps its cached state,
-        # prediction, and changetimeest entries, which stay exact because the external
-        # inflow they evolve under is unchanged.  Quiet events then cost no ODE solves —
-        # the dominant runtime win, especially while a distant network drains.
+        # Touch gate (plan D4/§8): a network changes ONLY when a member fired (topology) or its
+        # external inflow changed (dynamics) — and its growth boundary (the terminal unfilled
+        # trap) is itself a node, so these two signals catch everything.  If no network meets
+        # either, the whole pass is skipped: cached state/prediction stay exact (extern_inflow
+        # unchanged).  Quiet events then cost no ODE solves — the dominant runtime win.
         old_covered   = net_covered_set
         net_committed = Dict{Int,Float64}()
         network_touched = false
