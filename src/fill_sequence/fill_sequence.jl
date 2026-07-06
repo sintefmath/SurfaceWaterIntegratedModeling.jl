@@ -357,6 +357,14 @@ function _set_initial_changetime_estimates(rateinfo, cur_amounts, cur_time,
 end
 
 # ----------------------------------------------------------------------------
+# True iff every subtrap of `ix` is filled (allocation-free; short-circuits).
+function all_subtraps_filled(tstruct, ix, filled_traps)
+    @inbounds for c in subtrapsof(tstruct, ix)
+        filled_traps[c] || return false
+    end
+    return true
+end
+
 function _identify_next_status_change!(changetimeest, cur_amounts, rateinfo,
                                        filled_traps, tstruct, z_vol_tables,
                                        cur_time, tmax,
@@ -375,14 +383,17 @@ function _identify_next_status_change!(changetimeest, cur_amounts, rateinfo,
     is_subsumed(ix) = net_covered_set !== nothing && ix ∈ net_covered_set && !is_node(ix)
 
     # identify traps that may change their status before the earliest identified
-    # changetime
+    # changetime.  Explicit loop (no per-trap `filled_traps[subtrapsof(ix)]` temporary,
+    # which allocated O(num_traps) small arrays every event and dominated GC on large
+    # terrains); `all_subtraps_filled` short-circuits without allocating.
     num_traps = numtraps(tstruct)
-    candidates = findall([!is_subsumed(ix) &&
-                          all(filled_traps[subtrapsof(tstruct, ix)]) &&
-                          changetimeest[ix].min < earliest_changetime
-                          for ix ∈ 1:num_traps])
-    
-    candidate_mintimes = [x.min for x in changetimeest[candidates]]
+    candidates = Int[]
+    for ix in 1:num_traps
+        (!is_subsumed(ix) && changetimeest[ix].min < earliest_changetime &&
+         all_subtraps_filled(tstruct, ix, filled_traps)) && push!(candidates, ix)
+    end
+
+    candidate_mintimes = [changetimeest[ix].min for ix in candidates]
 
     cur_best_candidates = Vector{Int}()
     
