@@ -132,9 +132,19 @@ initial `state` is read from `cur_amounts`.  Each context's first event is predi
 `dyn_traps` must be valid trap indices (the only seed-side validation needed, since
 trap-indexed seeds are always inside a trap — no "hanging" paths).
 """
+# The NBS network elements for this terrain: one `DynNBS` per placement, carrying
+# the artificial trap index (looked up from the footprint's region) and the
+# resolved per-layer outlets.  Empty when the structure has no NBS placements.
+function _nbs_elements(tstruct)
+    isempty(tstruct.nbs) && return DynNBS[]
+    return DynNBS[DynNBS(tstruct.regions[p.footprint[1]], pi, p.outlets)
+                  for (pi, p) in enumerate(tstruct.nbs)]
+end
+
 # Seed cells for the dynamic networks: a representative footprint cell of each
-# named `dyn_trap` (validated) plus every culvert's inlet/outlet cell.
-function _dyn_seeds(tstruct, dyn_traps, culverts)
+# named `dyn_trap` (validated) plus every culvert's inlet/outlet cell and every
+# NBS trap's footprint + outlet cells (so each outlet's downstream is traced in).
+function _dyn_seeds(tstruct, dyn_traps, culverts, nbs_objs::Vector{DynNBS}=DynNBS[])
     CI     = CartesianIndices(size(tstruct.topography))
     ntraps = numtraps(tstruct)
     for t in dyn_traps
@@ -146,16 +156,23 @@ function _dyn_seeds(tstruct, dyn_traps, culverts)
         push!(seeds, cv.inlet)
         push!(seeds, cv.outlet)
     end
+    for nb in nbs_objs
+        push!(seeds, CI[tstruct.footprints[nb.trap_ix][1]])
+        for oc in nb.outlets
+            push!(seeds, oc)
+        end
+    end
     return unique!(seeds)
 end
 
 function _build_dyn_networks(tstruct, dyn_traps, culverts, full_traps, cur_amounts,
                              rateinfo, infiltration, z_vol_tables, cur_time, endtime)
-    seeds = _dyn_seeds(tstruct, dyn_traps, culverts)
+    nbs_objs = _nbs_elements(tstruct)
+    seeds = _dyn_seeds(tstruct, dyn_traps, culverts, nbs_objs)
     isempty(seeds) && return (DynNetworkContext[], Set{Int}(), Set{Int}())
 
     # Returns a vector of DynNetwork
-    components = setup_network(tstruct, seeds, full_traps; culverts=culverts)
+    components = setup_network(tstruct, seeds, full_traps; culverts=culverts, nbs=nbs_objs)
 
     contexts = DynNetworkContext[]
     for net in components
@@ -403,11 +420,13 @@ function _touch_networks!(net_contexts, changetimeest, sgraph, tstruct, dyn_trap
     # Retrace the structure from the global seeds, then reconcile the spillgraph to the
     # new coverage BEFORE any external inflow is read (absorbed traps' double-counted
     # deposits withdrawn; traps leaving coverage regain their edges).
-    seeds       = _dyn_seeds(tstruct, dyn_traps, culverts)
+    nbs_objs    = _nbs_elements(tstruct)
+    seeds       = _dyn_seeds(tstruct, dyn_traps, culverts, nbs_objs)
     # Incremental retrace: the base per-seed subnet traces are cached (only chains a fired
     # trap touched are retraced); the culvert endpoint-expansion and culvert-aware merge run
-    # on top, exactly as in `setup_network`.
-    components  = setup_network_cached(tstruct, seeds, full_traps, subnet_cache; culverts=culverts)
+    # on top, exactly as in `setup_network`.  NBS elements (like culverts) force the full merge.
+    components  = setup_network_cached(tstruct, seeds, full_traps, subnet_cache;
+                                       culverts=culverts, nbs=nbs_objs)
     new_covered = _covered_of(components, tstruct)
     old_covered != new_covered &&
         _reconcile_spillgraph!(sgraph, rateinfo, filled_traps, new_covered, tstruct)
