@@ -60,14 +60,21 @@ function spillanalysis(grid::Matrix{<:Real};
                   culverts::Vector{Tuple{CartesianIndex{2}, CartesianIndex{2}}}=
                            Vector{Tuple{CartesianIndex{2}, CartesianIndex{2}}}(),
                   barriers::Vector{Vector{CartesianIndex{2}}}=
-                           Vector{Vector{CartesianIndex{2}}}())
+                           Vector{Vector{CartesianIndex{2}}}(),
+                  # `NBSPlacement` is defined in a separately-included file; keep the
+                  # default untyped and resolve it in the body, mirroring how
+                  # `fill_sequence` handles its `culverts` argument.
+                  nbs = nothing)
 
     verbose && println("Entering spillfield")
 
+    # resolve the NBS placement default (an empty vector when none supplied)
+    nbs = (nbs === nothing) ? NBSPlacement[] : nbs
+
     # a copy of the grid will be returned by the TrapStructure, and there may be
     # modifications to it if waterbodies are provided
-    gridcpy = copy(grid) 
-    
+    gridcpy = copy(grid)
+
     # ensure `sinks` is a vector of CartesianIndex
     if typeof(sinks) <: Matrix
         sinks = [CartesianIndex(i[1], i[2]) for i in findall(sinks)]
@@ -79,7 +86,15 @@ function spillanalysis(grid::Matrix{<:Real};
     if waterbodies !== nothing
         _flatten_waterbody_regions!(gridcpy, waterbodies)
     end
-    
+
+    # attribute NBS placements as artificial traps: normalise/validate them, then
+    # dig each footprint down so it forms a single positive-volume trap before the
+    # spill analysis runs.  Outlets are resolved afterwards (see `_resolve_nbs!`).
+    if !isempty(nbs)
+        _prepare_nbs!(nbs, gridcpy)
+        _dig_nbs_traps!(gridcpy, nbs)
+    end
+
     # ensure culverts are directed from higher to lower elevation
     directed_culverts = [ gridcpy[x[1]] >= gridcpy[x[2]] ? x : (x[2], x[1]) for x in culverts ]
     
@@ -142,7 +157,14 @@ function spillanalysis(grid::Matrix{<:Real};
     end
 
     wbody_cells = isnothing(waterbodies) ? Vector{CartesianIndex{2}}() : findall(waterbodies)
-    
+
+    # resolve each NBS placement's per-layer outlets against the computed regions
+    # and spillpoints (validation + backfill of unspecified outlets), mutating the
+    # placements in place before they are stored in the TrapStructure.
+    if !isempty(nbs)
+        _resolve_nbs!(nbs, regions, spoints, gridcpy, supertraps_of)
+    end
+
     return TrapStructure{eltype(grid)}(gridcpy,
                                        flowgraph,
                                        trap_bottoms,
@@ -157,7 +179,8 @@ function spillanalysis(grid::Matrix{<:Real};
                                        clip_mask,
                                        sinks,
                                        wbody_cells,
-                                       cut_edge_dict)
+                                       cut_edge_dict,
+                                       nbs)
 end
 
 # ----------------------------------------------------------------------------

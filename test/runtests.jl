@@ -4,6 +4,7 @@ using LazyArtifacts
 include("basicTestFuns.jl")
 include("watercourses_test.jl")
 include("dynamics_test.jl")
+include("nbs_test.jl")
 
 
 surf1_file = joinpath(artifact"swim_testdata", "data", "small", "mini.txt")

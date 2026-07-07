@@ -32,6 +32,13 @@ A struct representing a watershed drainage trap for topographical analysis.
 - `cut_edges::Dict{CartesianIndex{2}, Vector{CartesianIndex{2}}}`:
                                               Dict of cut edges (barriers), i.e. edges
                                               that block flow between adjacent cells
+- `nbs::Vector{NBSPlacement}`: Nature-Based-Solution installations attributed to this
+                               terrain (empty when none).  Each footprint is treated as
+                               an artificial trap during the static analysis; the dynamic
+                               solver drives them as rate-limited elements.  (Adding this
+                               field is a deliberate exception to the "no new TrapStructure
+                               fields" rule — NBS placements must be attributed a spill
+                               region at construction time.)
 """
 mutable struct TrapStructure{T<:Real}
 
@@ -54,6 +61,7 @@ mutable struct TrapStructure{T<:Real}
     sinks::Vector{CartesianIndex{2}}      # list cells being sinks
     waterbodies::Vector{CartesianIndex{2}} # list of cells belonging to waterbodies
     cut_edges::Dict{CartesianIndex{2}, Vector{CartesianIndex{2}}} # Dict of cut edges (barriers)
+    nbs::Vector{NBSPlacement}             # NBS installations (empty when none); see docstring
 end
 
 # ----------------------------------------------------------------------------
