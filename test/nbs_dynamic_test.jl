@@ -123,3 +123,40 @@ end
     # injected water is accounted for in the final trap volumes + layer storage.
     @test isapprox(sum(state), Q * T; atol = 1e-9)
 end
+
+# ---------------------------------------------------------------------------
+@testset "NBS state persistence round-trip" begin
+    t, net, gsz = _mini_nbs_net(; Smax = 5.0)
+    nt  = length(net.traps)
+    pix = net.nbs[1].placement_ix
+
+    # read: a populated store restores the layer block; an empty store gives zeros.
+    @test SWIM._nbs_layer_block(net, t, Dict(pix => [2.5])) == [2.5]
+    @test SWIM._nbs_layer_block(net, t, Dict{Int,Vector{Float64}}()) == [0.0]
+
+    # write-back: a context's evolved layer state lands in the store, keyed by placement.
+    gix   = Int[tr.trap_ix for tr in net.traps]
+    state = vcat(zeros(nt), [7.0])
+    ctx   = SWIM.DynNetworkContext(net, state, gix, Set{Int}(), CartesianIndex{2}[],
+                                   0.0, Float64[], (; time = Inf, trap = 0, kind = :none))
+    store = Dict{Int,Vector{Float64}}()
+    SWIM._store_nbs_state!(store, ctx, t)
+    @test store[pix] == [7.0]
+end
+
+# ---------------------------------------------------------------------------
+@testset "NBS fill_sequence runs over two weather periods" begin
+    grid = loadgrid(joinpath(artifact"swim_testdata", "data", "small", "mini.txt"))
+    sz = size(grid); li = LinearIndices(sz)
+    r = sz[1] ÷ 2; c = sz[2] ÷ 2
+    foot = [li[r, c], li[r, c + 1], li[r + 1, c], li[r + 1, c + 1]]
+    p = SWIM.NBSPlacement(SWIM.puddle(5.0; kOUT = 1.0), foot, [CartesianIndex(0, 0)])
+    t = spillanalysis(grid; nbs = [p])
+
+    # rain then dry: the NBS fills in period 1 and drains its carried-over storage in
+    # period 2, exercising the cross-period nbs_state persistence path.
+    we = [WeatherEvent(0.0, 1.0), WeatherEvent(5.0, 0.0)]
+    seq = fill_sequence(t, we)
+    @test !isempty(seq)
+    @test issorted([e.timestamp for e in seq])
+end

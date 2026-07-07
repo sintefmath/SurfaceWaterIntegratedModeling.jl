@@ -166,7 +166,8 @@ function _dyn_seeds(tstruct, dyn_traps, culverts, nbs_objs::Vector{DynNBS}=DynNB
 end
 
 function _build_dyn_networks(tstruct, dyn_traps, culverts, full_traps, cur_amounts,
-                             rateinfo, infiltration, z_vol_tables, cur_time, endtime)
+                             rateinfo, infiltration, z_vol_tables, cur_time, endtime,
+                             nbs_state = Dict{Int,Vector{Float64}}())
     nbs_objs = _nbs_elements(tstruct)
     seeds = _dyn_seeds(tstruct, dyn_traps, culverts, nbs_objs)
     isempty(seeds) && return (DynNetworkContext[], Set{Int}(), Set{Int}())
@@ -177,7 +178,7 @@ function _build_dyn_networks(tstruct, dyn_traps, culverts, full_traps, cur_amoun
     contexts = DynNetworkContext[]
     for net in components
         ctx = _make_context(net, tstruct, rateinfo, seeds,
-                            g -> cur_amounts[g].amount, cur_time)
+                            g -> cur_amounts[g].amount, cur_time, nbs_state)
         _predict_network!(ctx, tstruct, infiltration, z_vol_tables, endtime) # set ctx.next_event
         push!(contexts, ctx)
     end
@@ -189,16 +190,44 @@ end
 # list; the context records the subset that falls inside this component (used to
 # re-trace the same component on a rebuild).  `state0(g)` supplies the initial
 # committed volume for the global trap index `g`.
-function _make_context(net::DynNetwork, tstruct, rateinfo, seed_pool, state0, cur_time)
+# The NBS layer-state block for `net`, read from the persistent `nbs_state` store
+# in `net.nbs` order (matching `_make_context`'s layout and `_build_nbs_plan`'s
+# offsets).  An NBS not yet in the store starts empty.
+function _nbs_layer_block(net::DynNetwork, tstruct, nbs_state)
+    block = Float64[]
+    for nb in net.nbs
+        L      = length(tstruct.nbs[nb.placement_ix].system.layers)
+        stored = get(nbs_state, nb.placement_ix, nothing)
+        append!(block, stored === nothing ? zeros(Float64, L) : stored)
+    end
+    return block
+end
+
+# Write a context's current layer states back into the persistent `nbs_state`
+# store (single source of truth across events and weather periods).  Keyed by the
+# source placement so a later rebuild — which may regroup NBS into new components —
+# restores each layer correctly.
+function _store_nbs_state!(nbs_state, ctx::DynNetworkContext, tstruct)
+    nt   = length(ctx.global_ix)
+    base = 0
+    for nb in ctx.net.nbs
+        L = length(tstruct.nbs[nb.placement_ix].system.layers)
+        nbs_state[nb.placement_ix] = ctx.state[(nt + base + 1):(nt + base + L)]
+        base += L
+    end
+    return nbs_state
+end
+
+function _make_context(net::DynNetwork, tstruct, rateinfo, seed_pool, state0, cur_time,
+                       nbs_state)
     global_ix = Int[t.trap_ix for t in net.traps]
     occ       = _occupied_cells(tstruct, [net])
     seeds     = CartesianIndex{2}[s for s in seed_pool if s in occ]
     # Trap volumes, then one appended state per NBS layer (in `net.nbs` order, matching
-    # `_build_nbs_plan`'s state_base offsets).  Layer states start empty; cross-period
-    # persistence is added in 3c.
-    nlayers   = sum(length(tstruct.nbs[nb.placement_ix].system.layers)
-                    for nb in net.nbs; init = 0)
-    state     = vcat(Float64[state0(g) for g in global_ix], zeros(Float64, nlayers))
+    # `_build_nbs_plan`'s state_base offsets), restored from the persistent store so NBS
+    # storage carries across events and weather periods.
+    state     = vcat(Float64[state0(g) for g in global_ix],
+                     _nbs_layer_block(net, tstruct, nbs_state))
     return DynNetworkContext(net, state, global_ix,
                              _inflow_sources(net, tstruct), seeds,
                              cur_time,
@@ -381,7 +410,7 @@ end
 # and gets a fresh next-event prediction.
 function _assemble_contexts(components, reuse, net_contexts, committed, full_set, seeds,
                             tstruct, rateinfo, infiltration, z_vol_tables,
-                            cur_amounts, cur_time, endtime)
+                            cur_amounts, cur_time, endtime, nbs_state)
     project(g) = first(fill_trap_until(g, rateinfo, cur_amounts[g], cur_time,
                                        tstruct, z_vol_tables, use_saved=true))
     state0(g)  = g in full_set        ? _own_capacity(tstruct, g) :
@@ -392,7 +421,7 @@ function _assemble_contexts(components, reuse, net_contexts, committed, full_set
         if reuse[k] != 0
             push!(out, net_contexts[reuse[k]])
         else
-            c = _make_context(net, tstruct, rateinfo, seeds, state0, cur_time)
+            c = _make_context(net, tstruct, rateinfo, seeds, state0, cur_time, nbs_state)
             _predict_network!(c, tstruct, infiltration, z_vol_tables, endtime)
             push!(out, c)
         end
@@ -411,7 +440,8 @@ end
 # net_covered_set, and the committed-volume dict (for `_network_amount_updates`).
 function _touch_networks!(net_contexts, changetimeest, sgraph, tstruct, dyn_traps, culverts,
                           filled_traps, cur_amounts, rateinfo, z_vol_tables, infiltration,
-                          fill_updates, old_covered, cur_time, endtime, subnet_cache)
+                          fill_updates, old_covered, cur_time, endtime, subnet_cache,
+                          nbs_state)
     isempty(net_contexts) &&
         return net_contexts, Set{Int}(), Set{Int}(), Dict{Int,Float64}()
     full_traps = findall(filled_traps)
@@ -444,11 +474,17 @@ function _touch_networks!(net_contexts, changetimeest, sgraph, tstruct, dyn_trap
     committed  = _commit_contexts!(net_contexts, to_commit, tstruct, infiltration,
                                    z_vol_tables, cur_time, full_set)
     _apply_fired_boundaries!(committed, fired_kind, tstruct)
+    # Persist the just-committed contexts' NBS layer states before the rebuild reads
+    # them: `to_commit` is exactly the contexts feeding rebuilt components, so this keeps
+    # NBS storage continuous across the retrace.
+    for ci in to_commit
+        _store_nbs_state!(nbs_state, net_contexts[ci], tstruct)
+    end
 
     # Build the new context vector (reuse or rebuild+predict) and publish the estimates.
     new_contexts = _assemble_contexts(components, reuse, net_contexts, committed, full_set,
                                       seeds, tstruct, rateinfo, infiltration, z_vol_tables,
-                                      cur_amounts, cur_time, endtime)
+                                      cur_amounts, cur_time, endtime, nbs_state)
     nts = _net_trap_set(new_contexts)
     ncs = _net_covered_set(new_contexts, tstruct)
     _apply_network_changetimeest!(changetimeest, new_contexts, ncs)
@@ -463,7 +499,7 @@ end
 # (any event ≤ endtime was already processed), so it settles cleanly.  A node takes its
 # settled ODE volume; a subsumed full descendant sits at capacity.
 function _finalize_networks!(cur_amounts, net_contexts, tstruct, infiltration,
-                             z_vol_tables, cur_time, endtime)
+                             z_vol_tables, cur_time, endtime, nbs_state)
     isempty(net_contexts) && return cur_amounts
     stamp = min(cur_time, endtime)
     for ctx in net_contexts
@@ -475,6 +511,9 @@ function _finalize_networks!(cur_amounts, net_contexts, tstruct, infiltration,
                 cur_amounts[d] = FilledAmount(_own_capacity(tstruct, d), stamp)
             end
         end
+        # Persist the settled NBS layer volumes — the exact storage the next weather
+        # period rebuilds from.
+        _store_nbs_state!(nbs_state, ctx, tstruct)
     end
     return cur_amounts
 end
