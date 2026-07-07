@@ -1,6 +1,6 @@
 import Graphs
 
-export DynObject, DynFlowPath, DynTrap, DynCulvert, DynNetwork, setup_network
+export DynObject, DynFlowPath, DynTrap, DynCulvert, DynNBS, DynNetwork, setup_network
 
 # Make generic baseclass for dynamic objects
 abstract type DynObject end
@@ -136,9 +136,32 @@ function DynCulvert(tstruct, inlet::CartesianIndex{2}, outlet::CartesianIndex{2}
     return DynCulvert(inlet, outlet, float(r), float(Cd), float(Ke), float(Kf), float(Cw))
 end
 
+"""
+       DynNBS(trap_ix, placement_ix, outlets)
+
+Represent a Nature-Based-Solution installation as a rate-limited network element,
+analogous to a [`DynCulvert`](@ref).  `trap_ix` is the artificial trap the NBS
+footprint forms in the spillanalysis structure (its footprint cells and static
+spill region); `placement_ix` indexes the source `NBSPlacement` in
+`tstruct.nbs` (from which the layer parameters and footprint are recovered);
+`outlets` are the resolved per-layer discharge cells (one per layer, top→bottom).
+
+Unlike a [`DynTrap`](@ref) the NBS does not fill geometrically: it carries one
+storage state per layer, and each layer discharges continuously to its outlet.
+The static trap identity (footprint/region) is retained so the network build can
+seed and connect it; the solver overrides its dynamics via the layer model.  For
+connectivity the NBS acts like a set of culverts from the trap to each distinct
+outlet cell (joining the trap's component to each outlet's downstream component).
+"""
+struct DynNBS <: DynObject
+    trap_ix::Int                        # artificial NBS trap index in the spillanalysis structure
+    placement_ix::Int                   # index into tstruct.nbs (the source NBSPlacement)
+    outlets::Vector{CartesianIndex{2}}  # resolved per-layer discharge cells (top->bottom)
+end
+
 # Network of dynamic objects
 """
-         DynNetwork(flow_paths, traps, culverts)
+         DynNetwork(flow_paths, traps, culverts, nbs)
 
 Represent the dynamic elements of the terrain as a network of flow paths, traps,
 and culverts.  Each flow path may lead into a trap, and each trap has a spill
@@ -160,7 +183,11 @@ struct DynNetwork
     flow_paths::Vector{DynFlowPath}
     traps::Vector{DynTrap}
     culverts::Vector{DynCulvert}
+    nbs::Vector{DynNBS}
 end
+
+# Backwards-compatible constructor: a network with no NBS elements.
+DynNetwork(flow_paths, traps, culverts) = DynNetwork(flow_paths, traps, culverts, DynNBS[])
 
 DynNetwork() = DynNetwork(DynFlowPath[], DynTrap[], DynCulvert[])
 
