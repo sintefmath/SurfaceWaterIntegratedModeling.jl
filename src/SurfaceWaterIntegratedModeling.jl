@@ -21,6 +21,7 @@ include("fill_sequence/fill_sequence.jl")
 # ----------------------------------------------------------------------------
 include("watercourses.jl")
 include("dynamics/elements.jl")
+include("dynamics/nbs_elements.jl")
 include("dynamics/culvert_rate.jl")
 include("utils.jl")
 include("dynamics/networksolver.jl")
