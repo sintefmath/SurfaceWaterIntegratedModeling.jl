@@ -160,3 +160,17 @@ end
     @test !isempty(seq)
     @test issorted([e.timestamp for e in seq])
 end
+
+# ---------------------------------------------------------------------------
+@testset "NBS outlet routed as a culvert-style delivery" begin
+    t, net, gsz = _mini_nbs_net(; Smax = 5.0)
+    p = SWIM._build_rate_params(t, net, zeros(gsz), zeros(length(net.traps)))
+    plan = p.nbsplan
+    @test plan.n_slots == 1                       # one on-network outlet -> one delivery slot
+    # the outlet is delivered at exactly one place: a path cell position (:nbsout event)
+    # or straight into a trap — never head-injected, never both.
+    npath = sum(length(e) for e in plan.nbs_path_events)
+    ntrap = sum(length(o) for o in plan.nbs_trap_outlets)
+    @test npath + ntrap == 1
+    @test plan.deliver_slot[1][1] == 1            # the single layer maps to slot 1
+end

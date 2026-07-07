@@ -288,16 +288,19 @@ end
 # `(position, :trib|:cvin|:cvout, tributary-or-culvert index)`.  The list is static
 # for a solve (only the flow values it drives are dynamic), so it is built once and
 # reused every rate-function call instead of being rebuilt and re-sorted each time.
-function _path_event_templates(net::DynNetwork)
+function _path_event_templates(net::DynNetwork, nbsplan = nothing)
     return [begin
                 ev = Tuple{Int,Symbol,Int}[]
                 for (m, j)   in fp.merges;          push!(ev, (j,   :trib,  m));  end
                 for (ci, pos) in fp.culvert_inlets;  push!(ev, (pos, :cvin,  ci)); end
                 for (ci, pos) in fp.culvert_outlets; push!(ev, (pos, :cvout, ci)); end
+                if nbsplan !== nothing
+                    for (pos, slot) in nbsplan.nbs_path_events[p]; push!(ev, (pos, :nbsout, slot)); end
+                end
                 sort!(ev; by = first)
                 ev
             end
-            for fp in net.flow_paths]
+            for (p, fp) in enumerate(net.flow_paths)]
 end
 
 # Volumetric flow through culvert `ci` given the current trap water levels.  A flow-
@@ -370,10 +373,10 @@ end
 # precomputed `(pos, kind, idx)` stream (culvert-aware path) or `nothing`.  Mutates
 # `culvert_actual` to record what each culvert inlet on this path drew.
 function _path_delivered!(prefix, head_flow, tribs, events,
-                          trib_output, culvert_actual, cvplan, net, trap_level)
+                          trib_output, culvert_actual, nbs_actual, cvplan, net, trap_level)
     current  = head_flow
     prev_pfx = 0.0
-    if cvplan === nothing
+    if events === nothing
         for (junc, m) in tribs
             current  = max(current - (prefix[junc] - prev_pfx), 0.0)
             current += trib_output[m]
@@ -386,6 +389,8 @@ function _path_delivered!(prefix, head_flow, tribs, events,
                 current += trib_output[idx]
             elseif kind === :cvout
                 current += culvert_actual[idx]                # deliver
+            elseif kind === :nbsout
+                current += nbs_actual[idx]                    # NBS layer outflow at its outlet
             else                                              # :cvin
                 a = min(_culvert_flow(cvplan, net, idx, trap_level), current)
                 culvert_actual[idx] = a                       # drawn == delivered
@@ -402,7 +407,8 @@ end
 # spill its surplus into its spill path.  Mutates `trap_inflow`, `path_flow`, and
 # `culvert_actual`.
 function _route_trap_node!(i, net, trap_inflow, path_flow, footprint_infil,
-                           spilling, cvplan, trap_level, culvert_actual)
+                           spilling, cvplan, trap_level, culvert_actual,
+                           nbs_actual, nbs_trap_outlets)
     if cvplan !== nothing
         trap = net.traps[i]
         for ci in trap.culvert_outlets                # deliver (source drew earlier)
@@ -412,6 +418,11 @@ function _route_trap_node!(i, net, trap_inflow, path_flow, footprint_infil,
             q = _culvert_flow(cvplan, net, ci, trap_level)
             culvert_actual[ci] = q
             trap_inflow[i]    -= q
+        end
+    end
+    if nbs_trap_outlets !== nothing                   # deliver NBS outflow whose outlet is this trap
+        for slot in nbs_trap_outlets[i]
+            trap_inflow[i] += nbs_actual[slot]
         end
     end
     if spilling[i]
@@ -440,7 +451,9 @@ function _route_flow(net::DynNetwork,
                      cvplan = nothing,
                      trap_level = nothing,
                      path_events = nothing;
-                     scratch = nothing)
+                     scratch = nothing,
+                     nbs_actual = Float64[],
+                     nbs_trap_outlets = nothing)
 
     np = length(net.flow_paths)
     nt = length(net.traps)
@@ -451,7 +464,9 @@ function _route_flow(net::DynNetwork,
     # Working accumulators.  With a caller-supplied `scratch` (the hot per-solve path)
     # they are reused in place; without one (the standalone/test path) they are freshly
     # allocated.  Either way: `trap_inflow` seeded with external trap inflow, `path_flow`
-    # with per-path head inflow, `trib_output`/`culvert_actual` zeroed.
+    # with per-path head inflow, `trib_output`/`culvert_actual` zeroed.  `nbs_actual` is
+    # supplied pre-filled by the caller (the per-outlet layer outflows), so it is used
+    # read-only here.
     if scratch === nothing
         trap_inflow = Float64.(external_inflow)
         path_flow   = Float64.(external_path_inflow)
@@ -467,10 +482,11 @@ function _route_flow(net::DynNetwork,
     for node in order
         if node <= np                               # a flow path
             p      = node
-            events = cvplan === nothing ? nothing : path_events[p]
+            events = path_events === nothing ? nothing : path_events[p]
             delivered = _path_delivered!(path_infil_prefix[p], path_flow[p],
                                          sorted_trib_info[p], events,
-                                         trib_output, culvert_actual, cvplan, net, trap_level)
+                                         trib_output, culvert_actual, nbs_actual,
+                                         cvplan, net, trap_level)
             tt = net.flow_paths[p].target_trap
             if tt > 0
                 trap_inflow[tt] += delivered        # into the downstream trap
@@ -479,7 +495,8 @@ function _route_flow(net::DynNetwork,
             end                                      # else: exits the domain
         else                                        # a trap
             _route_trap_node!(node - np, net, trap_inflow, path_flow, footprint_infil,
-                              spilling, cvplan, trap_level, culvert_actual)
+                              spilling, cvplan, trap_level, culvert_actual,
+                              nbs_actual, nbs_trap_outlets)
         end
     end
     return trap_inflow
@@ -573,11 +590,13 @@ struct RouteScratch
     path_flow     ::Vector{Float64}
     trib_output   ::Vector{Float64}
     culvert_actual::Vector{Float64}
+    nbs_actual    ::Vector{Float64}    # per NBS outlet-delivery slot (like culvert_actual)
 end
-RouteScratch(nt::Int, np::Int, ncv::Int) =
+RouteScratch(nt::Int, np::Int, ncv::Int, nnbs::Int = 0) =
     RouteScratch(Vector{Bool}(undef, nt), Vector{Float64}(undef, nt),
                  Vector{Float64}(undef, nt), Vector{Float64}(undef, np),
-                 Vector{Float64}(undef, np), Vector{Float64}(undef, ncv))
+                 Vector{Float64}(undef, np), Vector{Float64}(undef, ncv),
+                 Vector{Float64}(undef, nnbs))
 
 # ----------------------------------------------------------------------------
 # NBS routing data.  An NBS is a rate-limited element whose trap node receives
@@ -594,16 +613,21 @@ struct NBSLayerParams
 end
 
 struct NBSPlan
-    trap_local  ::Vector{Int}             # local trap index of each NBS's trap node
-    state_base  ::Vector{Int}             # 0-based offset of each NBS's layer block, after the nt trap states
-    layers      ::Vector{Vector{NBSLayerParams}}
-    out_is_path ::Vector{BitVector}       # per NBS, per layer: is the outlet owned by a path?
-    out_owner   ::Vector{Vector{Int}}     # per NBS, per layer: local path/trap index owning the outlet (0 = off-network)
-    trap_set    ::Set{Int}                # local trap indices that are NBS traps
-    nlayer_total::Int                     # total appended layer states
+    trap_local     ::Vector{Int}          # local trap index of each NBS's trap node
+    state_base     ::Vector{Int}          # 0-based offset of each NBS's layer block, after the nt trap states
+    layers         ::Vector{Vector{NBSLayerParams}}
+    deliver_slot   ::Vector{Vector{Int}}  # per NBS, per layer: slot in `nbs_actual` (0 = off-network outlet)
+    trap_set       ::Set{Int}             # local trap indices that are NBS traps
+    nlayer_total   ::Int                  # total appended layer states
+    n_slots        ::Int                  # number of on-network outlet-delivery slots
+    nbs_path_events::Vector{Vector{Tuple{Int,Int}}}  # per flow path: (cell position, slot)
+    nbs_trap_outlets::Vector{Vector{Int}}            # per trap: slots delivered into it
 end
 
-# Build the NBS routing plan for `net` (nothing when it has no NBS elements).
+# Build the NBS routing plan for `net` (nothing when it has no NBS elements).  Each
+# on-network outlet gets a delivery slot; path-owned outlets record their exact cell
+# position so the router charges only the downstream infiltration (like a culvert
+# outlet's :cvout), and trap-owned outlets deliver straight into the trap inflow.
 function _build_nbs_plan(net::DynNetwork, tstruct)
     isempty(net.nbs) && return nothing
     CI = CartesianIndices(tstruct.topography)
@@ -621,9 +645,12 @@ function _build_nbs_plan(net::DynNetwork, tstruct)
         path_cell[c] = pi
     end
 
+    np = length(net.flow_paths); ntr = length(net.traps)
     trap_local = Int[]; state_base = Int[]; layers = Vector{NBSLayerParams}[]
-    out_is_path = BitVector[]; out_owner = Vector{Int}[]
-    base = 0
+    deliver_slot = Vector{Int}[]
+    nbs_path_events  = [Tuple{Int,Int}[] for _ in 1:np]
+    nbs_trap_outlets = [Int[] for _ in 1:ntr]
+    base = 0; slot = 0
     for nb in net.nbs
         lyrs = tstruct.nbs[nb.placement_ix].system.layers
         push!(trap_local, trap_local_of[nb.trap_ix])
@@ -632,19 +659,23 @@ function _build_nbs_plan(net::DynNetwork, tstruct)
             NBSLayerParams(float(L.Kout), float(L.nout), float(L.Smax),
                            float(L.Kinf), float(L.ninf), float(L.Smin), float(L.A))
             for L in lyrs])
-        ip = falses(length(lyrs)); ow = zeros(Int, length(lyrs))
+        slots = zeros(Int, length(lyrs))
         for (l, oc) in enumerate(nb.outlets)
             if haskey(trap_cell, oc)
-                ip[l] = false; ow[l] = trap_cell[oc]
+                slot += 1; slots[l] = slot
+                push!(nbs_trap_outlets[trap_cell[oc]], slot)
             elseif haskey(path_cell, oc)
-                ip[l] = true;  ow[l] = path_cell[oc]
+                slot += 1; slots[l] = slot
+                p   = path_cell[oc]
+                pos = findfirst(==(oc), net.flow_paths[p].cells)
+                push!(nbs_path_events[p], (pos, slot))
             end                                    # else off-network: discharge exits the domain
         end
-        push!(out_is_path, ip); push!(out_owner, ow)
+        push!(deliver_slot, slots)
         base += length(lyrs)
     end
-    return NBSPlan(trap_local, state_base, layers, out_is_path, out_owner,
-                   Set(trap_local), base)
+    return NBSPlan(trap_local, state_base, layers, deliver_slot, Set(trap_local),
+                   base, slot, nbs_path_events, nbs_trap_outlets)
 end
 
 # Number of appended NBS layer states for a rate-params object (0 when no NBS).
@@ -695,9 +726,14 @@ function _build_rate_params(tstruct::TrapStructure,
     cell_infil      = _path_cell_infiltration(net, infiltration)
     prefix          = [_infil_prefix(ci) for ci in cell_infil]
     sorted_tribs    = [sort([(j, m) for (m, j) in fp.merges]) for fp in net.flow_paths]
-    cvplan = isempty(net.culverts) ? nothing : _build_culvert_plan(net, tstruct)
-    events = cvplan === nothing ? nothing : _path_event_templates(net)
     nbsplan = _build_nbs_plan(net, tstruct)
+    cvplan  = isempty(net.culverts) ? nothing : _build_culvert_plan(net, tstruct)
+    # The event-driven router path is needed for culverts and for NBS outlets that
+    # land on a flow path (delivered at their exact cell position); a trap-only NBS
+    # net needs no path events.
+    has_nbs_path = nbsplan !== nothing && any(!isempty(e) for e in nbsplan.nbs_path_events)
+    events = (cvplan === nothing && !has_nbs_path) ? nothing :
+             _path_event_templates(net, nbsplan)
     tgeom = _build_trap_geometry(tstruct, net, infiltration; zvt=zvt)
     footprint_infil = _footprint_infiltration(tgeom)
     # An NBS footprint's water fate is governed entirely by the layer model, so the
@@ -719,7 +755,8 @@ function _build_rate_params(tstruct::TrapStructure,
                                 cvplan,
                                 events,
                                 nbsplan,
-                                RouteScratch(nt, np, length(net.culverts)))
+                                RouteScratch(nt, np, length(net.culverts),
+                                             nbsplan === nothing ? 0 : nbsplan.n_slots))
 end
 
 # ----------------------------------------------------------------------------
@@ -771,43 +808,37 @@ function _routed_inflow(V, p::DynNetworkRateParams)
     end
 
     # NBS: force the NBS trap nodes non-spilling (they discharge via their outlets,
-    # never geometrically), and inject each layer's outflow — known from the current
-    # storage — as external inflow at its outlet owner before routing.  Deliveries are
-    # downstream of the NBS trap (acyclicity guard), so this pre-injection is exact.
-    plan = p.nbsplan
+    # never geometrically), and hand each layer's outflow — known from the current
+    # storage — to the router as a per-outlet delivery.  The router delivers it at the
+    # outlet's exact position (path cell via a :nbsout event, or straight into a trap),
+    # exactly like a culvert outlet, so downstream infiltration is charged correctly.
+    plan       = p.nbsplan
     for tl in plan.trap_set
         spilling[tl] = false
     end
-    np = length(p.net.flow_paths)
-    # @@@ allocates per call; NBS nets are small (small-net-in-huge-terrain goal),
-    #     so acceptable — move to scratch if profiling flags it.
-    extra_trap = zeros(Float64, nt)
-    extra_path = zeros(Float64, np)
-    _nbs_deliveries!(extra_trap, extra_path, V, p, nt)
-    ext_trap = p.external_inflow .+ extra_trap
-    ext_path = p.external_path_inflow .+ extra_path
-    inflow = _route_flow(p.net, ext_trap, spilling,
-                         p.footprint_infil, p.path_infil_prefix, ext_path,
+    nbs_actual = fill!(sc.nbs_actual, 0.0)
+    _nbs_fill_actual!(nbs_actual, V, p, nt)
+    inflow = _route_flow(p.net, p.external_inflow, spilling,
+                         p.footprint_infil, p.path_infil_prefix, p.external_path_inflow,
                          p.sorted_trib_info, p.order, p.merge_target,
-                         p.cvplan, trap_level, p.path_events; scratch = sc)
+                         p.cvplan, trap_level, p.path_events;
+                         scratch = sc, nbs_actual = nbs_actual,
+                         nbs_trap_outlets = plan.nbs_trap_outlets)
     return inflow, spilling
 end
 
-# Accumulate each NBS layer's outflow (m^3/time, converted from the mm-based layer
-# model) into the delivery arrays for its outlet's owner (`extra_trap` for a trap-
-# owned outlet, `extra_path` for a path-owned one).  An off-network outlet (owner 0)
-# discharges out of the domain and is dropped.  See the unit math in §3.2bis of the
-# plan: depth S_mm = V_layer * 1000 / A, Qout_m3 = compute_outflow(...) * 1e-3.
-function _nbs_deliveries!(extra_trap, extra_path, V, p::DynNetworkRateParams, nt::Int)
+# Fill `nbs_actual[slot]` with each on-network NBS outlet's layer outflow (m^3/time),
+# converted from the mm-based layer model (§3.2bis: S_mm = V_layer*1000/A,
+# Qout_m3 = compute_outflow(...) * 1e-3).  Off-network outlets (slot 0) are dropped.
+function _nbs_fill_actual!(nbs_actual, V, p::DynNetworkRateParams, nt::Int)
     plan = p.nbsplan
     @inbounds for k in 1:length(plan.trap_local)
         base = plan.state_base[k]
         for (l, lp) in enumerate(plan.layers[k])
+            slot = plan.deliver_slot[k][l]
+            slot == 0 && continue
             S_mm = V[nt + base + l] * 1000.0 / lp.A
-            qo   = compute_outflow(lp.Kout, lp.nout, lp.Smax_mm, S_mm) * 1e-3
-            ow   = plan.out_owner[k][l]
-            ow == 0 && continue
-            plan.out_is_path[k][l] ? (extra_path[ow] += qo) : (extra_trap[ow] += qo)
+            nbs_actual[slot] = compute_outflow(lp.Kout, lp.nout, lp.Smax_mm, S_mm) * 1e-3
         end
     end
     return nothing
