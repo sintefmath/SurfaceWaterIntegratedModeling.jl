@@ -65,3 +65,61 @@ end
     for tr in host.traps, k in t.footprints[tr.trap_ix]; push!(occ, ci[k]); end
     @test nbs_objs[1].outlets[1] in occ
 end
+
+# ---------------------------------------------------------------------------
+# Build a network on the mini grid with a single-layer puddle NBS whose outlet is
+# backfilled to its natural downstream cell.  Returns (tstruct, net, nt, nbs_local).
+function _mini_nbs_net(; Smax = 5.0, kOUT = 1.0)
+    grid = loadgrid(joinpath(artifact"swim_testdata", "data", "small", "mini.txt"))
+    sz = size(grid); li = LinearIndices(sz)
+    r = sz[1] ÷ 2; c = sz[2] ÷ 2
+    foot = [li[r, c], li[r, c + 1], li[r + 1, c], li[r + 1, c + 1]]
+    p = SWIM.NBSPlacement(SWIM.puddle(Smax; kOUT = kOUT, nOUT = 1.0), foot, [CartesianIndex(0, 0)])
+    t = spillanalysis(grid; nbs = [p])
+    nbs_objs = SWIM._nbs_elements(t)
+    seeds = SWIM._dyn_seeds(t, Int[], SWIM.DynCulvert[], nbs_objs)
+    net = only(filter(n -> !isempty(n.nbs), SWIM.setup_network(t, seeds, Int[]; nbs = nbs_objs)))
+    return t, net, size(grid)
+end
+
+# ---------------------------------------------------------------------------
+@testset "NBS rate function conserves (charged layer, no inflow)" begin
+    t, net, gsz = _mini_nbs_net(; Smax = 0.0, kOUT = 1.0)  # Smax=0 -> any storage overflows
+    nt = length(net.traps)
+    p = SWIM._build_rate_params(t, net, zeros(gsz), zeros(nt))
+    nl = SWIM._nbs_state_count(p)
+    @test nl == 1
+
+    V = zeros(nt + nl)
+    V[nt + 1] = 4.0                    # charge the single layer (A=4 -> S=1000 mm)
+    dV = similar(V)
+    SWIM.dynNetworkRateFunction!(dV, V, p, 0.0)
+
+    # layer sheds Qout = 1.0 m^3/time; that exact amount reappears downstream; the
+    # NBS trap node is frozen; nothing is created or destroyed.
+    @test isapprox(dV[nt + 1], -1.0; atol = 1e-9)      # layer outflow
+    @test isapprox(sum(dV), 0.0; atol = 1e-9)          # global balance (no infil, on-network delivery)
+    @test dV[p.nbsplan.trap_local[1]] == 0.0           # NBS trap frozen
+end
+
+# ---------------------------------------------------------------------------
+@testset "NBS solve conserves mass over a window" begin
+    t, net, gsz = _mini_nbs_net(; Smax = 5.0, kOUT = 1.0)
+    nt = length(net.traps)
+    infil = zeros(gsz)
+    p = SWIM._build_rate_params(t, net, infil, zeros(nt))
+    nl = SWIM._nbs_state_count(p)
+    nbs_local = p.nbsplan.trap_local[1]
+
+    Q = 0.1
+    inflow = zeros(nt); inflow[nbs_local] = Q       # constant inflow into the NBS only
+    state = zeros(nt + nl)
+    T = 1.0
+    res = solveDynNetwork!(state, t, net, infil, inflow; tmax = T)
+
+    @test res.kind == :none                          # window elapsed, no topology event
+    @test state[nt + 1] > 0.0                         # the layer filled
+    # infiltration is zero and (for this grid/window) nothing exits the domain, so all
+    # injected water is accounted for in the final trap volumes + layer storage.
+    @test isapprox(sum(state), Q * T; atol = 1e-9)
+end

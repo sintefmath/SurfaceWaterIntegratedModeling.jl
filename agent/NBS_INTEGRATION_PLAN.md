@@ -227,6 +227,49 @@ This is the substantial part and can be split into 3a/3b/3c sub-PRs.
 - `DynNetworkRateParams` gains an optional `nbsplan` field (nothing when the net
   has no NBS), mirroring the optional `cvplan`.
 
+### 3.2bis Concrete unit math + state layout (as implemented in 3b)
+
+**State vector `V`** (length `nt + Σ nlayers`): trap volumes `V[1:nt]` (m³, as
+today) followed by one contiguous block per `DynNBS` of `nlayers` **layer storage
+volumes** (m³). Each NBS records `state_base` (0-based offset of its block).
+
+**Per-layer fluxes** (layer `l`, storage volume `Vl` m³, area `A` m², params in mm):
+- depth `S_mm = Vl * 1000 / A`  (since `Vl = S_mm * 1e-3 * A`)
+- `Qout_m3 = compute_outflow(Kout, nout, Smax_mm, S_mm) * 1e-3`
+- `Qinf_m3 = compute_outflow(Kinf, ninf, Smin_mm, S_mm) * 1e-3`
+
+The `*1e-3` and `*1000/A` are the mm↔m³ boundary conversions; they reproduce
+SUrbArea's `dS = (I - out - inf)/A` exactly (multiply that by `A*1e-3` to get
+`dV_m3`), so calibrated behaviour is preserved. `A` = footprint area.
+
+**Cascade** (layers top→bottom, `layers[1]` = top receives terrain inflow):
+- `inflow[1] = I_nbs` (terrain inflow routed to the NBS trap node);
+  `inflow[l>1] = Qinf_m3[l-1]`
+- `dV_layer[l] = inflow[l] - Qout_m3[l] - Qinf_m3[l]`
+- bottom layer's `Qinf` leaves the system (deep-ground loss) `[Q2a]`
+- each layer's `Qout_m3[l]` is delivered to `outlets[l]`
+
+Mass check: `Σ dV_layer = I_nbs - ΣQout - Qinf[bottom]` ⇒
+`I_nbs = ΣQout + Qinf[bottom] + Σ dV_layer` ✓ (outlets + ground + storage).
+
+**Outlet injection.** `Qout_m3[l]` is known from `V` *before* routing, and every
+outlet is downstream of the NBS trap (acyclicity guard), so it is injected as
+**external inflow at the outlet's owner** (trap → `external_inflow`, path →
+`external_path_inflow` at the head). Mass-conserving in both cases. `@@@` For a
+path-owned outlet this over-charges the head→outlet infiltration (water still
+conserved, just extra to the infiltration sink); refine to position-exact
+injection (like culvert `:cvout`) if accuracy demands.
+
+**NBS trap node** (a `DynTrap` at local index `nbs_trap`): forced non-spilling
+(`spilling[nbs_trap] = false`); its `footprint_infil` zeroed (`[Q8]`, the layer
+model owns water there); `dV[nbs_trap] = 0` (geometric volume frozen, `[Q3b]`).
+`I_nbs = trap_inflow[nbs_trap]` after routing.
+
+**Solve**: `solveDynNetwork!` state length becomes `nt + Σ nlayers`; `evolving`
+and topology events stay over `1:nt` only (no events on layer states, `[Q1a]`);
+the steady-state check is extended to include layer-state indices so a net whose
+only motion is NBS layers is not declared steady prematurely.
+
 ### 3.3 Rate function
 
 Extend `dynNetworkRateFunction!` / `_routed_inflow` (`networksolver.jl:667-714`)

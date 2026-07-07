@@ -579,6 +579,77 @@ RouteScratch(nt::Int, np::Int, ncv::Int) =
                  Vector{Float64}(undef, nt), Vector{Float64}(undef, np),
                  Vector{Float64}(undef, np), Vector{Float64}(undef, ncv))
 
+# ----------------------------------------------------------------------------
+# NBS routing data.  An NBS is a rate-limited element whose trap node receives
+# terrain inflow into its topmost layer and whose per-layer outflow is delivered
+# to the layer's outlet cell.  `NBSPlan` precomputes, per NBS, its trap's local
+# index, the offset of its layer-state block in the solver state vector, the layer
+# parameters (in the mm units the NBS model is defined in), and each outlet's
+# owning path/trap.  Layer fluxes are power-law in the layer storage (see
+# `compute_outflow`); the mm<->m^3 conversion happens in the rate function.
+struct NBSLayerParams
+    Kout::Float64; nout::Float64; Smax_mm::Float64
+    Kinf::Float64; ninf::Float64; Smin_mm::Float64
+    A::Float64                            # layer area (== footprint area)
+end
+
+struct NBSPlan
+    trap_local  ::Vector{Int}             # local trap index of each NBS's trap node
+    state_base  ::Vector{Int}             # 0-based offset of each NBS's layer block, after the nt trap states
+    layers      ::Vector{Vector{NBSLayerParams}}
+    out_is_path ::Vector{BitVector}       # per NBS, per layer: is the outlet owned by a path?
+    out_owner   ::Vector{Vector{Int}}     # per NBS, per layer: local path/trap index owning the outlet (0 = off-network)
+    trap_set    ::Set{Int}                # local trap indices that are NBS traps
+    nlayer_total::Int                     # total appended layer states
+end
+
+# Build the NBS routing plan for `net` (nothing when it has no NBS elements).
+function _build_nbs_plan(net::DynNetwork, tstruct)
+    isempty(net.nbs) && return nothing
+    CI = CartesianIndices(tstruct.topography)
+
+    trap_local_of = Dict{Int,Int}()
+    trap_cell     = Dict{CartesianIndex{2},Int}()
+    for (i, t) in enumerate(net.traps)
+        trap_local_of[t.trap_ix] = i
+        for k in tstruct.footprints[t.trap_ix]
+            trap_cell[CI[k]] = i
+        end
+    end
+    path_cell = Dict{CartesianIndex{2},Int}()
+    for (pi, p) in enumerate(net.flow_paths), c in p.cells
+        path_cell[c] = pi
+    end
+
+    trap_local = Int[]; state_base = Int[]; layers = Vector{NBSLayerParams}[]
+    out_is_path = BitVector[]; out_owner = Vector{Int}[]
+    base = 0
+    for nb in net.nbs
+        lyrs = tstruct.nbs[nb.placement_ix].system.layers
+        push!(trap_local, trap_local_of[nb.trap_ix])
+        push!(state_base, base)
+        push!(layers, NBSLayerParams[
+            NBSLayerParams(float(L.Kout), float(L.nout), float(L.Smax),
+                           float(L.Kinf), float(L.ninf), float(L.Smin), float(L.A))
+            for L in lyrs])
+        ip = falses(length(lyrs)); ow = zeros(Int, length(lyrs))
+        for (l, oc) in enumerate(nb.outlets)
+            if haskey(trap_cell, oc)
+                ip[l] = false; ow[l] = trap_cell[oc]
+            elseif haskey(path_cell, oc)
+                ip[l] = true;  ow[l] = path_cell[oc]
+            end                                    # else off-network: discharge exits the domain
+        end
+        push!(out_is_path, ip); push!(out_owner, ow)
+        base += length(lyrs)
+    end
+    return NBSPlan(trap_local, state_base, layers, out_is_path, out_owner,
+                   Set(trap_local), base)
+end
+
+# Number of appended NBS layer states for a rate-params object (0 when no NBS).
+_nbs_state_count(p) = p.nbsplan === nothing ? 0 : p.nbsplan.nlayer_total
+
 struct DynNetworkRateParams
     net::DynNetwork
     geom::Vector{TrapGeometry}
@@ -591,6 +662,7 @@ struct DynNetworkRateParams
     merge_target::Vector{Int}
     cvplan::Union{CulvertPlan,Nothing}   # culvert routing data, or nothing if none
     path_events::Union{Vector{Vector{Tuple{Int,Symbol,Int}}},Nothing}  # per-path event templates
+    nbsplan::Union{NBSPlan,Nothing}      # NBS routing data, or nothing if none
     scratch::RouteScratch                # reusable per-solve working buffers
 end
 
@@ -625,18 +697,28 @@ function _build_rate_params(tstruct::TrapStructure,
     sorted_tribs    = [sort([(j, m) for (m, j) in fp.merges]) for fp in net.flow_paths]
     cvplan = isempty(net.culverts) ? nothing : _build_culvert_plan(net, tstruct)
     events = cvplan === nothing ? nothing : _path_event_templates(net)
+    nbsplan = _build_nbs_plan(net, tstruct)
     tgeom = _build_trap_geometry(tstruct, net, infiltration; zvt=zvt)
+    footprint_infil = _footprint_infiltration(tgeom)
+    # An NBS footprint's water fate is governed entirely by the layer model, so the
+    # terrain infiltration under it must not also apply (no double count, [Q8]).
+    if nbsplan !== nothing
+        for tl in nbsplan.trap_set
+            footprint_infil[tl] = 0.0
+        end
+    end
     return DynNetworkRateParams(net,
                                 tgeom,
                                 Float64.(external_inflow),
                                 path_inflow_vec,
-                                _footprint_infiltration(tgeom),
+                                footprint_infil,
                                 prefix,
                                 sorted_tribs,
                                 order,
                                 _merge_targets(net),
                                 cvplan,
                                 events,
+                                nbsplan,
                                 RouteScratch(nt, np, length(net.culverts)))
 end
 
@@ -680,35 +762,123 @@ function _routed_inflow(V, p::DynNetworkRateParams)
             trap_level[i] = _surface_level(geom[i], V[i])
         end
     end
-    inflow = _route_flow(p.net, p.external_inflow, spilling,
-                         p.footprint_infil, p.path_infil_prefix, p.external_path_inflow,
+    if p.nbsplan === nothing
+        inflow = _route_flow(p.net, p.external_inflow, spilling,
+                             p.footprint_infil, p.path_infil_prefix, p.external_path_inflow,
+                             p.sorted_trib_info, p.order, p.merge_target,
+                             p.cvplan, trap_level, p.path_events; scratch = sc)
+        return inflow, spilling
+    end
+
+    # NBS: force the NBS trap nodes non-spilling (they discharge via their outlets,
+    # never geometrically), and inject each layer's outflow — known from the current
+    # storage — as external inflow at its outlet owner before routing.  Deliveries are
+    # downstream of the NBS trap (acyclicity guard), so this pre-injection is exact.
+    plan = p.nbsplan
+    for tl in plan.trap_set
+        spilling[tl] = false
+    end
+    np = length(p.net.flow_paths)
+    # @@@ allocates per call; NBS nets are small (small-net-in-huge-terrain goal),
+    #     so acceptable — move to scratch if profiling flags it.
+    extra_trap = zeros(Float64, nt)
+    extra_path = zeros(Float64, np)
+    _nbs_deliveries!(extra_trap, extra_path, V, p, nt)
+    ext_trap = p.external_inflow .+ extra_trap
+    ext_path = p.external_path_inflow .+ extra_path
+    inflow = _route_flow(p.net, ext_trap, spilling,
+                         p.footprint_infil, p.path_infil_prefix, ext_path,
                          p.sorted_trib_info, p.order, p.merge_target,
                          p.cvplan, trap_level, p.path_events; scratch = sc)
     return inflow, spilling
 end
 
+# Accumulate each NBS layer's outflow (m^3/time, converted from the mm-based layer
+# model) into the delivery arrays for its outlet's owner (`extra_trap` for a trap-
+# owned outlet, `extra_path` for a path-owned one).  An off-network outlet (owner 0)
+# discharges out of the domain and is dropped.  See the unit math in §3.2bis of the
+# plan: depth S_mm = V_layer * 1000 / A, Qout_m3 = compute_outflow(...) * 1e-3.
+function _nbs_deliveries!(extra_trap, extra_path, V, p::DynNetworkRateParams, nt::Int)
+    plan = p.nbsplan
+    @inbounds for k in 1:length(plan.trap_local)
+        base = plan.state_base[k]
+        for (l, lp) in enumerate(plan.layers[k])
+            S_mm = V[nt + base + l] * 1000.0 / lp.A
+            qo   = compute_outflow(lp.Kout, lp.nout, lp.Smax_mm, S_mm) * 1e-3
+            ow   = plan.out_owner[k][l]
+            ow == 0 && continue
+            plan.out_is_path[k][l] ? (extra_path[ow] += qo) : (extra_trap[ow] += qo)
+        end
+    end
+    return nothing
+end
+
 function dynNetworkRateFunction!(dV, V, p::DynNetworkRateParams, t = 0.0)
     geom = p.geom
     nt   = length(geom)
-    @assert length(dV) == length(V) == nt
 
     inflow, spilling = _routed_inflow(V, p)
 
+    if p.nbsplan === nothing
+        @assert length(dV) == length(V) == nt
+        @inbounds for i in 1:nt
+            if spilling[i]
+                # full: whole footprint wetted; excess overflows, so dV is ~0 while fed
+                loss  = p.footprint_infil[i]
+                spill = max(inflow[i] - loss, 0.0)
+            else
+                # accumulating: infiltrate only through the wetted footprint, no spill
+                loss  = wetted_infiltration(geom[i], V[i])
+                spill = 0.0
+            end
+            dV[i] = inflow[i] - loss - spill
+            # Physical floor: volume cannot go below zero.  When an EMPTY trap has negative
+            # computed dV (e.g. a culvert trying to draw from it), clamp to zero rather than
+            # letting the ODE push V < 0 and blow up the v2z interpolation.
+            V[i] <= 0.0 && dV[i] < 0.0 && (dV[i] = 0.0)
+        end
+        return nothing
+    end
+
+    # --- NBS-aware path ---
+    plan = p.nbsplan
+    @assert length(dV) == length(V) == nt + plan.nlayer_total
+
+    # Trap-volume derivatives.  An NBS trap is frozen (its dynamics live in the layer
+    # states, and its geometric capacity is ignored [Q3b]); other traps as usual.
     @inbounds for i in 1:nt
+        if i in plan.trap_set
+            dV[i] = 0.0
+            continue
+        end
         if spilling[i]
-            # full: whole footprint wetted; excess overflows, so dV is ~0 while fed
             loss  = p.footprint_infil[i]
             spill = max(inflow[i] - loss, 0.0)
         else
-            # accumulating: infiltrate only through the wetted footprint, no spill
             loss  = wetted_infiltration(geom[i], V[i])
             spill = 0.0
         end
         dV[i] = inflow[i] - loss - spill
-        # Physical floor: volume cannot go below zero.  When an EMPTY trap has negative
-        # computed dV (e.g. a culvert trying to draw from it), clamp to zero rather than
-        # letting the ODE push V < 0 and blow up the v2z interpolation.
         V[i] <= 0.0 && dV[i] < 0.0 && (dV[i] = 0.0)
+    end
+
+    # NBS layer-state derivatives (m^3/time).  Layer 1 (top) is fed by the terrain
+    # inflow arriving at the NBS trap node; each lower layer is fed by the layer
+    # above's infiltration; the bottom layer's infiltration leaves the system [Q2a].
+    # Each layer loses its own outflow (delivered to its outlet, already injected in
+    # `_routed_inflow`) and infiltration.
+    @inbounds for k in 1:length(plan.trap_local)
+        base  = plan.state_base[k]
+        I_nbs = inflow[plan.trap_local[k]]
+        prev_qi = 0.0
+        for (l, lp) in enumerate(plan.layers[k])
+            S_mm = V[nt + base + l] * 1000.0 / lp.A
+            qo   = compute_outflow(lp.Kout, lp.nout, lp.Smax_mm, S_mm) * 1e-3
+            qi   = compute_outflow(lp.Kinf, lp.ninf, lp.Smin_mm, S_mm) * 1e-3
+            infl = l == 1 ? I_nbs : prev_qi
+            dV[nt + base + l] = infl - qo - qi
+            prev_qi = qi
+        end
     end
     return nothing
 end
@@ -826,6 +996,35 @@ function _build_steadystate_callback(p::DynNetworkRateParams,
             # analogue of `fill_trap_until`'s stagnation/sign-change stop).
             settled = abs(rate) < abstol ||
                       (du0[e] != 0.0 && signbit(rate) != signbit(du0[e]))
+            settled || return false
+        end
+        return true
+    end
+    return DiscreteCallback(condition, terminate!; save_positions = (false, false))
+end
+
+# Steady-state callback for NBS networks.  The `_routed_inflow`-based check above
+# cannot express the NBS layer dynamics, so this evaluates the actual rate function
+# and settles when |dV/dt| < abstol (or the rate has crossed its starting sign)
+# across every index in `ss_indices` — the non-frozen evolving traps plus all NBS
+# layer states.  A non-NBS evolving trap that is spilling still vetoes (its :fill
+# wins).  `dbuf` is reused across calls.
+function _build_steadystate_callback_nbs(p::DynNetworkRateParams,
+                                         evolving::AbstractVector{<:Integer},
+                                         ss_indices::AbstractVector{<:Integer},
+                                         abstol::Real,
+                                         du0::AbstractVector{<:Real})
+    trap_test = Int[i for i in ss_indices if i <= length(p.geom)]
+    dbuf = zeros(Float64, length(du0))
+    function condition(u, t, integrator)
+        for e in trap_test
+            u[e] >= p.geom[e].capacity && return false   # veto: :fill wins
+        end
+        dynNetworkRateFunction!(dbuf, u, p, t)
+        for i in ss_indices
+            rate = dbuf[i]
+            settled = abs(rate) < abstol ||
+                      (du0[i] != 0.0 && signbit(rate) != signbit(du0[i]))
             settled || return false
         end
         return true
@@ -1045,10 +1244,11 @@ function solveDynNetwork!(state::AbstractVector{Float64},
                           zvt = nothing)
 
     nt = length(net.traps)
-    @assert length(state) == nt "state must have one entry per trap in net.traps"
-
     p  = _build_rate_params(tstruct, net, infiltration, inflow;
                             path_inflow=path_inflow, zvt=zvt)
+    @assert length(state) == nt + _nbs_state_count(p) """
+        state must have one entry per trap in net.traps plus one per NBS layer \
+        ($(nt) traps + $(_nbs_state_count(p)) NBS layer states)"""
     V0 = copy(state)   # immutable snapshot; ODE evolves this, state is updated at the end
 
     _validate_network(tstruct, net, V0, p.geom)
@@ -1089,12 +1289,19 @@ function solveDynNetwork!(state::AbstractVector{Float64},
     # FULL traps (V == C) are handled only by the :unspill callback.
     evolving = [i for i in 1:nt if V0[i] != p.geom[i].capacity]
 
+    # Steady-state test index set.  NBS layer states also evolve but never trigger a
+    # topology event, so they enter the steady test only; NBS trap nodes are frozen
+    # (dV == 0), so they are dropped from it.  Without NBS this is just `evolving`.
+    ss_indices = p.nbsplan === nothing ? evolving :
+        vcat(Int[i for i in evolving if !(i in p.nbsplan.trap_set)],
+             collect((nt + 1):(nt + p.nbsplan.nlayer_total)))
+
     # Nothing evolves: steady state.
     isempty(evolving) && return (time = Inf, trap = 0, kind = :none)
 
-    # All evolving traps at or near zero rate: steady state already.
+    # All evolving states at or near zero rate: steady state already.
     # (abstol is a rate tolerance here, not a state classification guard.)
-    all(abs(du0[i]) <= abstol for i in evolving) &&
+    all(abs(du0[i]) <= abstol for i in ss_indices) &&
         return (time = Inf, trap = 0, kind = :none)
 
     # Integrate to the first topology-changing event or steady state.
@@ -1103,7 +1310,9 @@ function solveDynNetwork!(state::AbstractVector{Float64},
     #         across all evolving traps (step-function infil → must check at accepted steps,
     #         not interpolated points).
     cb_topo, event = _build_event_callback(p, evolving, V0, nreg)
-    cb_ss = _build_steadystate_callback(p, evolving, abstol, du0)
+    cb_ss = p.nbsplan === nothing ?
+        _build_steadystate_callback(p, evolving, abstol, du0) :
+        _build_steadystate_callback_nbs(p, evolving, ss_indices, abstol, du0)
     # Cap tmax at a large but finite value so DiffEq never receives Inf as a tspan
     # endpoint (which triggers an internal range(t, Inf, n) that Julia rejects).  1e12
     # is many orders of magnitude beyond any physical simulation horizon.

@@ -193,7 +193,12 @@ function _make_context(net::DynNetwork, tstruct, rateinfo, seed_pool, state0, cu
     global_ix = Int[t.trap_ix for t in net.traps]
     occ       = _occupied_cells(tstruct, [net])
     seeds     = CartesianIndex{2}[s for s in seed_pool if s in occ]
-    state     = Float64[state0(g) for g in global_ix]
+    # Trap volumes, then one appended state per NBS layer (in `net.nbs` order, matching
+    # `_build_nbs_plan`'s state_base offsets).  Layer states start empty; cross-period
+    # persistence is added in 3c.
+    nlayers   = sum(length(tstruct.nbs[nb.placement_ix].system.layers)
+                    for nb in net.nbs; init = 0)
+    state     = vcat(Float64[state0(g) for g in global_ix], zeros(Float64, nlayers))
     return DynNetworkContext(net, state, global_ix,
                              _inflow_sources(net, tstruct), seeds,
                              cur_time,
