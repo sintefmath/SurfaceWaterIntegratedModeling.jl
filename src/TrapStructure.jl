@@ -27,8 +27,8 @@ A struct representing a watershed drainage trap for topographical analysis.
 - `agglomerations::Graphs.SimpleDiGraph`: hierarchy of sub/supertraps, presented as a
                                           graph structure
 - `clip_mask::Union{Matrix{Bool}, Nothing}`: clip mask (0: active terrain, 1: clipped away)
-- `sinks::Union{Vector{Tuple{Int, Int}}, Nothing}`: list of sinks, in term of grid
-                                                    cell coordinates
+- `sinks::Vector{CartesianIndex{2}}`: list of sinks, in term of grid
+                                      cell coordinates
 - `cut_edges::Dict{CartesianIndex{2}, Vector{CartesianIndex{2}}}`:
                                               Dict of cut edges (barriers), i.e. edges
                                               that block flow between adjacent cells

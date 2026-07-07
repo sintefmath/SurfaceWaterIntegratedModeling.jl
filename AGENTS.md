@@ -21,6 +21,7 @@ Key subsystems:
 | Trap volumes & hierarchy    | `trapvolumes.jl`, `sshierarchy.jl` |
 | Full static analysis        | `spillanalysis.jl`                 |
 | Dynamic fill sequencing     | `fill_sequence/` (six files)       |
+| Capacity-limited elements (culverts and NBS) | `dynamics/` (four files) |
 | Flow intensity over terrain | `watercourses.jl`                  |
 | IO & visualisation          | `IOandplot.jl`                     |
 

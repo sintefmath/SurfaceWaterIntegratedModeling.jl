@@ -1106,7 +1106,7 @@ on grid nodes, thus creating an equivalent polyline with potentially more segmen
 No segments on the resulting polyline should run through grid nodes except at start
 and end points.
 """
-function _subdivide_polyline(pl::Vector{Tuple{Int, Int}})
+function _subdivide_polyline(pl::Vector{CartesianIndex{2}})
     @assert length(pl) >= 2
     result = [pl[1]]
     for i in 1:length(pl)-1
@@ -1119,7 +1119,7 @@ function _subdivide_polyline(pl::Vector{Tuple{Int, Int}})
         Dx_step = Dx ÷ subdiv
         Dy_step = Dy ÷ subdiv
         for j in 1:subdiv
-            newpt = (pl[i][1] + j*Dx_step, pl[i][2] + j*Dy_step)
+            newpt = CartesianIndex(pl[i][1] + j*Dx_step, pl[i][2] + j*Dy_step)
             push!(result, newpt)
         end
     end
@@ -1127,7 +1127,7 @@ function _subdivide_polyline(pl::Vector{Tuple{Int, Int}})
 end
 
 # ----------------------------------------------------------------------------
-function polyline_grid_intersections(pl::Vector{Tuple{Int, Int}}; usediags=true)
+function polyline_grid_intersections(pl::Vector{CartesianIndex{2}}; usediags=true)
     @assert length(pl) >= 2
     result = Set{Tuple{CartesianIndex{2}, CartesianIndex{2}}}()
     subpl = _subdivide_polyline(pl)
