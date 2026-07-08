@@ -6,9 +6,11 @@ import Images
 # @@@ NB: Domain currently only implemented for spillfield!
 """
     spillanalysis(grid; usediags=true, clip_mask=nothing, sinks=Vector{CartesianIndex{2}}(),
-                  lengths=nothing, domain=nothing, merge_outregions=false, verbose=false,
+                  waterbodies=nothing, lengths=nothing, domain=nothing,
+                  merge_outregions=false, verbose=false,
                   culverts=Vector{Tuple{CartesianIndex{2}, CartesianIndex{2}}}(),
-                  barriers=Vector{Vector{CartesianIndex{2}}}())
+                  barriers=Vector{Vector{CartesianIndex{2}}}(),
+                  nbs=NBSPlacement[])
 
 Analyse a terrain and compute all key information regarding its trap structure.
 
@@ -29,7 +31,11 @@ documentation for details.
 - `sinks::Union{Vector{CartesianIndex{2}}, Matrix{Bool}}=Vector{CartesianIndex{2}}()`:
       vector containing (i, j) grid coordinates of any point sinks in the grid, if any.
       Can also be a Matrix{Bool} of same size as `grid`, indicating the sink locations.
-- `lengths::Union{Tuple{<:Real}, Nothing}=nothing`: 
+- `waterbodies::Union{Matrix{<:Bool}, Nothing}=nothing`:
+      if present, a mask (same size as `grid`) of cells already covered by standing
+      water.  Each connected water region is flattened to a uniform height before the
+      analysis so it forms a single body rather than spurious sub-traps.
+- `lengths::Union{Tuple{<:Real}, Nothing}=nothing`:
       tuple expressing the length and width of the grid (used to compute aspect ratios)
 - `domain::Union{Domain2D, Nothing}=nothing`: 
       restrict computation to the specified domain of the grid.  @@@ Note that this is not
@@ -43,10 +49,15 @@ documentation for details.
       vector of culverts, each defined by a pair of grid coordinates. Culverts allow flow
       between two cells that would otherwise be blocked by terrain.
 - `barriers::Vector{Vector{CartesianIndex{2}}}=Vector{Vector{CartesianIndex{2}}}()`:
-      vector of barriers, where each barrier is a polyline defined by a sequence of grid 
+      vector of barriers, where each barrier is a polyline defined by a sequence of grid
       coordinates. Barriers block flow between cells along the polyline.
+- `nbs::Vector{NBSPlacement}=NBSPlacement[]`:
+      Nature-Based-Solution installations (see [`NBSPlacement`](@ref)) to attribute to the
+      terrain. Each footprint is normalised, dug into a single positive-volume artificial
+      trap before the analysis, and its outlets resolved against the computed regions; the
+      dynamic solver then drives these traps as rate-limited elements. Empty by default.
 
-See also [`TrapStructure`](@ref), [`fill_sequence`](@ref).
+See also [`TrapStructure`](@ref), [`fill_sequence`](@ref), [`NBSPlacement`](@ref).
 """
 function spillanalysis(grid::Matrix{<:Real};
                   usediags::Bool=true,
