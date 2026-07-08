@@ -111,8 +111,8 @@ footprints dug to the same level would merge into one trap.
 function _dig_nbs_traps!(grid::AbstractMatrix, placements)
     isempty(placements) && return nothing
     # Note: `grid` here is the modelling copy (`gridcpy`) in `spillanalysis`, so
-    # the caller's original terrain is untouched.  Height unit assumed metres if
-    # ambiguous [Q3]; NBS_DIG_DROP is in that same unit.
+    # the caller's original terrain is untouched.  NBS_DIG_DROP is in the same unit
+    # as the unit used for the terrain elevations (e.g. meters).
     level = minimum(grid) - NBS_DIG_DROP
     for p in placements
         for c in p.footprint

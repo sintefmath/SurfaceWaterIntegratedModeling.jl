@@ -4,8 +4,12 @@ using LazyArtifacts
 include("basicTestFuns.jl")
 include("watercourses_test.jl")
 include("dynamics_test.jl")
-include("nbs_test.jl")
-include("nbs_dynamic_test.jl")
+# NBS tests disabled: the NBS integration is being re-architected as a dynamic
+# overlay (see agent/NBS_OPTION1_OVERLAY_PLAN.md).  Stage A severs NBS from the
+# static analysis, so these old carve-based tests no longer apply; new overlay
+# tests land in the B/C stages.
+# include("nbs_test.jl")
+# include("nbs_dynamic_test.jl")
 
 
 surf1_file = joinpath(artifact"swim_testdata", "data", "small", "mini.txt")

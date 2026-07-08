@@ -9,8 +9,7 @@ import Images
                   waterbodies=nothing, lengths=nothing, domain=nothing,
                   merge_outregions=false, verbose=false,
                   culverts=Vector{Tuple{CartesianIndex{2}, CartesianIndex{2}}}(),
-                  barriers=Vector{Vector{CartesianIndex{2}}}(),
-                  nbs=NBSPlacement[])
+                  barriers=Vector{Vector{CartesianIndex{2}}}())
 
 Analyse a terrain and compute all key information regarding its trap structure.
 
@@ -51,13 +50,8 @@ documentation for details.
 - `barriers::Vector{Vector{CartesianIndex{2}}}=Vector{Vector{CartesianIndex{2}}}()`:
       vector of barriers, where each barrier is a polyline defined by a sequence of grid
       coordinates. Barriers block flow between cells along the polyline.
-- `nbs::Vector{NBSPlacement}=NBSPlacement[]`:
-      Nature-Based-Solution installations (see [`NBSPlacement`](@ref)) to attribute to the
-      terrain. Each footprint is normalised, dug into a single positive-volume artificial
-      trap before the analysis, and its outlets resolved against the computed regions; the
-      dynamic solver then drives these traps as rate-limited elements. Empty by default.
 
-See also [`TrapStructure`](@ref), [`fill_sequence`](@ref), [`NBSPlacement`](@ref).
+See also [`TrapStructure`](@ref), [`fill_sequence`](@ref).
 """
 function spillanalysis(grid::Matrix{<:Real};
                   usediags::Bool=true,
@@ -71,10 +65,7 @@ function spillanalysis(grid::Matrix{<:Real};
                   culverts::Vector{Tuple{CartesianIndex{2}, CartesianIndex{2}}}=
                            Vector{Tuple{CartesianIndex{2}, CartesianIndex{2}}}(),
                   barriers::Vector{Vector{CartesianIndex{2}}}=
-                           Vector{Vector{CartesianIndex{2}}}(),
-                  # `nbs_elements.jl` (which defines `NBSPlacement`) is included
-                  # before this file, so the type can be named in the signature.
-                  nbs::Vector{NBSPlacement}=NBSPlacement[])
+                           Vector{Vector{CartesianIndex{2}}}())
 
     verbose && println("Entering spillfield")
 
@@ -92,14 +83,6 @@ function spillanalysis(grid::Matrix{<:Real};
     # if waterbodies are provided, ensure that the regions they cover are of uniform height
     if waterbodies !== nothing
         _flatten_waterbody_regions!(gridcpy, waterbodies)
-    end
-
-    # attribute NBS placements as artificial traps: normalise/validate them, then
-    # dig each footprint down so it forms a single positive-volume trap before the
-    # spill analysis runs.  Outlets are resolved afterwards (see `_resolve_nbs!`).
-    if !isempty(nbs)
-        _prepare_nbs!(nbs, gridcpy)
-        _dig_nbs_traps!(gridcpy, nbs)
     end
 
     # ensure culverts are directed from higher to lower elevation
@@ -130,9 +113,6 @@ function spillanalysis(grid::Matrix{<:Real};
     spoints, regbnd = spillpoints(gridcpy, regions, usediags=usediags,
                                   cut_edges=cut_edge_dict)
 
-    # verbose && println("Eliminating flat traps")
-    # _eliminate_flat_traps!(regions, spoints, flowgraph, trap_bottoms, gridcpy)
-    
     verbose && println("entering sshierarchy")
     subtrapgraph, lowest_regions = sshierarchy!(gridcpy, regions, spoints, regbnd)
     
@@ -165,13 +145,6 @@ function spillanalysis(grid::Matrix{<:Real};
 
     wbody_cells = isnothing(waterbodies) ? Vector{CartesianIndex{2}}() : findall(waterbodies)
 
-    # resolve each NBS placement's per-layer outlets against the computed regions
-    # and spillpoints (validation + backfill of unspecified outlets), mutating the
-    # placements in place before they are stored in the TrapStructure.
-    if !isempty(nbs)
-        _resolve_nbs!(nbs, regions, spoints, gridcpy, supertraps_of)
-    end
-
     return TrapStructure{eltype(grid)}(gridcpy,
                                        flowgraph,
                                        trap_bottoms,
@@ -187,7 +160,10 @@ function spillanalysis(grid::Matrix{<:Real};
                                        sinks,
                                        wbody_cells,
                                        cut_edge_dict,
-                                       nbs)
+                                       # NBS no longer participate in the static analysis
+                                       # (they are a purely dynamic / fill_sequence concern
+                                       # now); the field is retained but always empty here.
+                                       NBSPlacement[])
 end
 
 # ----------------------------------------------------------------------------
