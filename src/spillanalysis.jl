@@ -61,15 +61,11 @@ function spillanalysis(grid::Matrix{<:Real};
                            Vector{Tuple{CartesianIndex{2}, CartesianIndex{2}}}(),
                   barriers::Vector{Vector{CartesianIndex{2}}}=
                            Vector{Vector{CartesianIndex{2}}}(),
-                  # `NBSPlacement` is defined in a separately-included file; keep the
-                  # default untyped and resolve it in the body, mirroring how
-                  # `fill_sequence` handles its `culverts` argument.
-                  nbs = nothing)
+                  # `nbs_elements.jl` (which defines `NBSPlacement`) is included
+                  # before this file, so the type can be named in the signature.
+                  nbs::Vector{NBSPlacement}=NBSPlacement[])
 
     verbose && println("Entering spillfield")
-
-    # resolve the NBS placement default (an empty vector when none supplied)
-    nbs = (nbs === nothing) ? NBSPlacement[] : nbs
 
     # a copy of the grid will be returned by the TrapStructure, and there may be
     # modifications to it if waterbodies are provided

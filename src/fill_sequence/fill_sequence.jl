@@ -33,14 +33,10 @@ function fill_sequence(tstruct::TrapStructure{<:Real},
             weather_events::Vector{WeatherEvent};
             time_slack::Real = 0.0,
             infiltration::Union{Matrix{<:Real}, Nothing} = nothing,
-            dyn_traps::Union{Nothing, Vector{Int}} = nothing,
-            culverts = nothing,
+            dyn_traps::Vector{Int} = Int[],
+            culverts::Vector{DynCulvert} = DynCulvert[],
             verbose::Bool=false)::Vector{SpillEvent}
     @assert !isempty(weather_events)
-    # `DynCulvert` is defined in a later-included file, so the empty default is
-    # resolved here (in the body) rather than in the signature.
-    dyn_traps = isnothing(dyn_traps) ? Int[] : dyn_traps
-    culverts  = isnothing(culverts)  ? DynCulvert[] : culverts
 
     num_traps = numtraps(tstruct)
     (num_traps == 0) && return # if the terrain has no traps, there is nothing to do
