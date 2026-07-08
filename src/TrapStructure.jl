@@ -35,10 +35,7 @@ A struct representing a watershed drainage trap for topographical analysis.
 - `nbs::Vector{NBSPlacement}`: Nature-Based-Solution installations attributed to this
                                terrain (empty when none).  Each footprint is treated as
                                an artificial trap during the static analysis; the dynamic
-                               solver drives them as rate-limited elements.  (Adding this
-                               field is a deliberate exception to the "no new TrapStructure
-                               fields" rule — NBS placements must be attributed a spill
-                               region at construction time.)
+                               solver drives them as rate-limited elements.
 """
 mutable struct TrapStructure{T<:Real}
 

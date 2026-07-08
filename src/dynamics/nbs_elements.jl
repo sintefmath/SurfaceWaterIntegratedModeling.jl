@@ -282,11 +282,12 @@ governed by the layered storage model `system` (an [`NBSSystem`](@ref)).
 `outlet` convention) where the system's discharge re-enters the terrain.
 
 !!! note
-    @@@ Wiring an `NBSPlacement` into the network rate function (analogous to
-    `culvert_rate` → `_culvert_flow` → `_route_flow`) is not yet implemented.
-    The per-layer rate behaviour should follow `NBSNetworkRateFunction!` in the
-    standalone NBS package (outflow/infiltration cascade via `compute_outflow`);
-    evapotranspiration is deferred for now.
+    Wired into the network rate function via `_build_nbs_plan` → the NBS layer
+    loop in `dynNetworkRateFunction!` (outflow/infiltration cascade through
+    `compute_outflow`), with per-layer discharge routed to `outlets` by
+    `_nbs_links` + `_route_flow`.
+    @@@ Evapotranspiration (the `EVCoeff`/`EVS11` layer params) is not yet
+    applied in the network solver — deferred for now.
 """
 struct NBSPlacement <: DynObject
     system::NBSSystem
