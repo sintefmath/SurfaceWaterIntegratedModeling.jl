@@ -39,7 +39,8 @@ function fill_sequence(tstruct::TrapStructure{<:Real},
     @assert !isempty(weather_events)
 
     num_traps = numtraps(tstruct)
-    (num_traps == 0) && return # if the terrain has no traps, there is nothing to do
+    (num_traps == 0) && return SpillEvent[] # no traps -> empty sequence (return
+                                            # type is Vector{SpillEvent})
     
     # initialize infiltration map from user input
     infiltration =
