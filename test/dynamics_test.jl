@@ -146,9 +146,10 @@ end
     @test Set(comps[1][1]) == Set([1, 2])
 
     # a lone trap (no path) survives as its own component
+    # (_components returns (path_ids, trap_ids, nbs_ids); no NBS here -> empty nbs_ids)
     comps = SWIM._components(DynFlowPath[], [DynTrap(100, 0)], nocv...)
     @test length(comps) == 1
-    @test comps[1] == (Int[], [1])
+    @test comps[1] == (Int[], [1], Int[])
 end
 
 @testset "_culvert_owners: trap footprint wins over flow path" begin

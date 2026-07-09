@@ -453,10 +453,14 @@ end
 # subnet may cover another target.
 function _expand_with_nbs(tstruct, subnets, nbs_objs::Vector{DynNBS}, full_traps)
     isempty(nbs_objs) && return subnets
+    LI = LinearIndices(tstruct.topography)
     CI = CartesianIndices(tstruct.topography)
+    footcell = Set{Int}(k for nb in nbs_objs for k in nb.footprint)   # any element's footprint
     targets = CartesianIndex{2}[]                     # every re-emit target cell, once
     seen    = Set{CartesianIndex{2}}()
-    add!(c) = (c in seen || (push!(seen, c); push!(targets, c)))
+    # A target landing on a footprint (NBS→NBS) is captured by that element, so nothing
+    # flows downstream from it — do not seed a (spurious) subnet there.
+    add!(c) = (LI[c] in footcell || c in seen || (push!(seen, c); push!(targets, c)))
     for nb in nbs_objs
         for (cell, _w) in _nbs_exit_weights(tstruct, nb.footprint)
             cell == 0 && continue                     # off-domain fraction: nothing downstream
@@ -706,56 +710,66 @@ function _merge_networks(networks::Vector{DynNetwork}, cv_objs::Vector{DynCulver
     # resolve each culvert's inlet/outlet to its owning path or trap
     inlet_owner, outlet_owner = _culvert_owners(tstruct, all_paths, all_traps, cv_objs)
 
-    # NBS: the union-find owner nodes of each element's re-emit targets, so their
-    # components are united (an element spanning two components joins them) and the
-    # element is assigned to that component in `_build_component`.
-    nbs_groups = _nbs_owner_nodes(tstruct, all_paths, all_traps, nbs_objs)
+    # NBS: union-find edges joining each element to the components its re-emit lands in
+    # (a path, a trap, or — for NBS→NBS coupling — another element's footprint).  Each
+    # element is a union-find node in its own right (np+nt+e), so a fully-coupled element
+    # with no path/trap target still forms/joins a component.
+    nbs_edges = _nbs_union_edges(tstruct, all_paths, all_traps, nbs_objs)
 
-    # _components: group paths+traps into disjoint connected components (culverts and
-    # NBS re-emit targets join the components of their endpoints); _build_component:
-    # rebuild each, attaching the culverts and NBS elements it owns.
+    # _components: group paths+traps+NBS into disjoint connected components (culverts and
+    # NBS re-emit joins the components of their endpoints); _build_component: rebuild each,
+    # attaching the culverts and NBS elements it owns.
     return [_build_component(all_paths, all_traps, cv_objs, inlet_owner, outlet_owner,
-                             nbs_objs, nbs_groups, pids, tids)
-            for (pids, tids) in _components(all_paths, all_traps, inlet_owner, outlet_owner,
-                                            nbs_groups)]
+                             nbs_objs, pids, tids, nids)
+            for (pids, tids, nids) in
+                _components(all_paths, all_traps, inlet_owner, outlet_owner,
+                            nbs_edges, length(nbs_objs))]
 end
 
-# For each NBS element (in `nbs_objs` order), the union-find node ids of the paths
-# and traps that own its re-emit targets — the footprint's terrain exit cells (from
-# `_nbs_exit_weights`) and its piped outlet cells.  Node numbering matches
-# `_components`: path global index `pi` is node `pi`, trap global index `ti` is node
-# `np + ti`.  A target on no network cell (off-domain / uncovered) yields no node.
-# @@@ NBS→NBS: a re-emit target landing on another NBS's footprint (not a path/trap
-#     cell) currently resolves to no node, so the two elements are not united into one
-#     component and the variable-rate NBS→NBS coupling is not yet captured.  Deferred
-#     (needs the footprint-as-receiver capture); handle when that lands.
-function _nbs_owner_nodes(tstruct, all_paths, all_traps, nbs_objs::Vector{DynNBS})
-    isempty(nbs_objs) && return Vector{Int}[]
-    np = length(all_paths)
+# Union-find edges tying each NBS element to whatever its overflow re-emit reaches, so
+# coupled pieces land in one component.  Node numbering matches `_components`: path
+# global index `pi` is node `pi`, trap global index `ti` is `np + ti`, NBS element `e`
+# is `np + nt + e`.  For every re-emit target of element `e` (its footprint's terrain
+# exit cells from `_nbs_exit_weights`, and its piped outlets) an edge joins node(e) to
+# the target's owner: a trap footprint cell, a flow-path cell, or — the NBS→NBS case —
+# another element's footprint cell (looked up first, so an element captures re-emit
+# landing on it).  A target off the network / off the domain yields no edge (that water
+# leaves), and the lone element still exists as its own singleton node.
+function _nbs_union_edges(tstruct, all_paths, all_traps, nbs_objs::Vector{DynNBS})
+    isempty(nbs_objs) && return Tuple{Int,Int}[]
+    np = length(all_paths); nt = length(all_traps)
+    LI = LinearIndices(tstruct.topography)
     CI = CartesianIndices(tstruct.topography)
-    trap_cell = Dict{CartesianIndex{2},Int}()
+
+    nbs_cell = Dict{Int,Int}()                 # linear footprint cell -> element index
+    for (e, nb) in enumerate(nbs_objs), k in nb.footprint
+        nbs_cell[k] = e
+    end
+    trap_cell = Dict{Int,Int}()
     for (ti, t) in enumerate(all_traps), k in tstruct.footprints[t.trap_ix]
-        trap_cell[CI[k]] = ti
+        trap_cell[k] = ti
     end
-    path_cell = Dict{CartesianIndex{2},Int}()
+    path_cell = Dict{Int,Int}()
     for (pi, p) in enumerate(all_paths), c in p.cells
-        path_cell[c] = pi
+        path_cell[LI[c]] = pi
     end
-    node(cell) = haskey(trap_cell, cell) ? np + trap_cell[cell] :
-                 haskey(path_cell, cell) ? path_cell[cell] : 0
-    groups = Vector{Int}[]
-    for nb in nbs_objs
-        g = Int[]
+    # NBS footprint capture wins over path/trap membership (the element draws the water in).
+    node(cell) = haskey(nbs_cell,  cell) ? np + nt + nbs_cell[cell] :
+                 haskey(trap_cell, cell) ? np + trap_cell[cell]     :
+                 haskey(path_cell, cell) ? path_cell[cell]          : 0
+
+    edges = Tuple{Int,Int}[]
+    for (e, nb) in enumerate(nbs_objs)
+        en = np + nt + e
         for (cell, _w) in _nbs_exit_weights(tstruct, nb.footprint)
             cell == 0 && continue
-            n = node(CI[cell]); n > 0 && push!(g, n)
+            n = node(cell); (n > 0 && n != en) && push!(edges, (en, n))
         end
         for oc in nb.outlets
-            n = node(oc); n > 0 && push!(g, n)
+            n = node(LI[oc]); (n > 0 && n != en) && push!(edges, (en, n))
         end
-        push!(groups, unique(g))
     end
-    return groups
+    return edges
 end
 
 # Collapse duplicate trap entries (same `trap_ix` reached from several subnetworks)
@@ -902,9 +916,9 @@ end
 # A trap with no connections forms its own singleton component (a lone terminal
 # trap, e.g. reached only via a culvert), which is preserved rather than dropped.
 function _components(all_paths, all_traps, inlet_owner, outlet_owner,
-                     nbs_groups = Vector{Int}[])
+                     nbs_edges = Tuple{Int,Int}[], nnbs::Int = 0)
     np, nt = length(all_paths), length(all_traps)
-    parent = collect(1:(np + nt))
+    parent = collect(1:(np + nt + nnbs))
 
     find_root(x) = (while parent[x] != x; parent[x] = parent[parent[x]]; x = parent[x]; end; x)
     function unite!(x, y)
@@ -927,23 +941,28 @@ function _components(all_paths, all_traps, inlet_owner, outlet_owner,
         (io[1] == :none || oo[1] == :none) && continue
         unite!(node(io), node(oo))
     end
-    # An NBS re-emitting into several components joins them (its overflow forces flow
-    # into each), so all its re-emit-target owner nodes share one component.
-    for g in nbs_groups, k in 2:length(g)
-        unite!(g[1], g[k])
+    # An NBS element joins the component of everything its overflow re-emits into
+    # (a path, a trap, or another element's footprint — the NBS→NBS case).
+    for (a, b) in nbs_edges
+        unite!(a, b)
     end
 
     paths_of = Dict{Int, Vector{Int}}()
     traps_of = Dict{Int, Vector{Int}}()
+    nbs_of   = Dict{Int, Vector{Int}}()
     for pi in 1:np
         push!(get!(paths_of, find_root(pi), Int[]), pi)
     end
     for ti in 1:nt
         push!(get!(traps_of, find_root(np + ti), Int[]), ti)
     end
+    for e in 1:nnbs
+        push!(get!(nbs_of, find_root(np + nt + e), Int[]), e)
+    end
 
-    roots = union(keys(paths_of), keys(traps_of))
-    return [(get(paths_of, r, Int[]), get(traps_of, r, Int[])) for r in roots]
+    roots = union(keys(paths_of), keys(traps_of), keys(nbs_of))
+    return [(get(paths_of, r, Int[]), get(traps_of, r, Int[]), get(nbs_of, r, Int[]))
+            for r in roots]
 end
 
 # Return (sorted_path_ids, sorted_trap_ids) in upstream-to-downstream order,
@@ -1017,7 +1036,7 @@ end
 # Culverts whose inlet/outlet owners lie in this component are attached to the
 # owning local path or trap via its culvert_inlets / culvert_outlets list.
 function _build_component(all_paths, all_traps, cv_objs, inlet_owner, outlet_owner,
-                          nbs_objs, nbs_groups, global_path_ids, global_trap_ids)
+                          nbs_objs, global_path_ids, global_trap_ids, global_nbs_ids)
     path_set = Set(global_path_ids)
     trap_set = Set(global_trap_ids)
 
@@ -1075,16 +1094,9 @@ function _build_component(all_paths, all_traps, cv_objs, inlet_owner, outlet_own
         get(trap_outlets, gti, Int[])
     ) for gti in global_trap_ids]
 
-    # NBS elements owned by this component: any element with a re-emit-target owner
-    # node in this component (path or trap).  Node n is path n (n <= np) or trap n-np.
-    comp_nbs = DynNBS[]
-    if !isempty(nbs_objs)
-        np = length(all_paths)
-        in_comp_node(n) = n <= np ? (n in path_set) : ((n - np) in trap_set)
-        for (e, nb) in enumerate(nbs_objs)
-            any(in_comp_node, nbs_groups[e]) && push!(comp_nbs, nb)
-        end
-    end
+    # NBS elements owned by this component (union-find grouped them with their re-emit
+    # targets in `_components`).
+    comp_nbs = DynNBS[nbs_objs[e] for e in global_nbs_ids]
 
     return DynNetwork(local_paths, local_traps, [cv_objs[gci] for gci in comp_cv], comp_nbs)
 end

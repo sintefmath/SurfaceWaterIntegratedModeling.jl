@@ -245,3 +245,54 @@ end
     @test qo ≈ I atol = 1e-2                            # outflow balances the captured inflow
     @test S_mm ≈ Smax + I * 1000 / K rtol = 1e-3        # settled at the analytic steady storage
 end
+
+# ---------------------------------------------------------------------------
+# Stage B2: NBS→NBS coupling.  When element A's overflow re-emits onto element B's
+# footprint, A and B must land in one network component and B must capture A's
+# (variable, storage-driven) overflow as extra layer-1 inflow — with no mass leak.
+# The coupling is storage-driven, so it is a one-way forcing read from a state
+# snapshot: no algebraic loop, no topological ordering.  Plan §4/§7a, decision 3.
+# ---------------------------------------------------------------------------
+@testset "NBS→NBS coupling (variable-rate, mass-conserving)" begin
+    N    = 12
+    grid = Float64[j for i in 1:N, j in 1:N]           # east-rising plane, flow due west
+    ts   = spillanalysis(grid)
+    LI   = LinearIndices(size(grid)); CI = CartesianIndices(size(grid))
+    full = findall(fill(false, numtraps(ts)))
+    A    = Float64(N)
+
+    # A at column 6 re-emits west onto B at column 5 (A's exit boundary == B's footprint).
+    colA = Int[LI[i, 6] for i in 1:N]
+    colB = Int[LI[i, 5] for i in 1:N]
+    plA  = NBSPlacement(puddle(10.0; kOUT = 2.0), colA, 1, CartesianIndex{2}[])
+    plB  = NBSPlacement(puddle(10.0; kOUT = 3.0), colB, 1, CartesianIndex{2}[])
+    dA   = DynNBS(1, colA, 1, CartesianIndex{2}[])
+    dB   = DynNBS(2, colB, 1, CartesianIndex{2}[])
+
+    comps = setup_network(ts, [CI[LI[3, 9]]], full; nbs = [dA, dB])
+    net   = only(filter(c -> !isempty(c.nbs), comps))
+    @test length(net.nbs) == 2                          # A and B in ONE component (coupled)
+    nt    = length(net.traps)
+
+    IA, IB = 4.0, 5.0
+    p    = SWIM._build_rate_params(ts, net, zeros(N, N), zeros(nt);
+                                   nbs_placements = [plA, plB], nbs_inflow = [IA, IB])
+    plan = p.nbsplan
+    kA   = findfirst(==(1), plan.placement_ix)          # local index of A (placement 1)
+    kB   = findfirst(==(2), plan.placement_ix)          # local index of B (placement 2)
+    @test isempty(plan.nbs_into[kA])                    # A has no upstream feeder
+    @test length(plan.nbs_into[kB]) == N                # B captures A's N exit slots
+
+    V   = vcat(zeros(nt), zeros(2)); V[nt + plan.state_base[kA] + 1] = 80.0
+    V[nt + plan.state_base[kB] + 1] = 60.0
+    dV  = zeros(nt + 2)
+    SWIM.dynNetworkRateFunction!(dV, V, p)
+    SA  = V[nt + plan.state_base[kA] + 1]; SB = V[nt + plan.state_base[kB] + 1]
+    qoA = SWIM.compute_outflow(2.0, 1.0, 10.0, SA * 1000 / A) * 1e-3
+    qoB = SWIM.compute_outflow(3.0, 1.0, 10.0, SB * 1000 / A) * 1e-3
+    dSA = dV[nt + plan.state_base[kA] + 1]; dSB = dV[nt + plan.state_base[kB] + 1]
+
+    @test dSA ≈ IA - qoA                                # A: static in, overflow out
+    @test dSB ≈ IB + qoA - qoB                          # B: static in + A's overflow, own overflow out
+    @test IA + IB ≈ dSA + dSB + qoB                     # mass: nothing created or lost (no leak)
+end

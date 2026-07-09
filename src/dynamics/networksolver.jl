@@ -681,6 +681,9 @@ struct NBSPlan
     n_slots         ::Int                 # number of on-network overflow-delivery slots
     nbs_path_events ::Vector{Vector{Tuple{Int,Int}}}  # per flow path: (cell position, slot)
     nbs_trap_outlets::Vector{Vector{Int}}             # per trap: slots delivered into it
+    nbs_into        ::Vector{Vector{Int}}             # per NBS element: slots re-emitted onto its
+                                                      # footprint by an upstream element (NBS→NBS
+                                                      # capture, read as extra layer-1 inflow)
 end
 
 # Number of appended NBS layer states for a rate-params object (0 when no NBS).
@@ -697,6 +700,10 @@ function _build_nbs_plan(net::DynNetwork, tstruct, placements::Vector{NBSPlaceme
     isempty(net.nbs) && return nothing
     LI = LinearIndices(tstruct.topography)
 
+    nbs_cell = Dict{Int,Int}()                 # linear footprint cell -> local NBS element index
+    for (e, nb) in enumerate(net.nbs), k in nb.footprint
+        nbs_cell[k] = e
+    end
     trap_cell = Dict{Int,Int}()                # linear cell -> local trap index
     for (ti, t) in enumerate(net.traps), k in tstruct.footprints[t.trap_ix]
         trap_cell[k] = ti
@@ -706,19 +713,25 @@ function _build_nbs_plan(net::DynNetwork, tstruct, placements::Vector{NBSPlaceme
         path_cell[LI[c]] = (pi, pos)
     end
 
-    np = length(net.flow_paths); ntr = length(net.traps)
+    np = length(net.flow_paths); ntr = length(net.traps); nnb = length(net.nbs)
     placement_ix = Int[]; state_base = Int[]
     layers       = Vector{NBSLayerParams}[]
     layer_slots  = Vector{Vector{Tuple{Int,Float64}}}[]
     nbs_path_events  = [Tuple{Int,Int}[] for _ in 1:np]
     nbs_trap_outlets = [Int[]            for _ in 1:ntr]
+    nbs_into         = [Int[]            for _ in 1:nnb]
     base = 0; slot = 0
 
     # Assign a delivery slot for fraction `w` of a layer's overflow landing at linear
     # cell `cell`; returns (slot, w) or nothing if the cell is off-network (discharge
-    # then exits the domain and is simply not delivered).
+    # then exits the domain and is simply not delivered).  A landing on another element's
+    # footprint (NBS→NBS) is captured by that element: the slot is filled by this layer's
+    # overflow and read as extra inflow by the receiver (see the rate function).  Footprint
+    # capture wins over path/trap membership.
     function assign!(cell::Int, w::Float64)
-        if haskey(trap_cell, cell)
+        if haskey(nbs_cell, cell)
+            slot += 1; push!(nbs_into[nbs_cell[cell]], slot); return (slot, w)
+        elseif haskey(trap_cell, cell)
             slot += 1; push!(nbs_trap_outlets[trap_cell[cell]], slot); return (slot, w)
         elseif haskey(path_cell, cell)
             slot += 1; (pi, pos) = path_cell[cell]; push!(nbs_path_events[pi], (pos, slot)); return (slot, w)
@@ -757,7 +770,7 @@ function _build_nbs_plan(net::DynNetwork, tstruct, placements::Vector{NBSPlaceme
         base += length(lyrs)
     end
     return NBSPlan(placement_ix, state_base, layers, layer_slots, base, slot,
-                   nbs_path_events, nbs_trap_outlets)
+                   nbs_path_events, nbs_trap_outlets, nbs_into)
 end
 
 # Fill `nbs_actual[slot]` with each on-network delivery's share of its layer's overflow
@@ -945,10 +958,18 @@ function dynNetworkRateFunction!(dV, V, p::DynNetworkRateParams, t = 0.0)
     # `_routed_inflow`) and its infiltration.  Fluxes are power-law in the layer storage,
     # in mm, converted to m^3 (`S_mm = V*1000/A`, `Q_m3 = Q_mm*1e-3`).
     if p.nbsplan !== nothing
-        plan = p.nbsplan
+        plan       = p.nbsplan
+        nbs_actual = p.scratch.nbs_actual   # overflow slots, already filled in _routed_inflow
         @inbounds for k in 1:length(plan.placement_ix)
             base  = plan.state_base[k]
+            # Layer-1 inflow: the static footprint capture (nbs_inflow) plus any upstream
+            # element's overflow re-emitted onto this footprint (NBS→NBS).  The latter is
+            # storage-driven (a function of the feeder's state, already in `nbs_actual`),
+            # so it is a one-way forcing here — no algebraic loop, no ordering needed.
             I_nbs = p.external_nbs_inflow[plan.placement_ix[k]]
+            for s in plan.nbs_into[k]
+                I_nbs += nbs_actual[s]
+            end
             prev_qi = 0.0
             for (l, lp) in enumerate(plan.layers[k])
                 S_mm = V[nt + base + l] * 1000.0 / lp.A
