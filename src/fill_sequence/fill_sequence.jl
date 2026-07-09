@@ -60,6 +60,11 @@ function fill_sequence(tstruct::TrapStructure{<:Real},
     # start with empty sequence
     seq = Vector{SpillEvent}()
 
+    # Persistent NBS layer storage, keyed by placement index — the single source of
+    # truth for each NBS's water content across events and weather periods (see
+    # network_context.jl's _nbs_layer_block / _store_nbs_state!).  Empty when no NBS.
+    nbs_state = Dict{Int,Vector{Float64}}()
+
     # compute development within the duration of each weather event
     for (wix, we) in enumerate(weather_events)
         cur_time = we.timestamp
@@ -77,7 +82,7 @@ function fill_sequence(tstruct::TrapStructure{<:Real},
         net_contexts, net_trap_set, net_covered_set =
             _build_dyn_networks(tstruct, dyn_traps, culverts, findall(filled_traps),
                                 cur_amounts, rateinfo, infiltration, z_vol_tables,
-                                cur_time, end_time)
+                                cur_time, end_time, nbs, nbs_state)
 
         # compute initial time estimates for when a trap become filled, or split
         # into subtraps (network traps are overridden from their network prediction)
@@ -97,7 +102,7 @@ function fill_sequence(tstruct::TrapStructure{<:Real},
                                           filled_traps, cur_amounts, z_vol_tables,
                                           tstruct, infiltration, end_time, time_slack,
                                           net_contexts, net_trap_set, net_covered_set,
-                                          dyn_traps, culverts, verbose)
+                                          dyn_traps, culverts, verbose, nbs, nbs_state)
     end
 
     return seq
@@ -108,7 +113,9 @@ function _fill_sequence_for_weather_event!(seq, sgraph, rateinfo, changetimeest,
                                            filled_traps, cur_amounts, z_vol_tables,
                                            tstruct, infiltration, endtime, time_slack,
                                            net_contexts, net_trap_set, net_covered_set,
-                                           dyn_traps, culverts, verbose)
+                                           dyn_traps, culverts, verbose,
+                                           nbs = NBSPlacement[],
+                                           nbs_state = Dict{Int,Vector{Float64}}())
     cur_time = cur_amounts[1].time
 
     fill_updates = Vector{IncrementalUpdate{Bool}}()
@@ -167,7 +174,8 @@ function _fill_sequence_for_weather_event!(seq, sgraph, rateinfo, changetimeest,
                 _touch_networks!(net_contexts, changetimeest, sgraph, tstruct,
                                  dyn_traps, culverts, filled_traps,
                                  cur_amounts, rateinfo, z_vol_tables, infiltration,
-                                 fill_updates, old_covered, cur_time, endtime, subnet_cache)
+                                 fill_updates, old_covered, cur_time, endtime, subnet_cache,
+                                 nbs, nbs_state)
             # traps that LEFT the networks need a fresh constant-rate changetime estimate
             for t in setdiff(old_covered, net_covered_set)
                 changetimeest[t] = _compute_changetime_estimate(t, cur_amounts, cur_time,
@@ -222,7 +230,7 @@ function _fill_sequence_for_weather_event!(seq, sgraph, rateinfo, changetimeest,
     # advance every network to `endtime` and read its traps' boundary volumes from the
     # settled ODE state — the exact amounts the next weather period rebuilds from (§10)
     _finalize_networks!(cur_amounts, net_contexts, tstruct, infiltration,
-                        z_vol_tables, cur_time, endtime)
+                        z_vol_tables, cur_time, endtime, nbs_state)
 end
 
 # ----------------------------------------------------------------------------

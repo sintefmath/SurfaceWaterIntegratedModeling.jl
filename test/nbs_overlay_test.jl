@@ -296,3 +296,38 @@ end
     @test dSB ≈ IB + qoA - qoB                          # B: static in + A's overflow, own overflow out
     @test IA + IB ≈ dSA + dSB + qoB                     # mass: nothing created or lost (no leak)
 end
+
+# ---------------------------------------------------------------------------
+# Stage B2: end-to-end through fill_sequence.  The NBS placement is carried into
+# the dynamic-network context (element built from the placement, layer storage
+# persisted across events, footprint capture fed from rateinfo), so it measurably
+# changes the fill sequence — a downstream trap fills later because the NBS retains
+# part of its inflow.  Also checks the no-NBS path stays inert.
+# ---------------------------------------------------------------------------
+@testset "NBS through fill_sequence (context integration)" begin
+    N    = 15
+    grid = Float64[(i - 8)^2 + (j - 8)^2 for i in 1:N, j in 1:N]   # bowl -> one central trap
+    ts   = spillanalysis(grid)
+    LI   = LinearIndices(size(grid))
+    weather = [WeatherEvent(0.0, 1.0)]
+
+    # trap -> the time it first becomes filled, reconstructed from the event log
+    filltimes(seq) = (d = Dict{Int,Float64}();
+        for e in seq[2:end], u in e.filled
+            u.value && !haskey(d, u.index) && (d[u.index] = e.timestamp)
+        end; d)
+
+    # a north-rim footprint that drains south into the bowl (re-emits toward the trap)
+    foot = Int[LI[i, j] for i in 3:5 for j in 4:11]
+    pl   = NBSPlacement(puddle(2000.0; kOUT = 2.0), foot, 1, CartesianIndex{2}[])
+
+    ftNo  = filltimes(fill_sequence(ts, weather; dyn_traps = [1]))
+    ftYes = filltimes(fill_sequence(ts, weather; dyn_traps = [1], nbs = [pl]))
+
+    @test haskey(ftNo, 1) && haskey(ftYes, 1)          # the trap fills in both runs
+    @test ftYes[1] > ftNo[1] + 1.0                     # the NBS retains inflow -> fills later
+
+    # an empty NBS vector leaves the run byte-identical (the NBS path stays inert)
+    @test [e.timestamp for e in fill_sequence(ts, weather; dyn_traps = [1], nbs = NBSPlacement[])] ==
+          [e.timestamp for e in fill_sequence(ts, weather; dyn_traps = [1])]
+end
