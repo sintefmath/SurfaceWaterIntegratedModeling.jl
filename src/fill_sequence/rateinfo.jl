@@ -1,4 +1,4 @@
-export RateInfo, getrunoff, getsmin, getsmax, getinflow, setrunoff!, setsmin!, setsmax!,
+export RateInfo, getrunoff, getsmin, getsmax, getinflow, getnbsinflow, setrunoff!, setsmin!, setsmax!,
 setinflow!, setsavepoint!, disablesavepoint!, getsavedrunoff, getsavedsmin, getsavedsmax,
 getsavedinflow, getrunoffupdates, getinflowupdates, copy
 
@@ -73,6 +73,11 @@ mutable struct RateInfo
     Smin::Vector{Float64} # minimum infiltration within trap footprint (one per
                           # trap; only nonzero for parent traps)
     trap_inflow::Vector{Float64} # total inflow to each trap
+    nbs_inflow::Vector{Float64} # per-NBS-placement captured inflow (rain on the footprint
+                                # + inflow across its boundary), from `watercourses`'s
+                                # footprint-as-sink overlay; empty when there are no NBS.
+                                # A per-event constant, not part of the incremental-save
+                                # machinery below.
 
     # the RateInfo object can be set to store its state at a specific time.
     # Since the terrain can be big, we only store the incremental differences
@@ -83,8 +88,8 @@ mutable struct RateInfo
     stored_inflow_values::Dict{Int, Float64}
     save_active::Bool
 
-    function RateInfo(runoff, Smax, Smin, trap_inflow)
-        new(runoff, Smax, Smin, trap_inflow, Dict{Int, Float64}(),
+    function RateInfo(runoff, Smax, Smin, trap_inflow, nbs_inflow = Float64[])
+        new(runoff, Smax, Smin, trap_inflow, nbs_inflow, Dict{Int, Float64}(),
             Dict{Int, Float64}(), Dict{Int, Float64}(), Dict{Int, Float64}(), false)
     end
 end
@@ -115,6 +120,14 @@ Get the current inflow value for the trap with index 'ix'.
 """
 function getinflow(ri::RateInfo, ix)
     return ri.trap_inflow[ix]
+end
+
+"""
+Get the captured inflow of NBS placement `pix` (rain on its footprint + inflow across
+its boundary), as computed by `watercourses`'s footprint-as-sink overlay.
+"""
+function getnbsinflow(ri::RateInfo, pix)
+    return ri.nbs_inflow[pix]
 end
 
 """

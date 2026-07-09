@@ -60,4 +60,13 @@ const SWIM = SurfaceWaterIntegratedModeling
 
     # --- overlapping footprints are rejected ------------------------------------
     @test_throws ErrorException watercourses(ts, nofull; nbs = [mk(footprint), mk(footprint)])
+
+    # --- the capture reaches RateInfo via compute_flow (B2 plumbing) ------------
+    sg = SWIM.compute_complete_spillgraph(ts, Vector{Bool}(ts.trapvolumes .== 0.0))
+    ri = SWIM.compute_flow(sg, 1.0, 0.0, ts, false; nbs = nbs)
+    @test length(ri.nbs_inflow) == 1
+    @test getnbsinflow(ri, 1) ≈ ni1[1]        # same capture as the direct watercourses call
+    # empty by default (no NBS) — existing callers unaffected
+    ri0 = SWIM.compute_flow(sg, 1.0, 0.0, ts, false)
+    @test isempty(ri0.nbs_inflow)
 end

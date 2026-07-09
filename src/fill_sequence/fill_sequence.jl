@@ -35,6 +35,7 @@ function fill_sequence(tstruct::TrapStructure{<:Real},
             infiltration::Union{Matrix{<:Real}, Nothing} = nothing,
             dyn_traps::Vector{Int} = Int[],
             culverts::Vector{DynCulvert} = DynCulvert[],
+            nbs::Vector{NBSPlacement} = NBSPlacement[],
             verbose::Bool=false)::Vector{SpillEvent}
     @assert !isempty(weather_events)
 
@@ -69,7 +70,7 @@ function fill_sequence(tstruct::TrapStructure{<:Real},
 
         # compute inflow/runoff/infiltration rates corresponding to the fill
         # graph and new rain rate
-        rateinfo = compute_flow(sgraph, we.rain_rate, infiltration, tstruct, verbose)
+        rateinfo = compute_flow(sgraph, we.rain_rate, infiltration, tstruct, verbose; nbs=nbs)
 
         # build the dynamic networks for this weather period (§3); empty when no
         # dyn_traps/culverts are supplied, in which case behaviour is unchanged
