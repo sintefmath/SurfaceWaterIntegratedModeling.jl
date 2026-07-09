@@ -306,10 +306,12 @@ end
 # ---------------------------------------------------------------------------
 @testset "NBS through fill_sequence (context integration)" begin
     N    = 15
-    grid = Float64[(i - 8)^2 + (j - 8)^2 for i in 1:N, j in 1:N]   # bowl -> one central trap
+    grid = Float64[3.0 * j for i in 1:N, j in 1:N]     # slope draining west (decreasing j)
+    for i in 6:10, j in 4:6; grid[i, j] = -50.0; end   # an enclosed interior pit -> one trap
     ts   = spillanalysis(grid)
     LI   = LinearIndices(size(grid))
     weather = [WeatherEvent(0.0, 1.0)]
+    trap = argmax(ts.trapvolumes)
 
     # trap -> the time it first becomes filled, reconstructed from the event log
     filltimes(seq) = (d = Dict{Int,Float64}();
@@ -317,19 +319,20 @@ end
             u.value && !haskey(d, u.index) && (d[u.index] = e.timestamp)
         end; d)
 
-    # a north-rim footprint that drains south into the bowl (re-emits toward the trap)
-    foot = Int[LI[i, j] for i in 3:5 for j in 4:11]
-    pl   = NBSPlacement(puddle(2000.0; kOUT = 2.0), foot, 1, CartesianIndex{2}[])
+    # an upstream (east) footprint on the slope, above the pit's fill level, so it captures
+    # and retains runoff heading into the pit without ever being flooded itself
+    foot = Int[LI[i, j] for i in 6:10 for j in 9:11]
+    pl   = NBSPlacement(puddle(3000.0; kOUT = 2.0), foot, 1, CartesianIndex{2}[])
 
-    ftNo  = filltimes(fill_sequence(ts, weather; dyn_traps = [1]))
-    ftYes = filltimes(fill_sequence(ts, weather; dyn_traps = [1], nbs = [pl]))
+    ftNo  = filltimes(fill_sequence(ts, weather; dyn_traps = [trap]))
+    ftYes = filltimes(fill_sequence(ts, weather; dyn_traps = [trap], nbs = [pl]))
 
-    @test haskey(ftNo, 1) && haskey(ftYes, 1)          # the trap fills in both runs
-    @test ftYes[1] > ftNo[1] + 1.0                     # the NBS retains inflow -> fills later
+    @test haskey(ftNo, trap) && haskey(ftYes, trap)    # the pit fills in both runs
+    @test ftYes[trap] > ftNo[trap] + 1.0               # the NBS retains inflow -> fills later
 
     # an empty NBS vector leaves the run byte-identical (the NBS path stays inert)
-    @test [e.timestamp for e in fill_sequence(ts, weather; dyn_traps = [1], nbs = NBSPlacement[])] ==
-          [e.timestamp for e in fill_sequence(ts, weather; dyn_traps = [1])]
+    @test [e.timestamp for e in fill_sequence(ts, weather; dyn_traps = [trap], nbs = NBSPlacement[])] ==
+          [e.timestamp for e in fill_sequence(ts, weather; dyn_traps = [trap])]
 end
 
 # ---------------------------------------------------------------------------
@@ -385,4 +388,57 @@ end
     # mass: captured runoff = trap accumulation + drainage storage change (recirc cancels,
     # drainage Kinf=0 so no ground loss) — nothing created or lost across the submerged seam
     @test dV[ct] + dV[nt + base + 2] ≈ cap
+end
+
+# ---------------------------------------------------------------------------
+# Stage C2/C3: submergence detection + transition, entirely inside solveDynNetwork!.
+# The submerged flag is derived from the containing trap's level at solve start, and a
+# non-terminating in-solve event flips it and merges the surface into the flood as the
+# level crosses the footprint threshold — no water created or lost across the seam.
+# ---------------------------------------------------------------------------
+@testset "NBS submergence (detect + merge + drain)" begin
+    N    = 15
+    grid = Float64[(i - 8)^2 + (j - 8)^2 for i in 1:N, j in 1:N]
+    ts   = spillanalysis(grid)
+    LI   = LinearIndices(size(grid)); CI = CartesianIndices(size(grid))
+    foot = Int[LI[i, j] for i in 3:4 for j in 5:10]; A = Float64(length(foot))
+    L1   = SWIM.NBSLayer(0.0, 10.0, 1.0, 2.0, 1.0, 1.0, 0.0, 1.0, A, "surface")
+    L2   = SWIM.NBSLayer(0.0,  5.0, 3.0, 0.0, 1.0, 0.0, 0.0, 1.0, A, "drainage")
+    sys  = SWIM.NBSSystem([L1, L2], "test")
+    outlet = CI[LI[6, 7]]                              # recirculates into the containing trap
+    pl   = NBSPlacement(sys, foot, 1, [outlet]); nb = DynNBS(1, foot, 1, [outlet])
+    net  = only(filter(c -> !isempty(c.nbs),
+                       setup_network(ts, [CI[LI[8, 8]]], Int[]; nbs = [nb])))
+    nt   = length(net.traps)
+    p0   = SWIM._build_rate_params(ts, net, zeros(N, N), zeros(nt);
+                                   nbs_placements = [pl], nbs_inflow = [0.0])
+    ct   = p0.nbsplan.containing_trap[1]; cap = p0.geom[ct].capacity
+    zsub = p0.nbsplan.z_sub[1]
+
+    # derived from the trap level: empty -> dry, full -> submerged (spill level > z_sub)
+    SWIM._reconcile_submergence!(p0, vcat([0.0], zeros(2)));  @test !p0.nbsplan.submerged[1]
+    SWIM._reconcile_submergence!(p0, vcat([cap], zeros(2)));  @test  p0.nbsplan.submerged[1]
+
+    # a mid-range volume with level above the threshold but the trap not yet full
+    findV(tgt) = (v = 0.0; for x in range(0, cap; length = 5000)
+                      SWIM._surface_level(p0.geom[ct], x) >= tgt && (v = x; break)
+                  end; v)
+    Vmid = findV(zsub + 9.0)
+    @test SWIM._surface_level(p0.geom[ct], Vmid) >= zsub
+
+    # (b) submerged, no external inflow, outlet recirculating into the same trap and no
+    #     ground loss -> a closed system: total water is conserved over the window
+    st  = vcat([Vmid], [3.0, 2.0]); tot0 = sum(st)
+    solveDynNetwork!(st, ts, net, zeros(N, N), zeros(nt); tmax = 5.0,
+                     nbs_placements = [pl], nbs_inflow = [0.0])
+    @test sum(st) ≈ tot0 atol = 1e-6                  # submerged drain conserves mass
+
+    # (a) start dry below the threshold; inflow fills the trap past it -> the surface
+    #     (holding 8 units) merges into the flood as it crosses, then fills to capacity
+    st2 = vcat([0.0], [8.0, 0.0])
+    r2  = solveDynNetwork!(st2, ts, net, zeros(N, N), [2.0]; tmax = Inf,
+                           nbs_placements = [pl], nbs_inflow = [0.0])
+    @test r2.kind == :fill                            # continued past the (non-terminating) submerge
+    @test SWIM._surface_level(p0.geom[ct], st2[1]) >= zsub
+    @test st2[nt + 1] < 1e-6                          # surface merged into the flood
 end

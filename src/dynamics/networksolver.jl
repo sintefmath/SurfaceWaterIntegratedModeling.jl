@@ -1096,11 +1096,17 @@ end
 #    skip (the VCB :fill event fires first in the CallbackSet ordering).
 # ============================================================================
 
-# One monitored event condition, tied to a network-local trap index.
+# One monitored event condition.  For a topology event (:fill/:empty/:unspill) `trap`
+# is the network-local trap and `nbs` is 0.  For an NBS submergence event (:submerge)
+# `nbs` is the local NBS element index and `trap` is its containing trap; such an event
+# does not terminate the solve — it flips the element's regime and merges the surface
+# into the flood in place, then integration continues (see `_apply_submergence!`).
 struct EventCondition
     kind::Symbol
     trap::Int
+    nbs::Int
 end
+EventCondition(kind, trap) = EventCondition(kind, trap, 0)
 
 """
     DynNetworkEvent
@@ -1140,7 +1146,64 @@ function _event_conditions(p::DynNetworkRateParams,
         i in evolving_set && continue
         push!(conds, EventCondition(:unspill, i))
     end
+    # NBS submergence: one condition per element whose footprint sits in a network trap
+    # and has an above-grade surface block.  It fires (non-terminating) each time the
+    # containing trap's surface level crosses the footprint's flood threshold z_sub.
+    if p.nbsplan !== nothing
+        plan = p.nbsplan
+        for k in 1:length(plan.placement_ix)
+            (plan.containing_trap[k] > 0 && plan.n_terrain[k] >= 1) || continue
+            push!(conds, EventCondition(:submerge, plan.containing_trap[k], k))
+        end
+    end
     return conds
+end
+
+# Set each NBS element's submerged flag from the current trap levels (plan §5): submerged
+# iff the containing trap's surface level has reached the footprint's flood threshold.
+# Derived (not persisted) so it is always self-consistent with the committed state at the
+# start of every solve; the in-solve :submerge event keeps it consistent across a window.
+function _reconcile_submergence!(p::DynNetworkRateParams, V::AbstractVector{<:Real})
+    p.nbsplan === nothing && return
+    plan = p.nbsplan
+    @inbounds for k in 1:length(plan.placement_ix)
+        ct = plan.containing_trap[k]
+        if ct > 0 && plan.n_terrain[k] >= 1
+            plan.submerged[k] = _surface_level(p.geom[ct], V[ct]) >= plan.z_sub[k]
+        else
+            plan.submerged[k] = false
+        end
+    end
+    return
+end
+
+# Apply an NBS submergence transition in place during the solve.  On submerge, the surface
+# block merges into the containing trap — as much of its stored water as the trap's headroom
+# allows moves into `u[ct]` (conserved; any residual stays frozen in the surface and is
+# released on emergence), and the block is deactivated.  On emerge the surface simply
+# re-activates from whatever storage it holds.  Non-terminating: integration continues.
+function _apply_submergence!(u::AbstractVector, plan::NBSPlan, k::Int, nt::Int,
+                             geom::Vector{TrapGeometry})
+    if !plan.submerged[k]
+        ct  = plan.containing_trap[k]
+        base = plan.state_base[k]; nte = plan.n_terrain[k]
+        St = 0.0
+        @inbounds for l in 1:nte
+            St += u[nt + base + l]
+        end
+        if St > 0.0
+            moved = min(St, max(geom[ct].capacity - u[ct], 0.0))
+            u[ct] += moved
+            scale  = (St - moved) / St
+            @inbounds for l in 1:nte
+                u[nt + base + l] *= scale
+            end
+        end
+        plan.submerged[k] = true
+    else
+        plan.submerged[k] = false
+    end
+    return
 end
 
 # ----------------------------------------------------------------------------
@@ -1248,6 +1311,13 @@ function _build_event_callback(p::DynNetworkRateParams,
                 out[k] = p.geom[ec.trap].capacity - V[ec.trap]
             elseif ec.kind == :empty
                 out[k] = V[ec.trap]
+            elseif ec.kind == :submerge
+                # crosses 0 downward at the transition, in whichever direction the current
+                # regime makes it approach: dry -> submerge as the level rises past z_sub,
+                # submerged -> emerge as it falls below.
+                lvl = _surface_level(p.geom[ec.trap], V[ec.trap])
+                out[k] = p.nbsplan.submerged[ec.nbs] ? (lvl - p.nbsplan.z_sub[ec.nbs]) :
+                                                       (p.nbsplan.z_sub[ec.nbs] - lvl)
             else   # :unspill: fire when the full trap's net inflow drops below its losses
                 out[k] = inflow[ec.trap] - p.footprint_infil[ec.trap]
             end
@@ -1257,6 +1327,11 @@ function _build_event_callback(p::DynNetworkRateParams,
     function affect!(integrator, ix)
         k  = isa(ix, AbstractVector) ? findfirst(!iszero, ix) : ix
         ec = conds[k]
+        if ec.kind == :submerge
+            # regime switch: flip + merge surface into the flood in place, keep integrating.
+            _apply_submergence!(integrator.u, p.nbsplan, ec.nbs, length(p.geom), p.geom)
+            return
+        end
         event.kind = ec.kind
         event.trap = ec.trap
         terminate!(integrator)
@@ -1440,6 +1515,11 @@ function solveDynNetwork!(state::AbstractVector{Float64},
     V0 = copy(state)   # immutable snapshot; ODE evolves this, state is updated at the end
 
     _validate_network(tstruct, net, V0, p.geom)
+
+    # Derive each NBS element's submerged regime from the current trap levels (plan §5),
+    # so the rate function starts consistent with the committed state regardless of the
+    # dict passed in; the in-solve :submerge event keeps it consistent through the window.
+    _reconcile_submergence!(p, V0)
 
     # Compute initial rates once: used for the t=0 fast-path checks.
     du0 = similar(V0, Float64)
