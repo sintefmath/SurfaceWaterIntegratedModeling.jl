@@ -211,3 +211,37 @@ end
     @test sum(p2.scratch.nbs_actual) ≈ qo2             # piped outlet on-network
     @test I2 ≈ (dV2[nt2 + 1] + dV2[nt2 + 2]) + qo2     # mass (drainage Kinf=0, no ground loss)
 end
+
+# ---------------------------------------------------------------------------
+# Stage B2: an end-to-end solveDynNetwork! over a network carrying an NBS overlay
+# element — its layer storage is appended to the ODE state and evolved to steady
+# state, where inflow balances outflow.  Exercises the state-vector extension and
+# the NBS-aware steady-state callback (here on a trap-free NBS-only component).
+# ---------------------------------------------------------------------------
+@testset "NBS overlay element solved to steady state" begin
+    N    = 12
+    grid = Float64[j for i in 1:N, j in 1:N]
+    ts   = spillanalysis(grid)
+    LI   = LinearIndices(size(grid)); CI = CartesianIndices(size(grid))
+    full = findall(fill(false, numtraps(ts)))
+    foot = Int[LI[i, 6] for i in 1:N]; A = Float64(length(foot))
+
+    Smax, K, I = 10.0, 2.0, 5.0
+    pl  = NBSPlacement(puddle(Smax; kOUT = K, nOUT = 1.0), foot, 1, CartesianIndex{2}[])
+    nb  = DynNBS(1, foot, 1, CartesianIndex{2}[])
+    net = only(filter(c -> !isempty(c.nbs),
+                      setup_network(ts, [CI[LI[3, 9]]], full; nbs = [nb])))
+    nt  = length(net.traps)
+
+    state = vcat(zeros(nt), [1.0])                      # layer starts nearly empty
+    res   = solveDynNetwork!(state, ts, net, zeros(N, N), zeros(nt);
+                             nbs_placements = [pl], nbs_inflow = [I])
+    @test res.kind == :none                            # settled to steady state (no topology event)
+
+    # steady state: dS/dt = 0  =>  overflow == inflow.  For a linear puddle
+    # (K*(S_mm - Smax)) that pins S_mm = Smax + I*1000/K.
+    S_mm = state[nt + 1] * 1000 / A
+    qo   = SWIM.compute_outflow(K, 1.0, Smax, S_mm) * 1e-3
+    @test qo ≈ I atol = 1e-2                            # outflow balances the captured inflow
+    @test S_mm ≈ Smax + I * 1000 / K rtol = 1e-3        # settled at the analytic steady storage
+end

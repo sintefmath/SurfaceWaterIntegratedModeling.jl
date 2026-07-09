@@ -1089,6 +1089,35 @@ function _build_steadystate_callback(p::DynNetworkRateParams,
     return DiscreteCallback(condition, terminate!; save_positions = (false, false))
 end
 
+# Steady-state callback for networks with NBS overlay elements.  The
+# `_routed_inflow`-based check above cannot express the NBS layer dynamics, so this
+# evaluates the full rate function and settles when |dV/dt| < abstol (or the rate has
+# crossed its starting sign) across every index in `ss_indices` — the evolving traps
+# plus all NBS layer states.  An evolving trap that is spilling still vetoes (its
+# :fill wins).  `dbuf` is reused across calls.
+function _build_steadystate_callback_nbs(p::DynNetworkRateParams,
+                                         ss_indices::AbstractVector{<:Integer},
+                                         abstol::Real,
+                                         du0::AbstractVector{<:Real})
+    nt        = length(p.geom)
+    trap_test = Int[i for i in ss_indices if i <= nt]
+    dbuf      = zeros(Float64, length(du0))
+    function condition(u, t, integrator)
+        for e in trap_test
+            u[e] >= p.geom[e].capacity && return false   # veto: :fill wins
+        end
+        dynNetworkRateFunction!(dbuf, u, p, t)
+        for i in ss_indices
+            rate    = dbuf[i]
+            settled = abs(rate) < abstol ||
+                      (du0[i] != 0.0 && signbit(rate) != signbit(du0[i]))
+            settled || return false
+        end
+        return true
+    end
+    return DiscreteCallback(condition, terminate!; save_positions = (false, false))
+end
+
 # ----------------------------------------------------------------------------
 """
     _build_event_callback(p, evolving, V0, nreg) -> (callback, event)
@@ -1293,6 +1322,8 @@ function solveDynNetwork!(state::AbstractVector{Float64},
                           inflow::AbstractVector{<:Real};
                           tmax = Inf,
                           path_inflow = nothing,
+                          nbs_placements::Vector{NBSPlacement} = NBSPlacement[],
+                          nbs_inflow::AbstractVector{<:Real} = Float64[],
                           # Loosened from 1e-8: physical accuracy needs only ~mL (abstol, m^3)
                           # and ~ms.  ~Halves the ODE step count on the culvert worst case;
                           # fill-time drift vs the analytic path is ~3e-5 (tens of µs, far under
@@ -1302,9 +1333,11 @@ function solveDynNetwork!(state::AbstractVector{Float64},
 
     nt = length(net.traps)
     p  = _build_rate_params(tstruct, net, infiltration, inflow;
-                            path_inflow=path_inflow, zvt=zvt)
-    @assert length(state) == nt """
-        state must have one entry per trap in net.traps ($(nt) traps)"""
+                            path_inflow=path_inflow, nbs_placements=nbs_placements,
+                            nbs_inflow=nbs_inflow, zvt=zvt)
+    @assert length(state) == nt + _nbs_state_count(p) """
+        state must have one entry per trap in net.traps plus one per NBS layer \
+        ($(nt) traps + $(_nbs_state_count(p)) NBS layer states)"""
     V0 = copy(state)   # immutable snapshot; ODE evolves this, state is updated at the end
 
     _validate_network(tstruct, net, V0, p.geom)
@@ -1339,27 +1372,43 @@ function solveDynNetwork!(state::AbstractVector{Float64},
     tmax <= 0.0 && return (time = max(tmax, 0.0), trap = 0, kind = :none)
 
     # Traps that evolve: everything that is not FULL.  Empty traps with zero initial
-    # inflow are included because inflow can start mid-integration (culverts) without a
-    # separate event.  Excluding them would leave such traps without a :fill callback
-    # and their volume could silently exceed capacity.
+    # inflow are included because inflow can start mid-integration (culverts, NBS
+    # overflow, ...) without a separate event.  Excluding them would leave such traps
+    # without a :fill callback and their volume could silently exceed capacity.
     # FULL traps (V == C) are handled only by the :unspill callback.
     evolving = [i for i in 1:nt if V0[i] != p.geom[i].capacity]
 
-    # Nothing evolves: steady state.
-    isempty(evolving) && return (time = Inf, trap = 0, kind = :none)
+    # Steady-state test index set.  NBS layer states also evolve but never trigger a
+    # topology event, so they enter the steady test only (appended after the nt traps).
+    # Without NBS this is just `evolving`.
+    ss_indices = p.nbsplan === nothing ? evolving :
+        vcat(evolving, collect((nt + 1):(nt + p.nbsplan.nlayer_total)))
+
+    # Nothing evolves (no non-full trap and no NBS layer state): steady state.
+    isempty(ss_indices) && return (time = Inf, trap = 0, kind = :none)
 
     # All evolving states at or near zero rate: steady state already.
     # (abstol is a rate tolerance here, not a state classification guard.)
-    all(abs(du0[i]) <= abstol for i in evolving) &&
+    all(abs(du0[i]) <= abstol for i in ss_indices) &&
         return (time = Inf, trap = 0, kind = :none)
 
     # Integrate to the first topology-changing event or steady state.
     # cb_topo (VectorContinuousCallback, LeftRootFind): topology events (:fill, :empty, :unspill).
     # cb_ss   (DiscreteCallback): fires at the first accepted step where max|dV/dt| < abstol
-    #         across all evolving traps (step-function infil → must check at accepted steps,
-    #         not interpolated points).
-    cb_topo, event = _build_event_callback(p, evolving, V0, nreg)
-    cb_ss = _build_steadystate_callback(p, evolving, abstol, du0)
+    #         across all evolving traps (and NBS layer states) — step-function infil means it
+    #         must check at accepted steps, not interpolated points.
+    # A trap-free (NBS-only) net has no topology events, so cb_topo is skipped to avoid a
+    # zero-length VectorContinuousCallback.
+    cb_ss = p.nbsplan === nothing ?
+        _build_steadystate_callback(p, evolving, abstol, du0) :
+        _build_steadystate_callback_nbs(p, ss_indices, abstol, du0)
+    if nt == 0
+        event    = DynNetworkEvent()
+        callback = cb_ss
+    else
+        cb_topo, event = _build_event_callback(p, evolving, V0, nreg)
+        callback = CallbackSet(cb_topo, cb_ss)
+    end
     # Cap tmax at a large but finite value so DiffEq never receives Inf as a tspan
     # endpoint (which triggers an internal range(t, Inf, n) that Julia rejects).  1e12
     # is many orders of magnitude beyond any physical simulation horizon.
@@ -1372,7 +1421,7 @@ function solveDynNetwork!(state::AbstractVector{Float64},
     # @@@ If a genuinely stiff config appears (e.g. huge culvert draining a tiny trap),
     #     revisit with an auto-switching solver + a sparse/colored Jacobian, not dense FD.
     sol = solve(ODEProblem(dynNetworkRateFunction!, V0, (0.0, tmax_ode), p), Tsit5();
-                callback = CallbackSet(cb_topo, cb_ss),
+                callback = callback,
                 abstol = abstol, reltol = reltol)
 
     # Write ODE result back into state in place (saves one nt-length allocation per call).
