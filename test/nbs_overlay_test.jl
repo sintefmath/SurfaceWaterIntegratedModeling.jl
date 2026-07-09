@@ -143,3 +143,71 @@ end
     comps0 = setup_network(ts, [seed], full)
     @test all(isempty(c.nbs) for c in comps0)
 end
+
+# ---------------------------------------------------------------------------
+# Stage B2: the NBS layer-storage ODE in the rate function — the layer cascade
+# (top layer fed by the static footprint capture, each lower layer by the one
+# above's infiltration) and the weighted re-emit that fills the overflow-delivery
+# slots.  See agent/NBS_OPTION1_OVERLAY_PLAN.md §3/§6.
+# ---------------------------------------------------------------------------
+@testset "NBS layer ODE + weighted re-emit (rate function)" begin
+    N    = 12
+    grid = Float64[j for i in 1:N, j in 1:N]
+    ts   = spillanalysis(grid)
+    LI   = LinearIndices(size(grid)); CI = CartesianIndices(size(grid))
+    full = findall(fill(false, numtraps(ts)))
+    foot = Int[LI[i, 6] for i in 1:N]; A = Float64(length(foot))
+    hostof(nb) = only(filter(c -> !isempty(c.nbs),
+                             setup_network(ts, [CI[LI[3, 9]]], full; nbs = [nb])))
+
+    # --- single-layer puddle: dS/dt = inflow - overflow; delivery == overflow -------
+    Smax, K = 10.0, 2.0
+    pl  = NBSPlacement(puddle(Smax; kOUT = K, nOUT = 1.0), foot, 1, CartesianIndex{2}[])
+    nb  = DynNBS(1, foot, 1, CartesianIndex{2}[])
+    net = hostof(nb); nt = length(net.traps)
+    I   = 5.0
+    p   = SWIM._build_rate_params(ts, net, zeros(N, N), zeros(nt);
+                                  nbs_placements = [pl], nbs_inflow = [I])
+    @test p.nbsplan.nlayer_total == 1
+    @test p.nbsplan.n_slots == N              # one delivery slot per exit cell
+
+    dV = zeros(nt + 1)
+    # below threshold: overflow ~ 0, the layer fills at the inflow rate
+    Vlo = vcat(zeros(nt), [Smax * A / 1000 * 0.5])     # S_mm = Smax/2 < Smax
+    SWIM.dynNetworkRateFunction!(dV, Vlo, p)
+    @test dV[nt + 1] ≈ I atol = 1e-6
+
+    # above threshold: dS/dt = inflow - overflow; the weighted delivery sums to overflow
+    Vhi  = vcat(zeros(nt), [100.0])
+    S_mm = 100.0 * 1000 / A
+    qo   = SWIM.compute_outflow(K, 1.0, Smax, S_mm) * 1e-3
+    SWIM.dynNetworkRateFunction!(dV, Vhi, p)
+    @test dV[nt + 1] ≈ I - qo
+    SWIM._nbs_fill_actual!(p.scratch.nbs_actual, Vhi, p, nt)
+    @test sum(p.scratch.nbs_actual) ≈ qo               # all exits on-network, weights sum to 1
+    @test I ≈ dV[nt + 1] + qo                          # mass: inflow = ΔS/dt + overflow
+
+    # --- two-layer green roof (soil -> drainage, piped outlet): cascade + mass -------
+    gr     = elhadiGreenRoof(2.0, 1.0, 3.0, 4.0, 1.0, 1.0, 0.0, 1.0)  # soil, drainage
+    outlet = CI[LI[6, 5]]                              # on the exit boundary (network cell)
+    pl2    = NBSPlacement(gr, foot, 0, [outlet])       # n_terrain=0: drainage is piped
+    nb2    = DynNBS(1, foot, 0, [outlet])
+    net2   = hostof(nb2); nt2 = length(net2.traps)
+    I2     = 6.0
+    p2     = SWIM._build_rate_params(ts, net2, zeros(N, N), zeros(nt2);
+                                     nbs_placements = [pl2], nbs_inflow = [I2])
+    @test p2.nbsplan.nlayer_total == 2
+
+    V2  = vcat(zeros(nt2), [50.0, 30.0])               # soil, drainage storage (m^3)
+    dV2 = zeros(nt2 + 2)
+    SWIM.dynNetworkRateFunction!(dV2, V2, p2)
+    L   = gr.layers
+    S1, S2 = 50.0 * 1000 / A, 30.0 * 1000 / A
+    qi1 = SWIM.compute_outflow(L[1].Kinf, L[1].ninf, L[1].Smin, S1) * 1e-3  # soil -> drainage
+    qo2 = SWIM.compute_outflow(L[2].Kout, L[2].nout, L[2].Smax, S2) * 1e-3  # drainage -> outlet
+    @test dV2[nt2 + 1] ≈ I2 - qi1                      # soil: inflow - infiltration down
+    @test dV2[nt2 + 2] ≈ qi1 - qo2                     # drainage: fed by soil, drains via pipe
+    SWIM._nbs_fill_actual!(p2.scratch.nbs_actual, V2, p2, nt2)
+    @test sum(p2.scratch.nbs_actual) ≈ qo2             # piped outlet on-network
+    @test I2 ≈ (dV2[nt2 + 1] + dV2[nt2 + 2]) + qo2     # mass (drainage Kinf=0, no ground loss)
+end

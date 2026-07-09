@@ -288,16 +288,19 @@ end
 # `(position, :trib|:cvin|:cvout, tributary-or-culvert index)`.  The list is static
 # for a solve (only the flow values it drives are dynamic), so it is built once and
 # reused every rate-function call instead of being rebuilt and re-sorted each time.
-function _path_event_templates(net::DynNetwork)
+function _path_event_templates(net::DynNetwork, nbsplan = nothing)
     return [begin
                 ev = Tuple{Int,Symbol,Int}[]
                 for (m, j)   in fp.merges;          push!(ev, (j,   :trib,  m));  end
                 for (ci, pos) in fp.culvert_inlets;  push!(ev, (pos, :cvin,  ci)); end
                 for (ci, pos) in fp.culvert_outlets; push!(ev, (pos, :cvout, ci)); end
+                if nbsplan !== nothing
+                    for (pos, slot) in nbsplan.nbs_path_events[p]; push!(ev, (pos, :nbsout, slot)); end
+                end
                 sort!(ev; by = first)
                 ev
             end
-            for fp in net.flow_paths]
+            for (p, fp) in enumerate(net.flow_paths)]
 end
 
 # Volumetric flow through culvert `ci` given the current trap water levels.  A flow-
@@ -370,7 +373,7 @@ end
 # precomputed `(pos, kind, idx)` stream (culvert-aware path) or `nothing`.  Mutates
 # `culvert_actual` to record what each culvert inlet on this path drew.
 function _path_delivered!(prefix, head_flow, tribs, events,
-                          trib_output, culvert_actual, cvplan, net, trap_level)
+                          trib_output, culvert_actual, nbs_actual, cvplan, net, trap_level)
     current  = head_flow
     prev_pfx = 0.0
     if events === nothing
@@ -386,6 +389,8 @@ function _path_delivered!(prefix, head_flow, tribs, events,
                 current += trib_output[idx]
             elseif kind === :cvout
                 current += culvert_actual[idx]                # deliver
+            elseif kind === :nbsout
+                current += nbs_actual[idx]                    # NBS layer overflow at its exit/outlet
             else                                              # :cvin
                 a = min(_culvert_flow(cvplan, net, idx, trap_level), current)
                 culvert_actual[idx] = a                       # drawn == delivered
@@ -402,7 +407,8 @@ end
 # spill its surplus into its spill path.  Mutates `trap_inflow`, `path_flow`, and
 # `culvert_actual`.
 function _route_trap_node!(i, net, trap_inflow, path_flow, footprint_infil,
-                           spilling, cvplan, trap_level, culvert_actual)
+                           spilling, cvplan, trap_level, culvert_actual,
+                           nbs_actual, nbs_trap_outlets)
     if cvplan !== nothing
         trap = net.traps[i]
         for ci in trap.culvert_outlets                # deliver (source drew earlier)
@@ -412,6 +418,11 @@ function _route_trap_node!(i, net, trap_inflow, path_flow, footprint_infil,
             q = _culvert_flow(cvplan, net, ci, trap_level)
             culvert_actual[ci] = q
             trap_inflow[i]    -= q
+        end
+    end
+    if nbs_trap_outlets !== nothing                   # deliver NBS overflow whose exit/outlet is this trap
+        for slot in nbs_trap_outlets[i]
+            trap_inflow[i] += nbs_actual[slot]
         end
     end
     if spilling[i]
@@ -440,7 +451,9 @@ function _route_flow(net::DynNetwork,
                      cvplan = nothing,
                      trap_level = nothing,
                      path_events = nothing;
-                     scratch = nothing)
+                     scratch = nothing,
+                     nbs_actual = Float64[],
+                     nbs_trap_outlets = nothing)
 
     np = length(net.flow_paths)
     nt = length(net.traps)
@@ -470,7 +483,7 @@ function _route_flow(net::DynNetwork,
             events = path_events === nothing ? nothing : path_events[p]
             delivered = _path_delivered!(path_infil_prefix[p], path_flow[p],
                                          sorted_trib_info[p], events,
-                                         trib_output, culvert_actual,
+                                         trib_output, culvert_actual, nbs_actual,
                                          cvplan, net, trap_level)
             tt = net.flow_paths[p].target_trap
             if tt > 0
@@ -480,7 +493,8 @@ function _route_flow(net::DynNetwork,
             end                                      # else: exits the domain
         else                                        # a trap
             _route_trap_node!(node - np, net, trap_inflow, path_flow, footprint_infil,
-                              spilling, cvplan, trap_level, culvert_actual)
+                              spilling, cvplan, trap_level, culvert_actual,
+                              nbs_actual, nbs_trap_outlets)
         end
     end
     return trap_inflow
@@ -626,11 +640,147 @@ struct RouteScratch
     path_flow     ::Vector{Float64}
     trib_output   ::Vector{Float64}
     culvert_actual::Vector{Float64}
+    nbs_actual    ::Vector{Float64}    # per NBS overflow-delivery slot (like culvert_actual)
 end
-RouteScratch(nt::Int, np::Int, ncv::Int) =
+RouteScratch(nt::Int, np::Int, ncv::Int, nnbs::Int = 0) =
     RouteScratch(Vector{Bool}(undef, nt), Vector{Float64}(undef, nt),
                  Vector{Float64}(undef, nt), Vector{Float64}(undef, np),
-                 Vector{Float64}(undef, np), Vector{Float64}(undef, ncv))
+                 Vector{Float64}(undef, np), Vector{Float64}(undef, ncv),
+                 Vector{Float64}(undef, nnbs))
+
+# ============================================================================
+# NBS overlay routing plan.
+#
+# An NBS overlay element (see `DynNBS`) carries a vertical stack of storage layers
+# whose state lives in the solver's ODE vector, appended after the `nt` trap states.
+# Its topmost layer is fed by the static footprint capture (`nbs_inflow`, the sink-
+# overlay tally from `watercourses`); each lower layer is fed by the infiltration of
+# the layer above.  Each outflowing layer re-emits its overflow: the top `n_terrain`
+# layers spread it over the footprint's natural terrain exit boundary (weights from
+# `_nbs_exit_weights`), every outflowing layer below them through one explicit piped
+# outlet.  Each re-emit landing point owned by an in-network path/trap gets a
+# delivery slot in `nbs_actual` (filled from the layer storage each rate call, like
+# `culvert_actual`); landings off the network / off the domain are dropped (that
+# water leaves the domain).  Fluxes are power-law in the layer storage
+# (`compute_outflow`), computed in the mm units the model is defined in with the
+# mm<->m^3 conversion (`S_mm = V*1000/A`, `Q_m3 = Q_mm*1e-3`) done in the plan/rate
+# function.  See agent/NBS_OPTION1_OVERLAY_PLAN.md §3/§7/§7a.
+struct NBSLayerParams
+    Kout::Float64; nout::Float64; Smax_mm::Float64
+    Kinf::Float64; ninf::Float64; Smin_mm::Float64
+    A::Float64                            # layer area (== footprint area, m^2)
+end
+
+struct NBSPlan
+    placement_ix    ::Vector{Int}         # per NBS: index into the caller's NBSPlacement vector
+                                          # (the key for the static nbs_inflow feed)
+    state_base      ::Vector{Int}         # per NBS: 0-based offset of its layer block, after the nt trap states
+    layers          ::Vector{Vector{NBSLayerParams}}
+    layer_slots     ::Vector{Vector{Vector{Tuple{Int,Float64}}}}  # per NBS, per layer: (slot, weight) deliveries
+    nlayer_total    ::Int                 # total appended layer states
+    n_slots         ::Int                 # number of on-network overflow-delivery slots
+    nbs_path_events ::Vector{Vector{Tuple{Int,Int}}}  # per flow path: (cell position, slot)
+    nbs_trap_outlets::Vector{Vector{Int}}             # per trap: slots delivered into it
+end
+
+# Number of appended NBS layer states for a rate-params object (0 when no NBS).
+_nbs_state_count(p) = p.nbsplan === nothing ? 0 : p.nbsplan.nlayer_total
+
+# Build the NBS routing plan for `net` (nothing when it has no NBS elements).
+# `placements` is the caller's `NBSPlacement` vector (indexed by `DynNBS.placement_ix`),
+# supplying the layer storage model.  Each outflowing layer's overflow is delivered to
+# resolved landing cells: the terrain exit boundary (top `n_terrain` layers, weighted by
+# `_nbs_exit_weights`) or a piped outlet (lower layers, weight 1).  A landing owned by an
+# in-network path gets a `(position, slot)` event; one owned by a trap gets a trap-outlet
+# slot; a landing off the network or off the domain is dropped (its water exits).
+function _build_nbs_plan(net::DynNetwork, tstruct, placements::Vector{NBSPlacement})
+    isempty(net.nbs) && return nothing
+    LI = LinearIndices(tstruct.topography)
+
+    trap_cell = Dict{Int,Int}()                # linear cell -> local trap index
+    for (ti, t) in enumerate(net.traps), k in tstruct.footprints[t.trap_ix]
+        trap_cell[k] = ti
+    end
+    path_cell = Dict{Int,Tuple{Int,Int}}()     # linear cell -> (local path index, position)
+    for (pi, p) in enumerate(net.flow_paths), (pos, c) in enumerate(p.cells)
+        path_cell[LI[c]] = (pi, pos)
+    end
+
+    np = length(net.flow_paths); ntr = length(net.traps)
+    placement_ix = Int[]; state_base = Int[]
+    layers       = Vector{NBSLayerParams}[]
+    layer_slots  = Vector{Vector{Tuple{Int,Float64}}}[]
+    nbs_path_events  = [Tuple{Int,Int}[] for _ in 1:np]
+    nbs_trap_outlets = [Int[]            for _ in 1:ntr]
+    base = 0; slot = 0
+
+    # Assign a delivery slot for fraction `w` of a layer's overflow landing at linear
+    # cell `cell`; returns (slot, w) or nothing if the cell is off-network (discharge
+    # then exits the domain and is simply not delivered).
+    function assign!(cell::Int, w::Float64)
+        if haskey(trap_cell, cell)
+            slot += 1; push!(nbs_trap_outlets[trap_cell[cell]], slot); return (slot, w)
+        elseif haskey(path_cell, cell)
+            slot += 1; (pi, pos) = path_cell[cell]; push!(nbs_path_events[pi], (pos, slot)); return (slot, w)
+        end
+        return nothing
+    end
+
+    for nb in net.nbs
+        lyrs   = placements[nb.placement_ix].system.layers
+        A_foot = Float64(length(nb.footprint))   # @@@ 1 m^2/cell; use real cell area when available
+        push!(placement_ix, nb.placement_ix)
+        push!(state_base, base)
+        push!(layers, NBSLayerParams[
+            NBSLayerParams(float(L.Kout), float(L.nout), float(L.Smax),
+                           float(L.Kinf), float(L.ninf), float(L.Smin), A_foot) for L in lyrs])
+
+        exitw = _nbs_exit_weights(tstruct, nb.footprint)   # [(cell, weight)], cell 0 = off-domain
+        per_layer = Vector{Tuple{Int,Float64}}[]
+        piped = 0
+        for (l, L) in enumerate(lyrs)
+            s = Tuple{Int,Float64}[]
+            if L.Kout > 0.0
+                if l <= nb.n_terrain
+                    for (cell, w) in exitw
+                        cell == 0 && continue                 # off-domain fraction: exits
+                        r = assign!(cell, w); r !== nothing && push!(s, r)
+                    end
+                else
+                    piped += 1
+                    r = assign!(LI[nb.outlets[piped]], 1.0); r !== nothing && push!(s, r)
+                end
+            end
+            push!(per_layer, s)
+        end
+        push!(layer_slots, per_layer)
+        base += length(lyrs)
+    end
+    return NBSPlan(placement_ix, state_base, layers, layer_slots, base, slot,
+                   nbs_path_events, nbs_trap_outlets)
+end
+
+# Fill `nbs_actual[slot]` with each on-network delivery's share of its layer's overflow
+# (m^3/time): `S_mm = V_layer*1000/A`, `Q_m3 = compute_outflow(...)*1e-3`, split across the
+# layer's slots by their static weights.  Slots are dense (1..n_slots), so any unfilled
+# (there are none: every slot belongs to exactly one (layer, landing)) would stay stale —
+# the caller zeroes the buffer first for safety.
+function _nbs_fill_actual!(nbs_actual, V, p, nt::Int)
+    plan = p.nbsplan
+    @inbounds for k in 1:length(plan.placement_ix)
+        base = plan.state_base[k]
+        for (l, lp) in enumerate(plan.layers[k])
+            slots = plan.layer_slots[k][l]
+            isempty(slots) && continue
+            S_mm = V[nt + base + l] * 1000.0 / lp.A
+            qo   = compute_outflow(lp.Kout, lp.nout, lp.Smax_mm, S_mm) * 1e-3
+            for (slot, w) in slots
+                nbs_actual[slot] = qo * w
+            end
+        end
+    end
+    return nothing
+end
 
 # ----------------------------------------------------------------------------
 struct DynNetworkRateParams
@@ -645,6 +795,8 @@ struct DynNetworkRateParams
     merge_target::Vector{Int}
     cvplan::Union{CulvertPlan,Nothing}   # culvert routing data, or nothing if none
     path_events::Union{Vector{Vector{Tuple{Int,Symbol,Int}}},Nothing}  # per-path event templates
+    nbsplan::Union{NBSPlan,Nothing}      # NBS overlay routing data, or nothing if none
+    external_nbs_inflow::Vector{Float64} # per-NBS-placement static footprint capture (nbs_inflow)
     scratch::RouteScratch                # reusable per-solve working buffers
 end
 
@@ -667,6 +819,8 @@ function _build_rate_params(tstruct::TrapStructure,
                             infiltration::AbstractMatrix{<:Real},
                             external_inflow::AbstractVector{<:Real};
                             path_inflow = nothing,
+                            nbs_placements::Vector{NBSPlacement} = NBSPlacement[],
+                            nbs_inflow::AbstractVector{<:Real} = Float64[],
                             zvt = nothing)
     nt = length(net.traps)
     np = length(net.flow_paths)
@@ -678,11 +832,15 @@ function _build_rate_params(tstruct::TrapStructure,
     prefix          = [_infil_prefix(ci) for ci in cell_infil]
     sorted_tribs    = [sort([(j, m) for (m, j) in fp.merges]) for fp in net.flow_paths]
     cvplan  = isempty(net.culverts) ? nothing : _build_culvert_plan(net, tstruct)
+    nbsplan = isempty(net.nbs)      ? nothing : _build_nbs_plan(net, tstruct, nbs_placements)
     # The event-driven router path is needed only for culverts (inlet draw / outlet
-    # deliver at exact cell positions); a culvert-free net needs no path events.
-    events = cvplan === nothing ? nothing : _path_event_templates(net)
+    # deliver at exact cell positions) or NBS overflow delivery at exit/outlet cells;
+    # a net with neither needs no path events.
+    events = (cvplan === nothing && nbsplan === nothing) ? nothing :
+             _path_event_templates(net, nbsplan)
     tgeom = _build_trap_geometry(tstruct, net, infiltration; zvt=zvt)
     footprint_infil = _footprint_infiltration(tgeom)
+    n_slots = nbsplan === nothing ? 0 : nbsplan.n_slots
     return DynNetworkRateParams(net,
                                 tgeom,
                                 Float64.(external_inflow),
@@ -694,7 +852,9 @@ function _build_rate_params(tstruct::TrapStructure,
                                 _merge_targets(net),
                                 cvplan,
                                 events,
-                                RouteScratch(nt, np, length(net.culverts)))
+                                nbsplan,
+                                Float64.(nbs_inflow),
+                                RouteScratch(nt, np, length(net.culverts), n_slots))
 end
 
 # ----------------------------------------------------------------------------
@@ -737,10 +897,20 @@ function _routed_inflow(V, p::DynNetworkRateParams)
             trap_level[i] = _surface_level(geom[i], V[i])
         end
     end
+    # NBS overflow delivered at exit/outlet cells: fill the slot buffer from the layer
+    # storage (appended after the nt trap states), then route it in like culvert outlets.
+    nbs_actual = sc.nbs_actual
+    nbs_trap_outlets = nothing
+    if p.nbsplan !== nothing
+        fill!(nbs_actual, 0.0)
+        _nbs_fill_actual!(nbs_actual, V, p, nt)
+        nbs_trap_outlets = p.nbsplan.nbs_trap_outlets
+    end
     inflow = _route_flow(p.net, p.external_inflow, spilling,
                          p.footprint_infil, p.path_infil_prefix, p.external_path_inflow,
                          p.sorted_trib_info, p.order, p.merge_target,
-                         p.cvplan, trap_level, p.path_events; scratch = sc)
+                         p.cvplan, trap_level, p.path_events; scratch = sc,
+                         nbs_actual = nbs_actual, nbs_trap_outlets = nbs_trap_outlets)
     return inflow, spilling
 end
 
@@ -750,7 +920,7 @@ function dynNetworkRateFunction!(dV, V, p::DynNetworkRateParams, t = 0.0)
 
     inflow, spilling = _routed_inflow(V, p)
 
-    @assert length(dV) == length(V) == nt
+    @assert length(dV) == length(V) == nt + _nbs_state_count(p)
     @inbounds for i in 1:nt
         if spilling[i]
             # full: whole footprint wetted; excess overflows, so dV is ~0 while fed
@@ -766,6 +936,35 @@ function dynNetworkRateFunction!(dV, V, p::DynNetworkRateParams, t = 0.0)
         # computed dV (e.g. a culvert trying to draw from it), clamp to zero rather than
         # letting the ODE push V < 0 and blow up the v2z interpolation.
         V[i] <= 0.0 && dV[i] < 0.0 && (dV[i] = 0.0)
+    end
+
+    # NBS layer-state derivatives (m^3/time).  Layer 1 (top) is fed by the static
+    # footprint capture (`nbs_inflow`); each lower layer by the layer above's
+    # infiltration; the bottom layer's infiltration leaves the system to ground.  Each
+    # layer loses its own overflow (delivered to its exit/outlet cells, already routed in
+    # `_routed_inflow`) and its infiltration.  Fluxes are power-law in the layer storage,
+    # in mm, converted to m^3 (`S_mm = V*1000/A`, `Q_m3 = Q_mm*1e-3`).
+    if p.nbsplan !== nothing
+        plan = p.nbsplan
+        @inbounds for k in 1:length(plan.placement_ix)
+            base  = plan.state_base[k]
+            I_nbs = p.external_nbs_inflow[plan.placement_ix[k]]
+            prev_qi = 0.0
+            for (l, lp) in enumerate(plan.layers[k])
+                S_mm = V[nt + base + l] * 1000.0 / lp.A
+                qo   = compute_outflow(lp.Kout, lp.nout, lp.Smax_mm, S_mm) * 1e-3
+                qi   = compute_outflow(lp.Kinf, lp.ninf, lp.Smin_mm, S_mm) * 1e-3
+                infl = l == 1 ? I_nbs : prev_qi
+                # @@@ evapotranspiration deferred (plan §Deferred 4): ET is an explicit 0.0
+                #     placeholder computed from EVCoeff/EVS11 here, so wiring it in is a
+                #     one-line change per layer, not a restructuring.  Do not drop the term.
+                ET = 0.0
+                dV[nt + base + l] = infl - qo - qi - ET
+                # Physical floor: a layer cannot drain below empty.
+                V[nt + base + l] <= 0.0 && dV[nt + base + l] < 0.0 && (dV[nt + base + l] = 0.0)
+                prev_qi = qi
+            end
+        end
     end
     return nothing
 end
