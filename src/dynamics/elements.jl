@@ -1,6 +1,6 @@
 import Graphs
 
-export DynObject, DynFlowPath, DynTrap, DynCulvert, DynNetwork, setup_network
+export DynObject, DynFlowPath, DynTrap, DynCulvert, DynNBS, DynNetwork, setup_network
 
 # Make generic baseclass for dynamic objects
 abstract type DynObject end
@@ -136,9 +136,39 @@ function DynCulvert(tstruct, inlet::CartesianIndex{2}, outlet::CartesianIndex{2}
     return DynCulvert(inlet, outlet, float(r), float(Cd), float(Ke), float(Kf), float(Cw))
 end
 
+# ----------------------------------------------------------------------------
+"""
+        DynNBS(placement_ix, footprint, n_terrain, outlets)
+
+The dynamic-network view of a Nature-Based Solution installation (the overlay
+counterpart of the caller's [`NBSPlacement`](@ref), referenced by `placement_ix`).
+
+Unlike a [`DynTrap`](@ref) it is not a node in the trap hierarchy: it is an
+*overlay element*.  Its layered storage is fed by the static footprint capture
+(the `nbs_inflow` tally from `watercourses`) plus any dynamic flow routed onto the
+footprint within a solve, and its layer overflow is re-emitted — the top
+`n_terrain` layers spread over the footprint's terrain exit boundary, every
+outflowing layer below them through an explicit piped `outlet`.  See
+`agent/NBS_OPTION1_OVERLAY_PLAN.md` §7a.
+
+# Fields
+- `placement_ix`: index of the owning [`NBSPlacement`](@ref) in the caller's vector
+  (the key for the layer model and the static `nbs_inflow` tally)
+- `footprint`: footprint cells (linear indices) — the network occupancy of the
+  element and the cells at which dynamic internal flow is captured
+- `n_terrain`: number of topmost layers re-emitting at the terrain exit boundary
+- `outlets`: piped-outlet cells for the outflowing layers below the top `n_terrain`
+"""
+struct DynNBS <: DynObject
+    placement_ix::Int
+    footprint::Vector{Int}
+    n_terrain::Int
+    outlets::Vector{CartesianIndex{2}}
+end
+
 # Network of dynamic objects
 """
-         DynNetwork(flow_paths, traps, culverts)
+         DynNetwork(flow_paths, traps, culverts[, nbs])
 
 Represent the dynamic elements of the terrain as a network of flow paths, traps,
 and culverts.  Each flow path may lead into a trap, and each trap has a spill
@@ -160,7 +190,15 @@ struct DynNetwork
     flow_paths::Vector{DynFlowPath}
     traps::Vector{DynTrap}
     culverts::Vector{DynCulvert}
+    nbs::Vector{DynNBS}
 end
+
+# Backward-compatible constructor: a network with no NBS overlay elements.  Keeps
+# every `DynNetwork(paths, traps, culverts)` construction site working unchanged
+# while the NBS overlay wiring is layered on (populated only where NBS are present).
+DynNetwork(flow_paths::Vector{DynFlowPath}, traps::Vector{DynTrap},
+           culverts::Vector{DynCulvert}) =
+    DynNetwork(flow_paths, traps, culverts, DynNBS[])
 
 DynNetwork() = DynNetwork(DynFlowPath[], DynTrap[], DynCulvert[])
 
