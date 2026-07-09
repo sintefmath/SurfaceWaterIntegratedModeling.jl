@@ -109,3 +109,37 @@ end
     @test sum(x -> x[2], w3) ≈ 1.0
     @test any(x -> x[1] == 0, w3)                 # off-domain fraction present
 end
+
+# ---------------------------------------------------------------------------
+# Stage B2: the NBS overlay element is carried through setup_network — its
+# re-emit targets (terrain exit boundary + piped outlets) pull their downstream
+# structure into the network like culvert endpoints, and the DynNBS is assigned to
+# the component that owns those targets.  See agent/NBS_OPTION1_OVERLAY_PLAN.md §7a.
+# ---------------------------------------------------------------------------
+@testset "NBS overlay element in setup_network" begin
+    N    = 12
+    grid = Float64[j for i in 1:N, j in 1:N]     # east-rising plane, flow due west
+    ts   = spillanalysis(grid)
+    LI   = LinearIndices(size(grid))
+    CI   = CartesianIndices(size(grid))
+    full = findall(fill(false, numtraps(ts)))
+
+    foot = Int[LI[i, 6] for i in 1:N]
+    nb   = DynNBS(1, foot, 1, CartesianIndex{2}[])
+    seed = CI[LI[3, 9]]
+
+    comps = setup_network(ts, [seed], full; nbs = [nb])
+    @test sum(length(c.nbs) for c in comps) == 1          # the element is placed exactly once
+    host = only(filter(c -> !isempty(c.nbs), comps))
+    @test host.nbs[1].placement_ix == 1
+    @test !isempty(host.flow_paths)                       # exit boundary pulled in its downstream
+
+    # the exit boundary (column 5, west of the footprint) is materialised as network cells
+    exit_cells = Set(c for (c, _w) in SWIM._nbs_exit_weights(ts, foot))
+    hostcells  = Set(LI[c] for p in host.flow_paths for c in p.cells)
+    @test any(in(hostcells), exit_cells)
+
+    # no NBS -> no element, network unchanged in kind
+    comps0 = setup_network(ts, [seed], full)
+    @test all(isempty(c.nbs) for c in comps0)
+end

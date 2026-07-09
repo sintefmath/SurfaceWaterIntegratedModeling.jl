@@ -223,12 +223,16 @@ Do not pass the (infinite-rate) culverts stored in the `TrapStructure` here —
 those are a different concept; `culverts` must be dynamic [`DynCulvert`](@ref)s.
 """
 function setup_network(tstruct, dyn_coords, full_traps;
-                       culverts::Vector{DynCulvert}=DynCulvert[])
+                       culverts::Vector{DynCulvert}=DynCulvert[],
+                       nbs::Vector{DynNBS}=DynNBS[])
     subnets = DynNetwork[first(_subnetwork(tstruct, c, full_traps)) for c in dyn_coords]
-    isempty(culverts) && return _merge_networks(subnets)
+    (isempty(culverts) && isempty(nbs)) && return _merge_networks(subnets)
 
+    # NBS re-emit targets (exit boundary + piped outlets) pull their downstream
+    # structure into the network, just like culvert endpoints.
+    subnets = _expand_with_nbs(tstruct, subnets, nbs, full_traps)
     subnets, included = _expand_with_culverts(tstruct, subnets, culverts, full_traps)
-    return _merge_networks(subnets, DynCulvert[culverts[ci] for ci in included], tstruct)
+    return _merge_networks(subnets, DynCulvert[culverts[ci] for ci in included], nbs, tstruct)
 end
 
 # ----------------------------------------------------------------------------
@@ -360,7 +364,8 @@ _partition(comps) = Set(Set(t.trap_ix for t in net.traps) for net in comps)
 # handled exactly as in `setup_network`: the (cheap) endpoint expansion and the culvert-aware
 # merge run on top of the cached base subnets.  Mutates `cache`.
 function setup_network_cached(tstruct, seeds, full_traps, cache::SubnetCache;
-                              culverts::Vector{DynCulvert}=DynCulvert[])
+                              culverts::Vector{DynCulvert}=DynCulvert[],
+                              nbs::Vector{DynNBS}=DynNBS[])
     LI    = LinearIndices(tstruct.topography)
     cur   = Set{Int}(full_traps)
     dirty = symdiff(cur, cache.full_snapshot)
@@ -383,16 +388,17 @@ function setup_network_cached(tstruct, seeds, full_traps, cache::SubnetCache;
     cache.full_snapshot = cur
 
     # The incremental (culvert-free) merge path assumes no cross-component
-    # connectors.  Culverts join components, so their presence falls back to the
-    # full merge.
-    comps = if isempty(culverts)
+    # connectors.  Culverts and NBS re-emit targets join components, so their
+    # presence falls back to the full merge.
+    comps = if isempty(culverts) && isempty(nbs)
         _merge_incremental!(cache, tstruct, subnets, seedkeys, changed)
     else
-        expanded, included = _expand_with_culverts(tstruct, subnets, culverts, full_traps)
-        _merge_networks(expanded, DynCulvert[culverts[ci] for ci in included], tstruct)
+        expanded = _expand_with_nbs(tstruct, subnets, nbs, full_traps)
+        expanded, included = _expand_with_culverts(tstruct, expanded, culverts, full_traps)
+        _merge_networks(expanded, DynCulvert[culverts[ci] for ci in included], nbs, tstruct)
     end
     _VERIFY_INCR[] && @assert _partition(comps) ==
-        _partition(setup_network(tstruct, seeds, full_traps; culverts=culverts)) "incremental subnet cache diverged from a full setup_network"
+        _partition(setup_network(tstruct, seeds, full_traps; culverts=culverts, nbs=nbs)) "incremental subnet cache diverged from a full setup_network"
     return comps
 end
 
@@ -434,6 +440,44 @@ function _expand_with_culverts(tstruct, subnets, culverts, full_traps)
         end
     end
     return subnets, sort(included)
+end
+
+# Ensure the downstream structure of every NBS re-emit target is present in the
+# subnetworks, tracing a fresh downstream subnet from any target cell not yet
+# covered.  The re-emit targets are the footprint's terrain exit boundary (the
+# lower-edge cells the top layers spill onto, from `_nbs_exit_weights`) and each
+# piped outlet cell; the footprint itself is a static sink (its capture is the
+# `nbs_inflow` tally, not a traced source), so it is not seeded.  Unlike culverts
+# (pulled in only when they touch the network) an NBS is an explicit element, so
+# its re-emit targets are always materialised.  Iterates to a fixpoint, since a new
+# subnet may cover another target.
+function _expand_with_nbs(tstruct, subnets, nbs_objs::Vector{DynNBS}, full_traps)
+    isempty(nbs_objs) && return subnets
+    CI = CartesianIndices(tstruct.topography)
+    targets = CartesianIndex{2}[]                     # every re-emit target cell, once
+    seen    = Set{CartesianIndex{2}}()
+    add!(c) = (c in seen || (push!(seen, c); push!(targets, c)))
+    for nb in nbs_objs
+        for (cell, _w) in _nbs_exit_weights(tstruct, nb.footprint)
+            cell == 0 && continue                     # off-domain fraction: nothing downstream
+            add!(CI[cell])
+        end
+        for oc in nb.outlets
+            add!(oc)
+        end
+    end
+    changed = true
+    while changed
+        changed = false
+        occ = _occupied_cells(tstruct, subnets)
+        for c in targets
+            if c ∉ occ
+                push!(subnets, first(_subnetwork(tstruct, c, full_traps)))
+                changed = true
+            end
+        end
+    end
+    return subnets
 end
 
 """
@@ -639,10 +683,14 @@ flow paths.
 
 """
 _merge_networks(networks::Vector{DynNetwork}) =
-    _merge_networks(networks, DynCulvert[], nothing)
+    _merge_networks(networks, DynCulvert[], DynNBS[], nothing)
+
+# Backward-compatible three-argument form (culverts, no NBS overlay elements).
+_merge_networks(networks::Vector{DynNetwork}, cv_objs::Vector{DynCulvert}, tstruct) =
+    _merge_networks(networks, cv_objs, DynNBS[], tstruct)
 
 function _merge_networks(networks::Vector{DynNetwork}, cv_objs::Vector{DynCulvert},
-                         tstruct)
+                         nbs_objs::Vector{DynNBS}, tstruct)
     isempty(networks) && return networks
 
     # flatten the subnets into one pool with globally unique indices
@@ -658,11 +706,56 @@ function _merge_networks(networks::Vector{DynNetwork}, cv_objs::Vector{DynCulver
     # resolve each culvert's inlet/outlet to its owning path or trap
     inlet_owner, outlet_owner = _culvert_owners(tstruct, all_paths, all_traps, cv_objs)
 
-    # _components: group paths+traps into disjoint connected components (culverts join
-    # the components of their endpoints); _build_component: rebuild each.
+    # NBS: the union-find owner nodes of each element's re-emit targets, so their
+    # components are united (an element spanning two components joins them) and the
+    # element is assigned to that component in `_build_component`.
+    nbs_groups = _nbs_owner_nodes(tstruct, all_paths, all_traps, nbs_objs)
+
+    # _components: group paths+traps into disjoint connected components (culverts and
+    # NBS re-emit targets join the components of their endpoints); _build_component:
+    # rebuild each, attaching the culverts and NBS elements it owns.
     return [_build_component(all_paths, all_traps, cv_objs, inlet_owner, outlet_owner,
-                             pids, tids)
-            for (pids, tids) in _components(all_paths, all_traps, inlet_owner, outlet_owner)]
+                             nbs_objs, nbs_groups, pids, tids)
+            for (pids, tids) in _components(all_paths, all_traps, inlet_owner, outlet_owner,
+                                            nbs_groups)]
+end
+
+# For each NBS element (in `nbs_objs` order), the union-find node ids of the paths
+# and traps that own its re-emit targets — the footprint's terrain exit cells (from
+# `_nbs_exit_weights`) and its piped outlet cells.  Node numbering matches
+# `_components`: path global index `pi` is node `pi`, trap global index `ti` is node
+# `np + ti`.  A target on no network cell (off-domain / uncovered) yields no node.
+# @@@ NBS→NBS: a re-emit target landing on another NBS's footprint (not a path/trap
+#     cell) currently resolves to no node, so the two elements are not united into one
+#     component and the variable-rate NBS→NBS coupling is not yet captured.  Deferred
+#     (needs the footprint-as-receiver capture); handle when that lands.
+function _nbs_owner_nodes(tstruct, all_paths, all_traps, nbs_objs::Vector{DynNBS})
+    isempty(nbs_objs) && return Vector{Int}[]
+    np = length(all_paths)
+    CI = CartesianIndices(tstruct.topography)
+    trap_cell = Dict{CartesianIndex{2},Int}()
+    for (ti, t) in enumerate(all_traps), k in tstruct.footprints[t.trap_ix]
+        trap_cell[CI[k]] = ti
+    end
+    path_cell = Dict{CartesianIndex{2},Int}()
+    for (pi, p) in enumerate(all_paths), c in p.cells
+        path_cell[c] = pi
+    end
+    node(cell) = haskey(trap_cell, cell) ? np + trap_cell[cell] :
+                 haskey(path_cell, cell) ? path_cell[cell] : 0
+    groups = Vector{Int}[]
+    for nb in nbs_objs
+        g = Int[]
+        for (cell, _w) in _nbs_exit_weights(tstruct, nb.footprint)
+            cell == 0 && continue
+            n = node(CI[cell]); n > 0 && push!(g, n)
+        end
+        for oc in nb.outlets
+            n = node(oc); n > 0 && push!(g, n)
+        end
+        push!(groups, unique(g))
+    end
+    return groups
 end
 
 # Collapse duplicate trap entries (same `trap_ix` reached from several subnetworks)
@@ -808,7 +901,8 @@ end
 # Returns a vector of `(path_ids, trap_ids)` tuples (global indices per component).
 # A trap with no connections forms its own singleton component (a lone terminal
 # trap, e.g. reached only via a culvert), which is preserved rather than dropped.
-function _components(all_paths, all_traps, inlet_owner, outlet_owner)
+function _components(all_paths, all_traps, inlet_owner, outlet_owner,
+                     nbs_groups = Vector{Int}[])
     np, nt = length(all_paths), length(all_traps)
     parent = collect(1:(np + nt))
 
@@ -832,6 +926,11 @@ function _components(all_paths, all_traps, inlet_owner, outlet_owner)
         io, oo = inlet_owner[k], outlet_owner[k]
         (io[1] == :none || oo[1] == :none) && continue
         unite!(node(io), node(oo))
+    end
+    # An NBS re-emitting into several components joins them (its overflow forces flow
+    # into each), so all its re-emit-target owner nodes share one component.
+    for g in nbs_groups, k in 2:length(g)
+        unite!(g[1], g[k])
     end
 
     paths_of = Dict{Int, Vector{Int}}()
@@ -918,7 +1017,7 @@ end
 # Culverts whose inlet/outlet owners lie in this component are attached to the
 # owning local path or trap via its culvert_inlets / culvert_outlets list.
 function _build_component(all_paths, all_traps, cv_objs, inlet_owner, outlet_owner,
-                          global_path_ids, global_trap_ids)
+                          nbs_objs, nbs_groups, global_path_ids, global_trap_ids)
     path_set = Set(global_path_ids)
     trap_set = Set(global_trap_ids)
 
@@ -976,5 +1075,16 @@ function _build_component(all_paths, all_traps, cv_objs, inlet_owner, outlet_own
         get(trap_outlets, gti, Int[])
     ) for gti in global_trap_ids]
 
-    return DynNetwork(local_paths, local_traps, [cv_objs[gci] for gci in comp_cv])
+    # NBS elements owned by this component: any element with a re-emit-target owner
+    # node in this component (path or trap).  Node n is path n (n <= np) or trap n-np.
+    comp_nbs = DynNBS[]
+    if !isempty(nbs_objs)
+        np = length(all_paths)
+        in_comp_node(n) = n <= np ? (n in path_set) : ((n - np) in trap_set)
+        for (e, nb) in enumerate(nbs_objs)
+            any(in_comp_node, nbs_groups[e]) && push!(comp_nbs, nb)
+        end
+    end
+
+    return DynNetwork(local_paths, local_traps, [cv_objs[gci] for gci in comp_cv], comp_nbs)
 end
