@@ -8,13 +8,6 @@ include("spillregions.jl")
 include("spillpoints.jl")
 include("trapvolumes.jl")
 # ----------------------------------------------------------------------------
-# Dynamic-network element types (`elements.jl`) and the NBS storage-model
-# primitives (`nbs_elements.jl`, which needs `DynObject` from `elements.jl`) are
-# pulled in early; they define only types/functions with no include-time
-# reference to TrapStructure, so loading them here is safe.
-include("dynamics/elements.jl")
-include("dynamics/nbs_elements.jl")
-# ----------------------------------------------------------------------------
 include("spillanalysis.jl")
 include("TrapStructure.jl")
 include("sshierarchy.jl")
@@ -27,6 +20,8 @@ include("fill_sequence/flow.jl")
 include("fill_sequence/fill_sequence.jl")
 # ----------------------------------------------------------------------------
 include("watercourses.jl")
+include("dynamics/elements.jl")
+include("dynamics/nbs_elements.jl")
 include("dynamics/culvert_rate.jl")
 include("utils.jl")
 include("dynamics/networksolver.jl")
