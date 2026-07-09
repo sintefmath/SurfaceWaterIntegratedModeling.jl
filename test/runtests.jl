@@ -4,10 +4,10 @@ using LazyArtifacts
 include("basicTestFuns.jl")
 include("watercourses_test.jl")
 include("dynamics_test.jl")
-# NBS tests disabled: the NBS integration is being re-architected as a dynamic
-# overlay (see agent/NBS_OPTION1_OVERLAY_PLAN.md).  Stage A severs NBS from the
-# static analysis, so these old carve-based tests no longer apply; new overlay
-# tests land in the B/C stages.
+include("nbs_overlay_test.jl")   # stage B1: footprint-as-sink overlay in watercourses
+# Old carve-based NBS tests disabled: the integration is being re-architected as a
+# dynamic overlay (agent/NBS_OPTION1_OVERLAY_PLAN.md).  Their replacements land as
+# the B/C stages add the network element + submergence.
 # include("nbs_test.jl")
 # include("nbs_dynamic_test.jl")
 
