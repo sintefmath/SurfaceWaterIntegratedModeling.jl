@@ -159,11 +159,7 @@ function spillanalysis(grid::Matrix{<:Real};
                                        clip_mask,
                                        sinks,
                                        wbody_cells,
-                                       cut_edge_dict,
-                                       # NBS no longer participate in the static analysis
-                                       # (they are a purely dynamic / fill_sequence concern
-                                       # now); the field is retained but always empty here.
-                                       NBSPlacement[])
+                                       cut_edge_dict)
 end
 
 # ----------------------------------------------------------------------------

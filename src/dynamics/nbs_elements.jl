@@ -282,12 +282,10 @@ governed by the layered storage model `system` (an [`NBSSystem`](@ref)).
 `outlet` convention) where the system's discharge re-enters the terrain.
 
 !!! note
-    Wired into the network rate function via `_build_nbs_plan` → the NBS layer
-    loop in `dynNetworkRateFunction!` (outflow/infiltration cascade through
-    `compute_outflow`), with per-layer discharge routed to `outlets` by
-    `_nbs_links` + `_route_flow`.
-    @@@ Evapotranspiration (the `EVCoeff`/`EVS11` layer params) is not yet
-    applied in the network solver — deferred for now.
+    The NBS model primitives (this type plus [`NBSSystem`](@ref) / [`NBSLayer`](@ref)
+    / [`compute_outflow`](@ref)) are retained, but the network wiring that drives
+    them is being re-architected as a dynamic overlay (see
+    `agent/NBS_OPTION1_OVERLAY_PLAN.md`); it is not connected to the solver yet.
 """
 struct NBSPlacement <: DynObject
     system::NBSSystem
