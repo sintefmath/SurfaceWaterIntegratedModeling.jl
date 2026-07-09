@@ -525,6 +525,58 @@ function _infil_prefix(cell_infil::AbstractVector{<:Real})
     return prefix
 end
 
+# ----------------------------------------------------------------------------
+# NBS terrain re-emit: the natural (no-NBS) exit split of a footprint.
+#
+# The top `n_terrain` layers of an NBS re-emit their overflow at the footprint's
+# lower-edge exit boundary, spread the way the terrain would naturally spread it
+# (see agent/NBS_OPTION1_OVERLAY_PLAN.md §3).  This computes that static split:
+# each footprint cell contributes a unit of drainage, followed downstream through
+# the terrain flow tree until it first leaves the footprint; the first outside
+# cell is that unit's exit.  A cell's weight is the fraction of footprint cells
+# whose drainage exits there, so a funnel footprint (all flow leaving one cell)
+# collapses to a single target and a fan spreads across several.
+#
+# `tstruct.flowgraph` is a flow tree — every cell has at most one downstream
+# neighbour — so each unit's downstream walk is a simple chain with no branching
+# and (the graph being a DAG) is guaranteed to terminate.  A footprint cell whose
+# chain ends at a cell with no downstream neighbour is resolved the same way the
+# `watercourses` sweep resolves such a cell: a trap bottom (`regions > 0`) is an
+# internal pit — its water ponds inside the footprint and contributes no exit; a
+# cell with `regions <= 0` drains off the domain edge, which is a valid terrain
+# exit (plan §3, "ordinary off-domain case") represented by the sentinel cell 0.
+#
+# Returns the exit cells (linear indices, all *outside* the footprint so the sink
+# overlay in `watercourses` does not re-swallow the re-emit; the sentinel 0 marks
+# the off-domain fraction) paired with weights summing to 1.  The off-domain
+# weight stays in the sum so mass is conserved when it is later dropped at
+# delivery.  Errors on a fully endorheic footprint (every cell ponds internally,
+# no terrain or off-domain exit) — such a placement must route via piped outlets.
+function _nbs_exit_weights(tstruct::TrapStructure, footprint::AbstractVector{<:Integer})
+    g       = tstruct.flowgraph
+    footset = Set{Int}(footprint)
+    exits   = Dict{Int,Float64}()                # exit cell (0 = off-domain) -> unit count
+    for c in footprint
+        cur = Int(c)
+        while cur in footset
+            ds = Graphs.outneighbors(g, cur)
+            isempty(ds) && break
+            cur = ds[1]
+        end
+        if cur in footset                        # chain ended at a no-downstream footprint cell
+            tstruct.regions[cur] > 0 && continue # trap bottom inside the footprint: ponds, no exit
+            exits[0] = get(exits, 0, 0.0) + 1.0  # regions <= 0: drains off the domain edge
+        else
+            exits[cur] = get(exits, cur, 0.0) + 1.0   # first cell outside the footprint
+        end
+    end
+    isempty(exits) &&
+        error("_nbs_exit_weights: footprint has no terrain exit (fully endorheic); " *
+              "its overflow cannot re-emit at terrain — use piped outlets instead")
+    total = sum(values(exits))
+    return sort!([(cell, w / total) for (cell, w) in exits]; by = first)
+end
+
 # ============================================================================
 # Network rate function.
 #
