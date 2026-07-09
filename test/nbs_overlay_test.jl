@@ -331,3 +331,58 @@ end
     @test [e.timestamp for e in fill_sequence(ts, weather; dyn_traps = [1], nbs = NBSPlacement[])] ==
           [e.timestamp for e in fill_sequence(ts, weather; dyn_traps = [1])]
 end
+
+# ---------------------------------------------------------------------------
+# Stage C: the submerged rate regime (plan §5).  When the containing trap floods
+# over the footprint, the surface block (layers 1..n_terrain) freezes and merges
+# into the flood (no terrain re-emit), the captured footprint runoff joins the
+# trap, and a saturated-conduit draw is taken back out to feed the subsurface,
+# whose piped outlets keep discharging.  Mass is conserved across the seam.
+# ---------------------------------------------------------------------------
+@testset "NBS submerged rate regime (mass-conserving)" begin
+    N    = 15
+    grid = Float64[(i - 8)^2 + (j - 8)^2 for i in 1:N, j in 1:N]
+    ts   = spillanalysis(grid)
+    LI   = LinearIndices(size(grid)); CI = CartesianIndices(size(grid))
+    foot = Int[LI[i, j] for i in 3:4 for j in 5:10]; A = Float64(length(foot))
+
+    # surface (terrain re-emit + infiltrates down) over a piped drainage layer
+    L1  = SWIM.NBSLayer(0.0, 10.0, 1.0, 2.0, 1.0, 1.0, 0.0, 1.0, A, "surface")
+    L2  = SWIM.NBSLayer(0.0,  5.0, 3.0, 0.0, 1.0, 0.0, 0.0, 1.0, A, "drainage")
+    sys = SWIM.NBSSystem([L1, L2], "test")
+    outlet = CI[LI[6, 7]]                              # a cell inside the containing trap (recirculation)
+    pl  = NBSPlacement(sys, foot, 1, [outlet])
+    nb  = DynNBS(1, foot, 1, [outlet])
+
+    # containing trap present but NOT full, so it accumulates and the balance is direct
+    net = only(filter(c -> !isempty(c.nbs),
+                      setup_network(ts, [CI[LI[8, 8]]], Int[]; nbs = [nb])))
+    nt  = length(net.traps)
+    cap = 7.0
+    p   = SWIM._build_rate_params(ts, net, zeros(N, N), zeros(nt);
+                                  nbs_placements = [pl], nbs_inflow = [cap],
+                                  nbs_submerged = Dict(1 => true))
+    plan = p.nbsplan
+    @test plan.submerged[1]
+    @test plan.n_terrain[1] == 1
+    @test plan.containing_trap[1] == 1                 # footprint sits in the bowl trap
+    @test plan.z_sub[1] ≈ minimum(Float64[grid[c] for c in foot])
+
+    ct   = plan.containing_trap[1]; base = plan.state_base[1]
+    V    = zeros(nt + 2); V[ct] = 1000.0               # trap part-full (accumulating)
+    V[nt + base + 1] = 30.0; V[nt + base + 2] = 40.0
+    dV   = zeros(nt + 2)
+    SWIM.dynNetworkRateFunction!(dV, V, p)
+
+    draw = SWIM._nbs_saturated_draw(plan.layers[1][1])
+    qo2  = SWIM.compute_outflow(3.0, 1.0, 5.0, 40.0 * 1000 / A) * 1e-3
+    @test dV[nt + base + 1] == 0.0                     # surface block frozen (merged)
+    @test dV[nt + base + 2] ≈ draw - qo2               # drainage: saturated draw in, pipe out
+
+    SWIM._nbs_fill_actual!(p.scratch.nbs_actual, V, p, nt)
+    @test sum(p.scratch.nbs_actual) ≈ qo2              # surface terrain slots zeroed; only pipe delivers
+
+    # mass: captured runoff = trap accumulation + drainage storage change (recirc cancels,
+    # drainage Kinf=0 so no ground loss) — nothing created or lost across the submerged seam
+    @test dV[ct] + dV[nt + base + 2] ≈ cap
+end
