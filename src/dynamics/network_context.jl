@@ -35,7 +35,7 @@ mutable struct DynNetworkContext
                                                  # component (for per-context rebuild)
     last_solve_time ::Float64
     extern_inflow   ::Vector{Float64}
-    nbs_placements  ::Vector{NBSPlacement}       # the caller's NBS placements (constant; the
+    nbs_placements  ::Vector{DynNBSPlacement}       # the caller's NBS placements (constant; the
                                                  # solver's plan indexes them by placement_ix)
     extern_nbs_inflow::Vector{Float64}           # per-placement static footprint capture the
                                                  # state evolves under (cached at the last touch,
@@ -162,7 +162,7 @@ end
 # One `DynNBS` overlay element per NBS placement, carrying its real footprint,
 # n_terrain, and piped outlets (no dug trap / region lookup — the overlay redesign).
 # Empty when there are no placements.
-_nbs_elements(nbs_placements::Vector{NBSPlacement}) =
+_nbs_elements(nbs_placements::Vector{DynNBSPlacement}) =
     DynNBS[DynNBS(pi, p.footprint, p.n_terrain, p.outlets)
            for (pi, p) in enumerate(nbs_placements)]
 
@@ -195,7 +195,7 @@ end
 
 function _build_dyn_networks(tstruct, dyn_traps, culverts, full_traps, cur_amounts,
                              rateinfo, infiltration, z_vol_tables, cur_time, endtime,
-                             nbs_placements = NBSPlacement[],
+                             nbs_placements = DynNBSPlacement[],
                              nbs_state = Dict{Int,Vector{Float64}}())
     nbs_objs = _nbs_elements(nbs_placements)
     seeds    = _dyn_seeds(tstruct, dyn_traps, culverts)
@@ -221,7 +221,7 @@ end
 # re-trace the same component on a rebuild).  `state0(g)` supplies the initial
 # committed volume for the global trap index `g`.
 function _make_context(net::DynNetwork, tstruct, rateinfo, seed_pool, state0, cur_time,
-                       nbs_placements = NBSPlacement[],
+                       nbs_placements = DynNBSPlacement[],
                        nbs_state = Dict{Int,Vector{Float64}}())
     global_ix = Int[t.trap_ix for t in net.traps]
     occ       = _occupied_cells(tstruct, [net])
@@ -418,7 +418,7 @@ end
 function _assemble_contexts(components, reuse, net_contexts, committed, full_set, seeds,
                             tstruct, rateinfo, infiltration, z_vol_tables,
                             cur_amounts, cur_time, endtime,
-                            nbs_placements = NBSPlacement[],
+                            nbs_placements = DynNBSPlacement[],
                             nbs_state = Dict{Int,Vector{Float64}}())
     project(g) = first(fill_trap_until(g, rateinfo, cur_amounts[g], cur_time,
                                        tstruct, z_vol_tables, use_saved=true))
@@ -451,7 +451,7 @@ end
 function _touch_networks!(net_contexts, changetimeest, sgraph, tstruct, dyn_traps, culverts,
                           filled_traps, cur_amounts, rateinfo, z_vol_tables, infiltration,
                           fill_updates, old_covered, cur_time, endtime, subnet_cache,
-                          nbs_placements = NBSPlacement[],
+                          nbs_placements = DynNBSPlacement[],
                           nbs_state = Dict{Int,Vector{Float64}}())
     isempty(net_contexts) &&
         return net_contexts, Set{Int}(), Set{Int}(), Dict{Int,Float64}()

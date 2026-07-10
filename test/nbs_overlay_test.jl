@@ -19,7 +19,7 @@ const SWIM = SurfaceWaterIntegratedModeling
     nofull = [false]
 
     # dummy layer model — `watercourses` uses only the footprint, not the system/outlets
-    mk(fp) = NBSPlacement(puddle(10.0), fp, CartesianIndex{2}[])
+    mk(fp) = DynNBSPlacement(puddle(10.0), fp, CartesianIndex{2}[])
 
     # --- baseline: no NBS -> nothing captured, all rain leaves ------------------
     _, ra0, off0, _, ni0 = watercourses(ts, nofull; precipitation = 1.0, infiltration = 0.0)
@@ -162,7 +162,7 @@ end
 
     # --- single-layer puddle: dS/dt = inflow - overflow; delivery == overflow -------
     Smax, K = 10.0, 2.0
-    pl  = NBSPlacement(puddle(Smax; kOUT = K, nOUT = 1.0), foot, 1, CartesianIndex{2}[])
+    pl  = DynNBSPlacement(puddle(Smax; kOUT = K, nOUT = 1.0), foot, 1, CartesianIndex{2}[])
     nb  = DynNBS(1, foot, 1, CartesianIndex{2}[])
     net = hostof(nb); nt = length(net.traps)
     I   = 5.0
@@ -190,7 +190,7 @@ end
     # --- two-layer green roof (soil -> drainage, piped outlet): cascade + mass -------
     gr     = elhadiGreenRoof(2.0, 1.0, 3.0, 4.0, 1.0, 1.0, 0.0, 1.0)  # soil, drainage
     outlet = CI[LI[6, 5]]                              # on the exit boundary (network cell)
-    pl2    = NBSPlacement(gr, foot, 0, [outlet])       # n_terrain=0: drainage is piped
+    pl2    = DynNBSPlacement(gr, foot, 0, [outlet])       # n_terrain=0: drainage is piped
     nb2    = DynNBS(1, foot, 0, [outlet])
     net2   = hostof(nb2); nt2 = length(net2.traps)
     I2     = 6.0
@@ -227,7 +227,7 @@ end
     foot = Int[LI[i, 6] for i in 1:N]; A = Float64(length(foot))
 
     Smax, K, I = 10.0, 2.0, 5.0
-    pl  = NBSPlacement(puddle(Smax; kOUT = K, nOUT = 1.0), foot, 1, CartesianIndex{2}[])
+    pl  = DynNBSPlacement(puddle(Smax; kOUT = K, nOUT = 1.0), foot, 1, CartesianIndex{2}[])
     nb  = DynNBS(1, foot, 1, CartesianIndex{2}[])
     net = only(filter(c -> !isempty(c.nbs),
                       setup_network(ts, [CI[LI[3, 9]]], full; nbs = [nb])))
@@ -264,8 +264,8 @@ end
     # A at column 6 re-emits west onto B at column 5 (A's exit boundary == B's footprint).
     colA = Int[LI[i, 6] for i in 1:N]
     colB = Int[LI[i, 5] for i in 1:N]
-    plA  = NBSPlacement(puddle(10.0; kOUT = 2.0), colA, 1, CartesianIndex{2}[])
-    plB  = NBSPlacement(puddle(10.0; kOUT = 3.0), colB, 1, CartesianIndex{2}[])
+    plA  = DynNBSPlacement(puddle(10.0; kOUT = 2.0), colA, 1, CartesianIndex{2}[])
+    plB  = DynNBSPlacement(puddle(10.0; kOUT = 3.0), colB, 1, CartesianIndex{2}[])
     dA   = DynNBS(1, colA, 1, CartesianIndex{2}[])
     dB   = DynNBS(2, colB, 1, CartesianIndex{2}[])
 
@@ -322,7 +322,7 @@ end
     # an upstream (east) footprint on the slope, above the pit's fill level, so it captures
     # and retains runoff heading into the pit without ever being flooded itself
     foot = Int[LI[i, j] for i in 6:10 for j in 9:11]
-    pl   = NBSPlacement(puddle(3000.0; kOUT = 2.0), foot, 1, CartesianIndex{2}[])
+    pl   = DynNBSPlacement(puddle(3000.0; kOUT = 2.0), foot, 1, CartesianIndex{2}[])
 
     ftNo  = filltimes(fill_sequence(ts, weather; dyn_traps = [trap]))
     ftYes = filltimes(fill_sequence(ts, weather; dyn_traps = [trap], nbs = [pl]))
@@ -331,7 +331,7 @@ end
     @test ftYes[trap] > ftNo[trap] + 1.0               # the NBS retains inflow -> fills later
 
     # an empty NBS vector leaves the run byte-identical (the NBS path stays inert)
-    @test [e.timestamp for e in fill_sequence(ts, weather; dyn_traps = [trap], nbs = NBSPlacement[])] ==
+    @test [e.timestamp for e in fill_sequence(ts, weather; dyn_traps = [trap], nbs = DynNBSPlacement[])] ==
           [e.timestamp for e in fill_sequence(ts, weather; dyn_traps = [trap])]
 end
 
@@ -354,7 +354,7 @@ end
     L2  = SWIM.NBSLayer(0.0,  5.0, 3.0, 0.0, 1.0, 0.0, 0.0, 1.0, A, "drainage")
     sys = SWIM.NBSSystem([L1, L2], "test")
     outlet = CI[LI[6, 7]]                              # a cell inside the containing trap (recirculation)
-    pl  = NBSPlacement(sys, foot, 1, [outlet])
+    pl  = DynNBSPlacement(sys, foot, 1, [outlet])
     nb  = DynNBS(1, foot, 1, [outlet])
 
     # containing trap present but NOT full, so it accumulates and the balance is direct
@@ -406,7 +406,7 @@ end
     L2   = SWIM.NBSLayer(0.0,  5.0, 3.0, 0.0, 1.0, 0.0, 0.0, 1.0, A, "drainage")
     sys  = SWIM.NBSSystem([L1, L2], "test")
     outlet = CI[LI[6, 7]]                              # recirculates into the containing trap
-    pl   = NBSPlacement(sys, foot, 1, [outlet]); nb = DynNBS(1, foot, 1, [outlet])
+    pl   = DynNBSPlacement(sys, foot, 1, [outlet]); nb = DynNBS(1, foot, 1, [outlet])
     net  = only(filter(c -> !isempty(c.nbs),
                        setup_network(ts, [CI[LI[8, 8]]], Int[]; nbs = [nb])))
     nt   = length(net.traps)

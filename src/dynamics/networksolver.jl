@@ -672,7 +672,7 @@ struct NBSLayerParams
 end
 
 struct NBSPlan
-    placement_ix    ::Vector{Int}         # per NBS: index into the caller's NBSPlacement vector
+    placement_ix    ::Vector{Int}         # per NBS: index into the caller's DynNBSPlacement vector
                                           # (the key for the static nbs_inflow feed)
     state_base      ::Vector{Int}         # per NBS: 0-based offset of its layer block, after the nt trap states
     layers          ::Vector{Vector{NBSLayerParams}}
@@ -703,13 +703,13 @@ _nbs_saturated_draw(lp::NBSLayerParams) =
 _nbs_state_count(p) = p.nbsplan === nothing ? 0 : p.nbsplan.nlayer_total
 
 # Build the NBS routing plan for `net` (nothing when it has no NBS elements).
-# `placements` is the caller's `NBSPlacement` vector (indexed by `DynNBS.placement_ix`),
+# `placements` is the caller's `DynNBSPlacement` vector (indexed by `DynNBS.placement_ix`),
 # supplying the layer storage model.  Each outflowing layer's overflow is delivered to
 # resolved landing cells: the terrain exit boundary (top `n_terrain` layers, weighted by
 # `_nbs_exit_weights`) or a piped outlet (lower layers, weight 1).  A landing owned by an
 # in-network path gets a `(position, slot)` event; one owned by a trap gets a trap-outlet
 # slot; a landing off the network or off the domain is dropped (its water exits).
-function _build_nbs_plan(net::DynNetwork, tstruct, placements::Vector{NBSPlacement},
+function _build_nbs_plan(net::DynNetwork, tstruct, placements::Vector{DynNBSPlacement},
                          submerged_of::Dict{Int,Bool} = Dict{Int,Bool}())
     isempty(net.nbs) && return nothing
     LI = LinearIndices(tstruct.topography)
@@ -862,7 +862,7 @@ function _build_rate_params(tstruct::TrapStructure,
                             infiltration::AbstractMatrix{<:Real},
                             external_inflow::AbstractVector{<:Real};
                             path_inflow = nothing,
-                            nbs_placements::Vector{NBSPlacement} = NBSPlacement[],
+                            nbs_placements::Vector{DynNBSPlacement} = DynNBSPlacement[],
                             nbs_inflow::AbstractVector{<:Real} = Float64[],
                             nbs_submerged::Dict{Int,Bool} = Dict{Int,Bool}(),
                             zvt = nothing)
@@ -1496,7 +1496,7 @@ function solveDynNetwork!(state::AbstractVector{Float64},
                           inflow::AbstractVector{<:Real};
                           tmax = Inf,
                           path_inflow = nothing,
-                          nbs_placements::Vector{NBSPlacement} = NBSPlacement[],
+                          nbs_placements::Vector{DynNBSPlacement} = DynNBSPlacement[],
                           nbs_inflow::AbstractVector{<:Real} = Float64[],
                           # Loosened from 1e-8: physical accuracy needs only ~mL (abstol, m^3)
                           # and ~ms.  ~Halves the ODE step count on the culvert worst case;

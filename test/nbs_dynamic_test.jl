@@ -27,7 +27,7 @@ end
     sz = size(grid); li = LinearIndices(sz); ci = CartesianIndices(sz)
     r = sz[1] ÷ 2; c = sz[2] ÷ 2
     foot = [li[r, c], li[r, c + 1], li[r + 1, c], li[r + 1, c + 1]]
-    p = SWIM.NBSPlacement(SWIM.puddle(5.0), foot, [CartesianIndex(0, 0)])
+    p = SWIM.DynNBSPlacement(SWIM.puddle(5.0), foot, [CartesianIndex(0, 0)])
     t = spillanalysis(grid; nbs = [p])
 
     nbs_objs = SWIM._nbs_elements(t)
@@ -46,7 +46,7 @@ end
     sz = size(grid); li = LinearIndices(sz); ci = CartesianIndices(sz)
     r = sz[1] ÷ 2; c = sz[2] ÷ 2
     foot = [li[r, c], li[r, c + 1], li[r + 1, c], li[r + 1, c + 1]]
-    p = SWIM.NBSPlacement(SWIM.puddle(5.0), foot, [CartesianIndex(0, 0)])
+    p = SWIM.DynNBSPlacement(SWIM.puddle(5.0), foot, [CartesianIndex(0, 0)])
     t = spillanalysis(grid; nbs = [p])
     nbs_trap = t.regions[foot[1]]
 
@@ -74,7 +74,7 @@ function _mini_nbs_net(; Smax = 5.0, kOUT = 1.0)
     sz = size(grid); li = LinearIndices(sz)
     r = sz[1] ÷ 2; c = sz[2] ÷ 2
     foot = [li[r, c], li[r, c + 1], li[r + 1, c], li[r + 1, c + 1]]
-    p = SWIM.NBSPlacement(SWIM.puddle(Smax; kOUT = kOUT, nOUT = 1.0), foot, [CartesianIndex(0, 0)])
+    p = SWIM.DynNBSPlacement(SWIM.puddle(Smax; kOUT = kOUT, nOUT = 1.0), foot, [CartesianIndex(0, 0)])
     t = spillanalysis(grid; nbs = [p])
     nbs_objs = SWIM._nbs_elements(t)
     seeds = SWIM._dyn_seeds(t, Int[], SWIM.DynCulvert[], nbs_objs)
@@ -150,7 +150,7 @@ end
     sz = size(grid); li = LinearIndices(sz)
     r = sz[1] ÷ 2; c = sz[2] ÷ 2
     foot = [li[r, c], li[r, c + 1], li[r + 1, c], li[r + 1, c + 1]]
-    p = SWIM.NBSPlacement(SWIM.puddle(5.0; kOUT = 1.0), foot, [CartesianIndex(0, 0)])
+    p = SWIM.DynNBSPlacement(SWIM.puddle(5.0; kOUT = 1.0), foot, [CartesianIndex(0, 0)])
     t = spillanalysis(grid; nbs = [p])
 
     # rain then dry: the NBS fills in period 1 and drains its carried-over storage in
@@ -184,7 +184,7 @@ function _mini_nbs_net_system(system)
     r = sz[1] ÷ 2; c = sz[2] ÷ 2
     foot = [li[r, c], li[r, c + 1], li[r + 1, c], li[r + 1, c + 1]]
     outlets = fill(CartesianIndex(0, 0), length(system.layers))
-    p = SWIM.NBSPlacement(system, foot, outlets)
+    p = SWIM.DynNBSPlacement(system, foot, outlets)
     t = spillanalysis(grid; nbs = [p])
     nbs_objs = SWIM._nbs_elements(t)
     seeds = SWIM._dyn_seeds(t, Int[], SWIM.DynCulvert[], nbs_objs)
@@ -234,7 +234,7 @@ end
     r = sz[1] ÷ 2; c = sz[2] ÷ 2
     foot = [li[r, c], li[r, c + 1], li[r + 1, c], li[r + 1, c + 1]]
     sys = SWIM.mantillaRRmodel(5.0, 5.0, 5.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 1.0)
-    p = SWIM.NBSPlacement(sys, foot, fill(CartesianIndex(0, 0), 3))
+    p = SWIM.DynNBSPlacement(sys, foot, fill(CartesianIndex(0, 0), 3))
     t = spillanalysis(grid; nbs = [p])
     seq = fill_sequence(t, [WeatherEvent(0.0, 1.0), WeatherEvent(5.0, 0.0)])
     @test !isempty(seq)
@@ -247,7 +247,7 @@ end
     sz = size(grid); li = LinearIndices(sz); ci = CartesianIndices(sz)
     r = sz[1] ÷ 2; c = sz[2] ÷ 2
     foot = [li[r, c], li[r, c + 1], li[r + 1, c], li[r + 1, c + 1]]
-    p = SWIM.NBSPlacement(SWIM.puddle(5.0; kOUT = 1.0), foot, [CartesianIndex(0, 0)])
+    p = SWIM.DynNBSPlacement(SWIM.puddle(5.0; kOUT = 1.0), foot, [CartesianIndex(0, 0)])
     t = spillanalysis(grid; nbs = [p])
     nbs_objs = SWIM._nbs_elements(t)
     nbs_trap = t.regions[foot[1]]

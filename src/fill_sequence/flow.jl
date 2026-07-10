@@ -24,7 +24,7 @@ function compute_flow(spillgraph::SpillGraph,
                       infiltration::Union{Real, Matrix{<:Real}},
                       tstruct::TrapStructure{<:Real},
                       verbose::Bool=false;
-                      nbs::Vector{NBSPlacement}=NBSPlacement[])
+                      nbs::Vector{DynNBSPlacement}=DynNBSPlacement[])
     num_traps = length(tstruct.spillpoints)
     num_regions = length(tstruct.supertraps_of)
 
@@ -171,7 +171,7 @@ end
 
 # ----------------------------------------------------------------------------
 function _compute_initial_rateinfo(precipitation, infiltration, tstruct;
-                                   nbs::Vector{NBSPlacement}=NBSPlacement[])
+                                   nbs::Vector{DynNBSPlacement}=DynNBSPlacement[])
     if typeof(precipitation) <: Real
         precipitation = precipitation .* ones(size(tstruct.regions))
     end

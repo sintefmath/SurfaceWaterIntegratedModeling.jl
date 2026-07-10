@@ -24,7 +24,7 @@ grid with the corresponding values.
 - `infiltration::Matrix{<:Real}`: A grid expressing the maximum infiltration rate
                                   per grid cell.  If left empty, it will be substituted
                                   by a grid filled with zeros.
-- `nbs::Vector{NBSPlacement}`: Nature-Based-Solution installations (empty by default).
+- `nbs::Vector{DynNBSPlacement}`: Nature-Based-Solution installations (empty by default).
                   Each footprint cell acts as a sink in the accumulation sweep: it
                   captures the runoff reaching it into the owning placement (returned as
                   `nbs_inflow`) and does not forward it downstream, so downstream regions
@@ -54,7 +54,7 @@ function watercourses(tstruct::TrapStructure{<:Real},
                       full_traps::Vector{Bool};
                       precipitation::Union{Matrix{<:Real}, Real} = 1.0,
                       infiltration::Union{Matrix{<:Real}, Real} = 0.0,
-                      nbs::Vector{NBSPlacement} = NBSPlacement[])
+                      nbs::Vector{DynNBSPlacement} = DynNBSPlacement[])
 
     # expand `precipitation` and `infiltration` to matrices if necessary
     gridres = size(tstruct.topography)
@@ -149,7 +149,7 @@ end
 # Map each NBS footprint cell (linear index) to its placement index, for the
 # footprint-as-sink overlay in `watercourses`.  Overlapping footprints are rejected:
 # a cell can belong to at most one NBS (its captured flow has a single owner).
-function _nbs_sink_cells(nbs::Vector{NBSPlacement})
+function _nbs_sink_cells(nbs::Vector{DynNBSPlacement})
     d = Dict{Int,Int}()
     for (pi, p) in enumerate(nbs)
         for c in p.footprint

@@ -1,14 +1,16 @@
 # NOTES TO SELF
-# - [ ] Ditch DynNBS, and move NBSPlacement definition from nbs_elements.jl to elements.jl.  Perhaps
-#       change the name to DynNBSPlacement, to be consistent with DynCulvert.
+# - [x] DynNBSPlacement moved to elements.jl (renamed from NBSPlacement).  DynNBS still present;
+#       remove it once the distributor re-impl no longer needs the placement_ix overlay handle.
 # - [ ] Contract that all NBS footprints should have zero infiltration (to avoid special handling in fill_sequence)
+# - [ ] This file is not yet included in the module (src/SurfaceWaterIntegratedModeling.jl); wire it in
+#       once the path-construction (culvert/nbs tuples + merges arg) and distributor are ready.
 
 
 # ----------------------------------------------------------------------------
 function setup_network(tstruct, full_traps;
                        dyn_coords::Vector{CartesianIndex{2}}=CartesianIndex{2}[],
                        culverts::Vector{DynCulvert}=DynCulvert[],
-                       nbs::Vector{NBSPlacement}=NBSPlacement[])
+                       nbs::Vector{DynNBSPlacement}=DynNBSPlacement[])
 
     # Input validation (no culverts or dyn_coords inside NBS footprints)
     _validate_network_inputs(tstruct, dyn_coords, culverts, nbs)

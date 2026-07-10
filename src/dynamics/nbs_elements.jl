@@ -1,6 +1,6 @@
 using Printf
 
-export NBSLayer, NBSSystem, NBSPlacement
+export NBSLayer, NBSSystem
 export mantillaRRmodel, elhadiGreenRoof, puddle
 export compute_outflow
 
@@ -269,60 +269,6 @@ function compute_outflow(K, n, Smax, S; mollifier=0.0)
     return K * tmp^n
 end
 
-# ----------------------------------------------------------------------------
-"""
-       NBSPlacement(system, footprint, n_terrain, outlets)
-       NBSPlacement(system, footprint, outlets)          # n_terrain defaults to 1
-
-Represent a Nature-Based Solution (NBS) installation placed on the terrain,
-governed by the layered storage model `system` (an [`NBSSystem`](@ref)).
-
-`footprint` is the set of grid cells (linear indices, matching
-`TrapStructure.footprints`'s convention) covered by the installation.
-
-`n_terrain` is the number of *topmost* layers whose overflow re-emits at the
-footprint's lower-edge exit boundary (spread over the natural no-NBS exit split;
-see `agent/NBS_OPTION1_OVERLAY_PLAN.md` §3).  Every outflowing layer (`Kout > 0`)
-*below* the top `n_terrain` requires one explicit piped `outlet`, in top-to-bottom
-layer order.  `outlets` are grid cells (geometry — matching `DynCulvert`'s
-`inlet`/`outlet` convention) where that piped discharge re-enters the terrain; the
-terrain-re-emit targets of the top `n_terrain` layers are *not* stored here — they
-are derived from the footprint geometry at network-build time.
-
-The two-argument-tail form (no `n_terrain`) defaults `n_terrain = 1` — the topmost
-layer re-emits at terrain, matching a simple surface store (`puddle`).
-
-!!! note
-    The NBS model primitives (this type plus [`NBSSystem`](@ref) / [`NBSLayer`](@ref)
-    / [`compute_outflow`](@ref)) are retained; the dynamic overlay wiring that drives
-    them (see `agent/NBS_OPTION1_OVERLAY_PLAN.md`) is being (re)built stage by stage.
-"""
-mutable struct NBSPlacement <: DynObject
-    system::NBSSystem
-    footprint::Vector{Int}             # grid cells covered (linear indices)
-    n_terrain::Int                     # topmost layers re-emitting at the exit boundary
-    outlets::Vector{CartesianIndex{2}} # piped-outlet cells for the outflowing layers below the top n
-
-    # the following will have to be initialized at network-build time, when the TrapStructure is available
-    footprint_inflow_cells::Vector{CartesianIndex{2}} # terrain cells at the footprint's lower-edge exit boundary
-    footprint_outflow_cells::Vector{CartesianIndex{2}} # terrain cells at the footprint's lower-edge exit boundary
-    internal_accumulation_cells::Vector{CartesianIndex{2}} # terrain cells inside the footprint that accumulate water
-
-    function NBSPlacement(system::NBSSystem, footprint::Vector{Int}, n_terrain::Integer,
-                          outlets::Vector{CartesianIndex{2}})
-        nlayer = length(system.layers)
-        0 <= n_terrain <= nlayer ||
-            error("NBSPlacement: n_terrain must be in 0:$nlayer (layer count), got $n_terrain")
-        # every outflowing layer (Kout > 0) below the top n_terrain needs one piped outlet
-        npiped = count(l -> system.layers[l].Kout > 0.0, (n_terrain + 1):nlayer)
-        length(outlets) == npiped ||
-            error("NBSPlacement: expected $npiped piped outlet(s) for the outflowing layer(s) " *
-                  "below the top n_terrain=$n_terrain, got $(length(outlets))")
-        new(system, footprint, n_terrain, outlets, Vector{CartesianIndex{2}}(),
-            Vector{CartesianIndex{2}}(), Vector{CartesianIndex{2}}())
-    end
-end
-
-# Backward-compatible tail: no explicit n_terrain defaults to 1 (topmost layer re-emits at terrain).
-NBSPlacement(system::NBSSystem, footprint::Vector{Int}, outlets::Vector{CartesianIndex{2}}) =
-    NBSPlacement(system, footprint, 1, outlets)
+# DynNBSPlacement was moved to dynamics/elements.jl and renamed DynNBSPlacement (it is a
+# DynObject and needs to be defined alongside the other Dyn* network elements; this
+# file now holds only the layer-storage model, so it can be included before elements.jl).

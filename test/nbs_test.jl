@@ -44,7 +44,7 @@ end
     # single-layer puddle -> exactly one outlet; leave it unspecified so it is
     # backfilled to the trap's natural spillpoint (no terrain-specific knowledge
     # needed for the test to stay deterministic).
-    p = SWIM.NBSPlacement(SWIM.puddle(5.0), foot, [CartesianIndex(0, 0)])
+    p = SWIM.DynNBSPlacement(SWIM.puddle(5.0), foot, [CartesianIndex(0, 0)])
     t = spillanalysis(grid; nbs = [p])
 
     reg = t.regions[foot[1]]
@@ -64,22 +64,22 @@ end
     li = LinearIndices(size(grid))
 
     # area overwrite (footprint = 3 cells -> A = 3.0)
-    p = SWIM.NBSPlacement(SWIM.puddle(5.0), [li[1, 1], li[1, 2], li[2, 1]],
+    p = SWIM.DynNBSPlacement(SWIM.puddle(5.0), [li[1, 1], li[1, 2], li[2, 1]],
                           [CartesianIndex(3, 3)])
     SWIM._prepare_nbs!([p], grid)
     @test p.system.layers[1].A == 3.0
 
     # empty footprint -> error
     @test_throws ErrorException SWIM._prepare_nbs!(
-        [SWIM.NBSPlacement(SWIM.puddle(5.0), Int[], [CartesianIndex(1, 1)])], grid)
+        [SWIM.DynNBSPlacement(SWIM.puddle(5.0), Int[], [CartesianIndex(1, 1)])], grid)
 
     # out-of-bounds footprint cell -> error
     @test_throws ErrorException SWIM._prepare_nbs!(
-        [SWIM.NBSPlacement(SWIM.puddle(5.0), [999], [CartesianIndex(1, 1)])], grid)
+        [SWIM.DynNBSPlacement(SWIM.puddle(5.0), [999], [CartesianIndex(1, 1)])], grid)
 
     # outlet count != layer count -> error (puddle has 1 layer, 2 outlets given)
     @test_throws ErrorException SWIM._prepare_nbs!(
-        [SWIM.NBSPlacement(SWIM.puddle(5.0), [li[1, 1]],
+        [SWIM.DynNBSPlacement(SWIM.puddle(5.0), [li[1, 1]],
                            [CartesianIndex(1, 1), CartesianIndex(2, 2)])], grid)
 end
 
@@ -88,7 +88,7 @@ end
     grid = Float64[i + j for i in 1:5, j in 1:5]   # min = 2.0 at (1,1)
     li = LinearIndices(size(grid))
     foot = [li[3, 3], li[3, 4]]
-    p = SWIM.NBSPlacement(SWIM.puddle(5.0), foot, [CartesianIndex(1, 1)])
+    p = SWIM.DynNBSPlacement(SWIM.puddle(5.0), foot, [CartesianIndex(1, 1)])
     level = SWIM._dig_nbs_traps!(grid, p |> x -> [x])
     @test level == minimum(Float64[i + j for i in 1:5, j in 1:5]) - SWIM.NBS_DIG_DROP
     @test all(grid[c] == level for c in foot)      # footprint lowered
@@ -123,25 +123,25 @@ end
     regions, topo, footprint, sp, sto = _synthetic_nbs_case()
 
     # single-layer, unspecified outlet -> backfilled to the downstream discharge cell (3,3)
-    p1 = SWIM.NBSPlacement(SWIM.puddle(5.0), footprint, [CartesianIndex(0, 0)])
+    p1 = SWIM.DynNBSPlacement(SWIM.puddle(5.0), footprint, [CartesianIndex(0, 0)])
     SWIM._resolve_nbs!([p1], regions, sp, topo, sto)
     @test p1.outlets[1] == CartesianIndex(3, 3)
 
     # two-layer, both unspecified -> lowermost = discharge cell, upper = lowermost outlet
     twolayer = SWIM.elhadiGreenRoof(1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 1.0)
-    p2 = SWIM.NBSPlacement(twolayer, footprint,
+    p2 = SWIM.DynNBSPlacement(twolayer, footprint,
                            [CartesianIndex(0, 0), CartesianIndex(0, 0)])
     SWIM._resolve_nbs!([p2], regions, sp, topo, sto)
     @test p2.outlets[2] == CartesianIndex(3, 3)     # lowermost -> downstream discharge cell
     @test p2.outlets[1] == p2.outlets[2]            # upper -> lowermost outlet
 
     # specified valid outlet is preserved
-    p3 = SWIM.NBSPlacement(SWIM.puddle(5.0), footprint, [CartesianIndex(3, 3)])
+    p3 = SWIM.DynNBSPlacement(SWIM.puddle(5.0), footprint, [CartesianIndex(3, 3)])
     SWIM._resolve_nbs!([p3], regions, sp, topo, sto)
     @test p3.outlets[1] == CartesianIndex(3, 3)
 
     # specified outlet inside the region -> error
-    p4 = SWIM.NBSPlacement(SWIM.puddle(5.0), footprint, [CartesianIndex(2, 2)])
+    p4 = SWIM.DynNBSPlacement(SWIM.puddle(5.0), footprint, [CartesianIndex(2, 2)])
     @test_throws ErrorException SWIM._resolve_nbs!([p4], regions, sp, topo, sto)
 end
 
@@ -152,7 +152,7 @@ end
     # outlet (3,3) is region 2, strictly below the spillpoint and out of the NBS
     # region — but here regions 1 and 2 share supertrap 3, so it must be rejected.
     shared = [[1, 3], [2, 3]]
-    p = SWIM.NBSPlacement(SWIM.puddle(5.0), footprint, [CartesianIndex(3, 3)])
+    p = SWIM.DynNBSPlacement(SWIM.puddle(5.0), footprint, [CartesianIndex(3, 3)])
     @test_throws ErrorException SWIM._resolve_nbs!([p], regions, sp, topo, shared)
 
     # the direct helper: shared supertrap -> error; disjoint -> ok

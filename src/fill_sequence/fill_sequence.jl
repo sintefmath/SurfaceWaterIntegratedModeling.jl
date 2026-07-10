@@ -35,7 +35,7 @@ function fill_sequence(tstruct::TrapStructure{<:Real},
             infiltration::Union{Matrix{<:Real}, Nothing} = nothing,
             dyn_traps::Vector{Int} = Int[],
             culverts::Vector{DynCulvert} = DynCulvert[],
-            nbs::Vector{NBSPlacement} = NBSPlacement[],
+            nbs::Vector{DynNBSPlacement} = DynNBSPlacement[],
             verbose::Bool=false)::Vector{SpillEvent}
     @assert !isempty(weather_events)
 
@@ -114,7 +114,7 @@ function _fill_sequence_for_weather_event!(seq, sgraph, rateinfo, changetimeest,
                                            tstruct, infiltration, endtime, time_slack,
                                            net_contexts, net_trap_set, net_covered_set,
                                            dyn_traps, culverts, verbose,
-                                           nbs = NBSPlacement[],
+                                           nbs = DynNBSPlacement[],
                                            nbs_state = Dict{Int,Vector{Float64}}())
     cur_time = cur_amounts[1].time
 

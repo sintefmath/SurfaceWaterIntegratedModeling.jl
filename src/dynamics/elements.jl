@@ -1,6 +1,6 @@
 import Graphs
 
-export DynObject, DynFlowPath, DynTrap, DynCulvert, DynNBS, DynNetwork, setup_network
+export DynObject, DynFlowPath, DynTrap, DynCulvert, DynNBS, DynNBSPlacement, DynNetwork, setup_network
 
 # Make generic baseclass for dynamic objects
 abstract type DynObject end
@@ -144,7 +144,7 @@ end
         DynNBS(placement_ix, footprint, n_terrain, outlets)
 
 The dynamic-network view of a Nature-Based Solution installation (the overlay
-counterpart of the caller's [`NBSPlacement`](@ref), referenced by `placement_ix`).
+counterpart of the caller's [`DynNBSPlacement`](@ref), referenced by `placement_ix`).
 
 Unlike a [`DynTrap`](@ref) it is not a node in the trap hierarchy: it is an
 *overlay element*.  Its layered storage is fed by the static footprint capture
@@ -155,7 +155,7 @@ outflowing layer below them through an explicit piped `outlet`.  See
 `agent/NBS_OPTION1_OVERLAY_PLAN.md` §7a.
 
 # Fields
-- `placement_ix`: index of the owning [`NBSPlacement`](@ref) in the caller's vector
+- `placement_ix`: index of the owning [`DynNBSPlacement`](@ref) in the caller's vector
   (the key for the layer model and the static `nbs_inflow` tally)
 - `footprint`: footprint cells (linear indices) — the network occupancy of the
   element and the cells at which dynamic internal flow is captured
@@ -168,6 +168,62 @@ struct DynNBS <: DynObject
     n_terrain::Int
     outlets::Vector{CartesianIndex{2}}
 end
+
+# ----------------------------------------------------------------------------
+"""
+       DynNBSPlacement(system, footprint, n_terrain, outlets)
+       DynNBSPlacement(system, footprint, outlets)          # n_terrain defaults to 1
+
+Represent a Nature-Based Solution (NBS) installation placed on the terrain,
+governed by the layered storage model `system` (an [`NBSSystem`](@ref)).
+
+`footprint` is the set of grid cells (linear indices, matching
+`TrapStructure.footprints`'s convention) covered by the installation.
+
+`n_terrain` is the number of *topmost* layers whose overflow re-emits at the
+footprint's lower-edge exit boundary.  Every outflowing layer (`Kout > 0`) *below*
+the top `n_terrain` requires one explicit piped `outlet`, in top-to-bottom layer
+order.  `outlets` are grid cells (geometry — matching `DynCulvert`'s
+`inlet`/`outlet` convention) where that piped discharge re-enters the terrain; the
+terrain-re-emit targets of the top `n_terrain` layers are derived from the
+footprint geometry at network-build time.
+
+The `footprint_*`/`internal_accumulation_cells` and `id` fields are filled in at
+network-build time (`setup_network`), when the `TrapStructure` is available.
+"""
+mutable struct DynNBSPlacement <: DynObject
+    system::NBSSystem
+    footprint::Vector{Int}             # grid cells covered (linear indices)
+    n_terrain::Int                     # topmost layers re-emitting at the exit boundary
+    outlets::Vector{CartesianIndex{2}} # piped-outlet cells for the outflowing layers below the top n
+
+    # filled in at network-build time, when the TrapStructure is available
+    footprint_inflow_cells::Vector{CartesianIndex{2}}      # cells feeding into the footprint from outside
+    footprint_outflow_cells::Vector{CartesianIndex{2}}     # external cells the footprint drains to
+    internal_accumulation_cells::Vector{CartesianIndex{2}} # footprint cells that pond (trap bottoms)
+
+    # @@@ stable identity for cross-event layer-state persistence (the key DynNBS.placement_ix
+    #     used to carry).  Assigned by the caller/distributor; 0 until then.
+    id::Int
+
+    function DynNBSPlacement(system::NBSSystem, footprint::Vector{Int}, n_terrain::Integer,
+                             outlets::Vector{CartesianIndex{2}})
+        nlayer = length(system.layers)
+        0 <= n_terrain <= nlayer ||
+            error("DynNBSPlacement: n_terrain must be in 0:$nlayer (layer count), got $n_terrain")
+        # every outflowing layer (Kout > 0) below the top n_terrain needs one piped outlet
+        npiped = count(l -> system.layers[l].Kout > 0.0, (n_terrain + 1):nlayer)
+        length(outlets) == npiped ||
+            error("DynNBSPlacement: expected $npiped piped outlet(s) for the outflowing layer(s) " *
+                  "below the top n_terrain=$n_terrain, got $(length(outlets))")
+        new(system, footprint, n_terrain, outlets, Vector{CartesianIndex{2}}(),
+            Vector{CartesianIndex{2}}(), Vector{CartesianIndex{2}}(), 0)
+    end
+end
+
+# Backward-compatible tail: no explicit n_terrain defaults to 1 (topmost layer re-emits at terrain).
+DynNBSPlacement(system::NBSSystem, footprint::Vector{Int}, outlets::Vector{CartesianIndex{2}}) =
+    DynNBSPlacement(system, footprint, 1, outlets)
 
 # Network of dynamic objects
 """
@@ -193,7 +249,7 @@ mutable struct DynNetwork
     flow_paths::Vector{DynFlowPath}
     traps::Vector{DynTrap}
     culverts::Vector{DynCulvert}
-    nbs::Vector{NBSPlacement}
+    nbs::Vector{DynNBSPlacement}
 end
 
 # Backward-compatible constructor: a network with no NBS overlay elements.  Keeps
@@ -203,7 +259,7 @@ DynNetwork(flow_paths::Vector{DynFlowPath}, traps::Vector{DynTrap},
            culverts::Vector{DynCulvert}) =
     DynNetwork(flow_paths, traps, culverts, DynNBS[])
 
-DynNetwork(culverts::Vector{DynCulvert}, nbs::Vector{NBSPlacement}) =
+DynNetwork(culverts::Vector{DynCulvert}, nbs::Vector{DynNBSPlacement}) =
     DynNetwork(DynFlowPath[], DynTrap[], culverts, nbs)
 
 DynNetwork() = DynNetwork(DynFlowPath[], DynTrap[], DynCulvert[])
