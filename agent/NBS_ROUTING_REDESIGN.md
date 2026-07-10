@@ -165,16 +165,36 @@ loop and break the "water always flows downstream" invariant. Handled by
 footprint. (No automatic detection for now — matches the deferred reverse-culvert
 handling.)
 
-## 9. Open / deferred
+## 9. Splitting into connected components
 
-- **`_split_network_into_connected_components`** is a stub — not yet implemented.
-  Connectivity must follow more than terrain flow: a culvert or an NBS outlet
-  bridges otherwise-disjoint regions and must land them in the *same* component
-  (shared mass balance). The relation is the undirected union over
-  {path→target_trap, trap→spill_path, path merges, culvert inlet↔outlet,
-  NBS footprint ↔ its outlet-/leak-seeded paths}. Group, then remap local
-  indices.
-- Per-layer distinct outlets (§5) — deferred; single shared outlet for now.
+`_split_network_into_connected_components(net, tstruct)` builds an undirected
+graph over path nodes (`1:np`) and trap nodes (`np+1:np+nt`), takes
+`Graphs.connected_components`, and rebuilds each as a standalone `DynNetwork`
+with all cross-references remapped to local 1-based indices.
+
+Connectivity must follow more than terrain flow — a culvert or an NBS bridges
+otherwise-disjoint regions and must land them in the *same* component (shared
+mass balance). Edges come from:
+
+- `path → target_trap`, `trap → spill_path`, and `path` merges (terrain + tribs);
+- **culverts**: unite the path/trap owning the inlet with the one owning the
+  outlet;
+- **NBS**: unite each NBS's coupled elements —
+  - *emission*: paths carrying one of its outlets (`nbs_outlets`);
+  - *outflow deduction*: paths whose **first cell** is one of the NBS's
+    `footprint_outflow_cells` (the seed stores the external `ds` cell, so this is
+    a `net`-only test);
+  - *accumulation deduction*: the network trap holding its
+    `internal_accumulation_cells`. Accumulation seeds register a trap (a sink)
+    with no flow path, so they can't be matched cell-on-path; instead map each
+    cell to its lowest-level region (`tstruct.regions[c]`, deduped — absorbs
+    flat many-celled bottoms) and then to the one network trap in that region's
+    `supertraps_of` hierarchy (asserted unique). This is the only NBS link that
+    needs `tstruct`.
+
+### Deferred
+
+- Per-layer distinct outlets (§5) — single shared outlet for now.
 - The distributor / rate-layer re-implementation itself.
 
 ---
