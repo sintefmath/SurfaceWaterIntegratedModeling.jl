@@ -143,7 +143,7 @@ function spillanalysis(grid::Matrix{<:Real};
         end
     end
 
-    wbody_cells = isnothing(waterbodies) ? Vector{CartesianIndex{2}}() : findall(waterbodies)
+    wbody_cells = isnothing(waterbodies) ? Set{CartesianIndex{2}}() : Set(findall(waterbodies))
 
     return TrapStructure{eltype(grid)}(gridcpy,
                                        flowgraph,

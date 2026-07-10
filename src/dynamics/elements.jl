@@ -30,15 +30,18 @@ struct DynFlowPath <: DynObject
     culvert_inlets::Vector{Tuple{Int,Int}}
     culvert_outlets::Vector{Tuple{Int,Int}}
 
+    # nbs outlets represent other external sources
+    nbs_outlets::Vector{Tuple{Int,Int}}
+    
     # tributary paths that merge into this one: (tributary_path_index, junction_cell_index)
     # where junction_cell_index is the 1-based index of the junction cell in *this* path's cells.
     merges::Vector{Tuple{Int,Int}}
 end
 
 DynFlowPath(cells, target_trap) =
-    DynFlowPath(cells, target_trap, Tuple{Int,Int}[], Tuple{Int,Int}[], Tuple{Int,Int}[])
+    DynFlowPath(cells, target_trap, Tuple{Int,Int}[], Tuple{Int,Int}[], Tuple{Int,Int}[], Tuple{Int,Int}[])
 DynFlowPath(cells) =
-    DynFlowPath(cells, 0, Tuple{Int,Int}[], Tuple{Int,Int}[], Tuple{Int,Int}[])
+    DynFlowPath(cells, 0, Tuple{Int,Int}[], Tuple{Int,Int}[], Tuple{Int,Int}[], Tuple{Int,Int}[])
 
 """
         DynTrap(trap_ix, spill_path, culvert_inlets, culvert_outlets)
@@ -59,7 +62,7 @@ water level in the trap.  The infiltration capacity of each cell in the trap is
 represented externally.
 
 """
-struct DynTrap <: DynObject
+mutable struct DynTrap <: DynObject
     trap_ix::Int # index of the trap in the spillanalysis structure
 
     # spill path
@@ -186,11 +189,11 @@ flow paths share cells, one would be truncated as it merges into the other, and
 the trap at the end of the truncated path would be connected to the remaining
 path instead.
 """
-struct DynNetwork
+mutable struct DynNetwork
     flow_paths::Vector{DynFlowPath}
     traps::Vector{DynTrap}
     culverts::Vector{DynCulvert}
-    nbs::Vector{DynNBS}
+    nbs::Vector{NBSPlacement}
 end
 
 # Backward-compatible constructor: a network with no NBS overlay elements.  Keeps
@@ -199,6 +202,9 @@ end
 DynNetwork(flow_paths::Vector{DynFlowPath}, traps::Vector{DynTrap},
            culverts::Vector{DynCulvert}) =
     DynNetwork(flow_paths, traps, culverts, DynNBS[])
+
+DynNetwork(culverts::Vector{DynCulvert}, nbs::Vector{NBSPlacement}) =
+    DynNetwork(DynFlowPath[], DynTrap[], culverts, nbs)
 
 DynNetwork() = DynNetwork(DynFlowPath[], DynTrap[], DynCulvert[])
 
@@ -495,7 +501,7 @@ point in the terrain.
 # query), plus the ancestors `_unfilled_parent_of` walks in the wrap-around case.  The
 # traced subnet is a pure function of `full_traps` restricted to this set, so the cached
 # subnet stays valid until one of these traps changes fill-state (see `_traced_subnets`).
-function _subnet_deps(tstruct, paths, ftraps, tix, ends_with_path, full_traps)
+function _subnet_deps(tstruct, paths, ftraps, tix, full_traps)
     dep = Set{Int}(ftraps)                    # every followed full trap (draining any collapses the chain)
     tix > 0 && push!(dep, tix)                # the terminal pool trap (filling it extends the chain)
     for seg in paths                          # supertraps of each region a segment ends in
@@ -557,7 +563,7 @@ function _subnetwork(tstruct, coord::CartesianIndex, full_traps)
 
     # Dependency set for incremental caching, captured from the RAW paths/ftraps/tix
     # before `_subsume_terminal_parent` mutates `paths` below.
-    deps = _subnet_deps(tstruct, paths, ftraps, tix, ends_with_path, full_traps)
+    deps = _subnet_deps(tstruct, paths, ftraps, tix, full_traps)
 
     if tix > 0
         # Subsume-parents invariant: a parent trap is always a single node that
@@ -567,8 +573,7 @@ function _subnetwork(tstruct, coord::CartesianIndex, full_traps)
         # the single parent node, dropping the path segments internal to its
         # footprint.  (A *full* parent is already subsumed by `flow_path_from`, which
         # records the uppermost full supertrap and deletes its footprint cells.)
-        paths, traps, starts_with_trap =
-            _subsume_terminal_parent(tstruct, paths, ftraps, tix, starts_with_trap)
+        paths, traps = _subsume_terminal_parent(tstruct, paths, ftraps, tix, starts_with_trap)
     end
 
     return _build_network(paths, traps, starts_with_trap, tstruct;
@@ -597,7 +602,7 @@ function _subsume_terminal_parent(tstruct, paths, ftraps, P::Int, starts_with_tr
     d = findfirst(t -> _is_descendant(tstruct, t, P), ftraps)
     if d === nothing
         # `P` has no recorded descendants: keep the original chain, `P` as terminal.
-        return paths, push!(collect(ftraps), P), starts_with_trap
+        return paths, push!(collect(ftraps), P)
     end
 
     # Keep the upstream non-descendant traps, then the single parent node `P`.
@@ -617,7 +622,7 @@ function _subsume_terminal_parent(tstruct, paths, ftraps, P::Int, starts_with_tr
         cut !== nothing && (new_paths[end] = last[1:cut-1])
     end
 
-    return new_paths, new_traps, starts_with_trap
+    return new_paths, new_traps
 end
 
 # True when trap `t`'s spillpoint sits on the domain boundary, i.e. `t` spills

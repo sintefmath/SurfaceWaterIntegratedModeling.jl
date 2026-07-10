@@ -163,6 +163,32 @@ function _nbs_sink_cells(nbs::Vector{NBSPlacement})
 end
 
 # ----------------------------------------------------------------------------
+# helper function tracing a path donwstream from a given node until we hit a
+# trap bottom or exit the domain
+function _trace_path(tstruct, node)
+
+    CI = CartesianIndices(size(tstruct.topography))
+    CL = LinearIndices(size(tstruct.topography))
+
+    path = [node]
+    while true
+        ds_nodes = Graphs.outneighbors(tstruct.flowgraph, path[end])
+        if isempty(ds_nodes)
+            break;
+        end
+        @assert length(ds_nodes) == 1
+        c1, c2 = CI[path[end]], CI[ds_nodes[1]]
+        if !_are_connected(c1, c2) && c2 ∉ tstruct.waterbodies
+            line_ixs = _connect_cells(c1, c2)
+            append!(path, CL[line_ixs])
+        else
+            push!(path, ds_nodes[1])
+        end
+    end
+    return path
+end
+
+# ----------------------------------------------------------------------------
 """
      flow_path_from(tstruct, start_node, full_traps)
 
@@ -190,36 +216,12 @@ function flow_path_from(tstruct::TrapStructure{<:Real},
                         start_node::Int;
                         full_traps::Union{Nothing, Vector{Int}}=nothing)
 
-    # helper function tracing a path donwstream from a given node until we hit a
-    # trap bottom or exit the domain
-    CI = CartesianIndices(size(tstruct.topography))
-    CL = LinearIndices(size(tstruct.topography))
-    wbodies = Set(tstruct.waterbodies)
-    function _trace_path(node)
-        path = [node]
-        while true
-            ds_nodes = Graphs.outneighbors(tstruct.flowgraph, path[end])
-            if isempty(ds_nodes)
-                break;
-            end
-            @assert length(ds_nodes) == 1
-            c1, c2 = CI[path[end]], CI[ds_nodes[1]]
-            if !_are_connected(c1, c2) && c2 ∉ wbodies
-                line_ixs = _connect_cells(c1, c2)
-                append!(path, CL[line_ixs])
-            else
-                push!(path, ds_nodes[1])
-            end
-        end
-        return path
-    end
-
     cur_node = start_node
     paths = Vector{Vector{Int64}}() # list of paths traced downstream from start_node
     downstream_filled_traps = Vector{Int64}() # list of filled traps downstream of start_node
     first_segment = true # the leading segment (traced from start_node)
     while cur_node > 0
-        push!(paths, _trace_path(cur_node))
+        push!(paths, _trace_path(tstruct, cur_node))
 
         cur_reg = tstruct.regions[paths[end][end]] # region where we ended up
         if cur_reg <= 0

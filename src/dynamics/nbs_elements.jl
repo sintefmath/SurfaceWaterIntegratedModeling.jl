@@ -297,11 +297,16 @@ layer re-emits at terrain, matching a simple surface store (`puddle`).
     / [`compute_outflow`](@ref)) are retained; the dynamic overlay wiring that drives
     them (see `agent/NBS_OPTION1_OVERLAY_PLAN.md`) is being (re)built stage by stage.
 """
-struct NBSPlacement <: DynObject
+mutable struct NBSPlacement <: DynObject
     system::NBSSystem
     footprint::Vector{Int}             # grid cells covered (linear indices)
     n_terrain::Int                     # topmost layers re-emitting at the exit boundary
     outlets::Vector{CartesianIndex{2}} # piped-outlet cells for the outflowing layers below the top n
+
+    # the following will have to be initialized at network-build time, when the TrapStructure is available
+    footprint_inflow_cells::Vector{CartesianIndex{2}} # terrain cells at the footprint's lower-edge exit boundary
+    footprint_outflow_cells::Vector{CartesianIndex{2}} # terrain cells at the footprint's lower-edge exit boundary
+    internal_accumulation_cells::Vector{CartesianIndex{2}} # terrain cells inside the footprint that accumulate water
 
     function NBSPlacement(system::NBSSystem, footprint::Vector{Int}, n_terrain::Integer,
                           outlets::Vector{CartesianIndex{2}})
@@ -313,7 +318,8 @@ struct NBSPlacement <: DynObject
         length(outlets) == npiped ||
             error("NBSPlacement: expected $npiped piped outlet(s) for the outflowing layer(s) " *
                   "below the top n_terrain=$n_terrain, got $(length(outlets))")
-        new(system, footprint, n_terrain, outlets)
+        new(system, footprint, n_terrain, outlets, Vector{CartesianIndex{2}}(),
+            Vector{CartesianIndex{2}}(), Vector{CartesianIndex{2}}())
     end
 end
 
