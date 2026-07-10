@@ -14,13 +14,15 @@ paths, merges, culverts, NBS) remapped to local 1-based indices.
 """
 function split_network_into_connected_components(net::DynNetwork, tstruct)
     np = length(net.flow_paths)
-    g  = _coupling_graph(net, np, tstruct)
-    return [_build_subnetwork(net, nodes, np) for nodes in Graphs.connected_components(g)]
+    nbs_owners = _nbs_owner_nodes(net, tstruct, np)
+    g  = _coupling_graph(net, np, nbs_owners)
+    return [_build_subnetwork(net, nodes, np, nbs_owners)
+            for nodes in Graphs.connected_components(g)]
 end
 
 # Undirected graph over path nodes (1:np) and trap nodes (np+1:np+nt); an edge
 # means the two elements must live in the same component.
-function _coupling_graph(net::DynNetwork, np::Int, tstruct)
+function _coupling_graph(net::DynNetwork, np::Int, nbs_owners)
     g = Graphs.SimpleGraph(np + length(net.traps))
     tnode(t) = np + t
     for (p, fp) in enumerate(net.flow_paths)
@@ -30,8 +32,8 @@ function _coupling_graph(net::DynNetwork, np::Int, tstruct)
     for (t, tr) in enumerate(net.traps)
         tr.spill_path > 0 && Graphs.add_edge!(g, tnode(t), tr.spill_path)
     end
-    for nodes in _culvert_owner_nodes(net, np);      _link_all!(g, nodes); end
-    for nodes in _nbs_owner_nodes(net, tstruct, np); _link_all!(g, nodes); end
+    for nodes in _culvert_owner_nodes(net, np); _link_all!(g, nodes); end
+    for nodes in nbs_owners;                    _link_all!(g, nodes); end
     return g
 end
 
@@ -86,11 +88,14 @@ end
 
 # Rebuild one component as a standalone DynNetwork, remapping every cross-reference
 # (target traps, spill paths, merges, culverts, NBS) to local 1-based indices.
-function _build_subnetwork(net::DynNetwork, nodes::Vector{Int}, np::Int)
+function _build_subnetwork(net::DynNetwork, nodes::Vector{Int}, np::Int, nbs_owners)
+    nodeset = Set(nodes)
     pids = sort!([n      for n in nodes if n <= np])
     tids = sort!([n - np for n in nodes if n >  np])
-    cvids  = _referenced_culverts(net, pids, tids)
-    nbsids = _referenced_nbs(net, pids)
+    cvids  = _referenced_culverts(net, pids, tids) # all culverts referenced by the component's paths and traps
+    # an NBS belongs here iff any element it is coupled to (emission / outflow /
+    # accumulation, from _nbs_owner_nodes) is in this component
+    nbsids = [n for n in eachindex(net.nbs) if any(o in nodeset for o in nbs_owners[n])]
 
     pmap   = _local_index(pids)
     tmap   = _local_index(tids)
@@ -113,12 +118,6 @@ function _referenced_culverts(net::DynNetwork, pids, tids)
         push!(cv, c)
     end
     return sort!(unique!(cv))
-end
-
-function _referenced_nbs(net::DynNetwork, pids)
-    ns = Int[]
-    for g in pids, (n, _) in net.flow_paths[g].nbs_outlets; push!(ns, n); end
-    return sort!(unique!(ns))
 end
 
 # Sentinels pass through unchanged: 0 = none, -1 = out-of-domain (trap spill only).
