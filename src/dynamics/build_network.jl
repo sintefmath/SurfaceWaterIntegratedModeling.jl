@@ -130,9 +130,10 @@ function _grow_network_from_seed!(network, pathmap, seed::CartesianIndex{2},
                 _update_pathmap!(pathmap, path, length(network.flow_paths)+1) # may truncate path
 
             # add newly constructed path to network, with intersection culverts, if any
-            cv_in, cv_out, nbs_out = _intersecting_culverts_and_nbs_outlets(CI[path], network.culverts, network.nbs)
+            cv_in, cv_out, nbs_out = _intersecting_on_path(CI[path], network.culverts, network.nbs)
             target_trap = isect_path > 0 ? 0 : trap_local
-            push!(network.flow_paths, DynFlowPath(CI[path], target_trap, cv_in, cv_out, nbs_out))
+            push!(network.flow_paths,
+                  DynFlowPath(CI[path], target_trap, cv_in, cv_out, nbs_out, Tuple{Int,Int}[]))
 
             # registering where this path exited, if there is a departing trap
             (departing_trap_ix > 0) && (network.traps[departing_trap_ix].spill_path = length(network.flow_paths))
@@ -201,7 +202,29 @@ function _intersecting_culverts_and_nbs_outlets(footprint, culverts, nbs)
             push!(nbs_out, ix)
         end
     end
-    
+
+    return cv_in, cv_out, nbs_out
+end
+
+# ----------------------------------------------------------------------------
+# For a flow path, the culvert inlets/outlets and NBS outlets that fall on it, each
+# paired with the 1-based position of the matching cell within `path` (routing charges
+# infiltration up to that cell, like a `merges` junction).  The trap form above stores
+# bare ids since a trap has no along-path position.
+function _intersecting_on_path(path, culverts, nbs)
+    cv_in   = Tuple{Int,Int}[]
+    cv_out  = Tuple{Int,Int}[]
+    nbs_out = Tuple{Int,Int}[]
+    for (ix, culvert) in enumerate(culverts)
+        p = findfirst(==(culvert.inlet),  path); p !== nothing && push!(cv_in,  (ix, p))
+        p = findfirst(==(culvert.outlet), path); p !== nothing && push!(cv_out, (ix, p))
+    end
+    for (ix, n) in enumerate(nbs)
+        for outlet in n.outlets
+            p = findfirst(==(outlet), path)
+            p !== nothing && (push!(nbs_out, (ix, p)); break)
+        end
+    end
     return cv_in, cv_out, nbs_out
 end
 
