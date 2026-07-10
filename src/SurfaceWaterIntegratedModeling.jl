@@ -30,6 +30,7 @@ include("dynamics/culvert_rate.jl")
 include("utils.jl")
 include("dynamics/networksolver.jl")
 include("dynamics/network_context.jl")
+include("dynamics/network_utils.jl")
 # ----------------------------------------------------------------------------
 include("IOandplot.jl")
 # ----------------------------------------------------------------------------

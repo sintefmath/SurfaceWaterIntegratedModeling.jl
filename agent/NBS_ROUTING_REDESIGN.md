@@ -167,10 +167,11 @@ handling.)
 
 ## 9. Splitting into connected components
 
-`_split_network_into_connected_components(net, tstruct)` builds an undirected
-graph over path nodes (`1:np`) and trap nodes (`np+1:np+nt`), takes
-`Graphs.connected_components`, and rebuilds each as a standalone `DynNetwork`
-with all cross-references remapped to local 1-based indices.
+`split_network_into_connected_components(net, tstruct)` (public, in
+`src/dynamics/network_utils.jl`) builds an undirected graph over path nodes
+(`1:np`) and trap nodes (`np+1:np+nt`), takes `Graphs.connected_components`, and
+rebuilds each as a standalone `DynNetwork` with all cross-references remapped to
+local 1-based indices.
 
 Connectivity must follow more than terrain flow — a culvert or an NBS bridges
 otherwise-disjoint regions and must land them in the *same* component (shared
