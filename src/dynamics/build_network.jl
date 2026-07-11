@@ -141,28 +141,24 @@ function _grow_network_from_seed!(network, pathmap, seed::CartesianIndex{2},
                 trap_local = length(network.traps)
             end
         end
-        # registering path if it exists
-        if !isempty(path)
-            isect_path, isect_cell =
-                _update_pathmap!(pathmap, path, length(network.flow_paths)+1) # may truncate path
+        # Always register a connecting path (possibly zero cells) from the departing element
+        # to the segment end; `seed` is its departure_point, valid even when `cells` is empty.
+        isect_path, isect_cell =
+            _update_pathmap!(pathmap, path, length(network.flow_paths)+1) # may empty path
 
-            # add newly constructed path to network, with intersection culverts, if any
-            cv_in, cv_out, nbs_out = _intersecting_on_path(CI[path], network.culverts, network.nbs)
-            target_trap = isect_path > 0 ? 0 : trap_local
-            push!(network.flow_paths,
-                  DynFlowPath(CI[path], target_trap, cv_in, cv_out, nbs_out, Tuple{Int,Int}[]))
+        cv_in, cv_out, nbs_out = _intersecting_on_path(CI[path], network.culverts, network.nbs)
+        target_trap = isect_path > 0 ? 0 : trap_local
+        push!(network.flow_paths,
+              DynFlowPath(CI[path], seed, target_trap, cv_in, cv_out, nbs_out, Tuple{Int,Int}[]))
+        new_ix = length(network.flow_paths)
 
-            # registering where this path exited, if there is a departing trap
-            (departing_trap_ix > 0) && (network.traps[departing_trap_ix].spill_path = length(network.flow_paths))
-            
-            if isect_path > 0
-                # path merged with another path, so we need to register the
-                # merge in the other path's merges list
-                isect_pt = findfirst(network.flow_paths[isect_path].cells .== CI[isect_cell])
-                @assert isect_pt > 0 "Intersection point should be in the other path's cells."
-                push!(network.flow_paths[isect_path].merges,
-                      (length(network.flow_paths), isect_pt))
-            end
+        (departing_trap_ix > 0) && (network.traps[departing_trap_ix].spill_path = new_ix)
+
+        if isect_path > 0
+            # from the intersection cell on, this path merges into the owning one
+            isect_pt = findfirst(network.flow_paths[isect_path].cells .== CI[isect_cell])
+            @assert isect_pt > 0 "Intersection point should be in the other path's cells."
+            push!(network.flow_paths[isect_path].merges, (new_ix, isect_pt))
         end
 
         # if path ended in a full trap, it is spilling and we should keep on
@@ -186,10 +182,9 @@ function _update_pathmap!(pathmap, path::Vector{Int}, path_ix)
     isect_path, isect_cell = 0, 0
     for (ix, cell) in enumerate(path)
         if haskey(pathmap, cell)
-            # truncate path at intersection point
-            @assert (ix > 1) "The first point in the path should never be an intersection point."
-            #path = path[1:ix-1]
-            splice!(path, ix:lastindex(path))  # Mutate `path` by removing elements from `ix` to the end
+            # Truncate where it meets the owning path (flow is deterministic); ix==1 empties
+            # it -> caller makes a zero-length connector (source kept in departure_point).
+            splice!(path, ix:lastindex(path))
             isect_path, isect_cell = pathmap[cell], cell
         end
     end

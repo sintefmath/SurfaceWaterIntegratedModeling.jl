@@ -65,9 +65,8 @@ function _nbs_coupled_nodes(net::DynNetwork, tstruct, np::Int)
     end
     for (p, fp) in enumerate(net.flow_paths)
         for (n, _) in fp.nbs_outlets; push!(coupled[n], p); end
-        isempty(fp.cells) && continue
         for n in eachindex(net.nbs)
-            first(fp.cells) in outflow[n] && push!(coupled[n], p)
+            fp.departure_point in outflow[n] && push!(coupled[n], p)
         end
         for cell in fp.cells
             n = get(inflow_of, cell, 0); n > 0 && push!(coupled[n], p)
@@ -128,7 +127,7 @@ end
 _relabel(ix, m) = ix <= 0 ? ix : m[ix]
 
 function _localize_path(fp::DynFlowPath, tmap, cvmap, nbsmap, pmap)
-    DynFlowPath(fp.cells,
+    DynFlowPath(fp.cells, fp.departure_point,
                 _relabel(fp.target_trap, tmap),
                 [(cvmap[c],  pos) for (c, pos) in fp.culvert_inlets],
                 [(cvmap[c],  pos) for (c, pos) in fp.culvert_outlets],

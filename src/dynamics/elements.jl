@@ -20,6 +20,10 @@ The infiltration capacity of each cell in the path is represented externally.
 struct DynFlowPath <: DynObject
     cells::Vector{CartesianIndex{2}} # cells along the flow path
 
+    # Cell the path departed from; valid even when `cells` is empty (zero-length connector)
+    # or the tail was truncated. Authoritative source — do not infer it from `cells[1]`.
+    departure_point::CartesianIndex{2}
+
     # Target trap index (0 for out-of-domain or intersection with another flow path)
     target_trap::Int
 
@@ -32,12 +36,16 @@ struct DynFlowPath <: DynObject
 
     # nbs outlets represent other external sources
     nbs_outlets::Vector{Tuple{Int,Int}}
-    
+
     # tributary paths that merge into this one: (tributary_path_index, junction_cell_index)
     # where junction_cell_index is the 1-based index of the junction cell in *this* path's cells.
     merges::Vector{Tuple{Int,Int}}
 end
 
+# content-first form: departure_point defaults to the head cell (requires non-empty cells;
+# a zero-length connector uses the full constructor with an explicit departure_point).
+DynFlowPath(cells, target_trap, cin, cout, nbs, mg) =
+    DynFlowPath(cells, first(cells), target_trap, cin, cout, nbs, mg)
 DynFlowPath(cells, target_trap) =
     DynFlowPath(cells, target_trap, Tuple{Int,Int}[], Tuple{Int,Int}[], Tuple{Int,Int}[], Tuple{Int,Int}[])
 DynFlowPath(cells) =
