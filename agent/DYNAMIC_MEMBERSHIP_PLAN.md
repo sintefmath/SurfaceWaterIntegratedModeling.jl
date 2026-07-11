@@ -85,7 +85,8 @@ couplings that are not paths.) Reusing this to `@assert` the incremental value i
 tests is a test-only nicety, not a production path.
 
 **Grow (trap starts spilling → new path targets `B`):** local increment, no
-cascade — adding a feed can't detach anything.
+cascade — adding a feed can't detach anything. (Topology growth — trace + attach
+the new path/trap — is §4; the increment is the counter side of it.)
 ```julia
 B.in_count += 1
 ```
@@ -122,7 +123,44 @@ Invariant that keeps "uppermost live" cheap: the net holds **only live paths**
 aliveness check on the tributary. Use a worklist; mind ordering when a tributary
 and its host die in one sweep.
 
-## 4. Build-time init — `setup_network`
+## 4. Grow — trace and attach
+
+When a trap `A` already in the dynamic net becomes full and starts spilling, its
+spill path and whatever it reaches must be added — mirror
+`_grow_network_from_seed!` from `A`'s spillpoint:
+
+1. Trace `A`'s spill (`_trace_to_next_trap`): the connecting path (possibly
+   zero-length), any culverts/NBS on it, and the target it reaches.
+2. Attach the target:
+   - existing dynamic trap `B` → link + `B.in_count += 1`;
+   - new trap → add the `DynTrap`, wire its culvert/NBS couplings + floor,
+     `in_count = 1` via the new path;
+   - path merges into an existing path (pathmap) → register the merge.
+3. Set `A.spill_path` to the new connector.
+
+No cascade — a new feed can only keep/revive downstream, never detach it.
+
+**State absorption.** A newly attached trap enters the dynamic net carrying its
+current (static) water level; seed its volume from that, not from stale state
+(cf. the prior stale-state absorption bugs).
+
+## 5. Component re-partitioning
+
+Grow and detach can change the connected-component partition — each component is
+one independent ODE solve, so this matters:
+
+- **Fusion (grow) — required.** If `A`'s new spill path lands in a *different*
+  component (`B` has its own seed/net), the two are now coupled; solving them
+  apart drops the coupling flow and breaks mass conservation. Detected for free
+  at grow time (the target lookup already identifies `B`'s component); merge the
+  two (edge insertion = union), or rebuild the pair.
+- **Fission (detach) — deferred.** When a chain detaches, the surviving net may
+  fall into two pieces that no longer exchange flow. Solving them as one ODE is
+  still *correct* (the dead link carries zero flow), just larger. Fission is the
+  hard direction incrementally (edge deletion / dynamic connectivity), so keep
+  the over-large component and re-split lazily on the next rebuild if perf needs.
+
+## 6. Build-time init — `setup_network`
 
 After the monolithic net is built, call
 `init_in_counts!(net, dyn_coord_traps, nbs_accum_traps)` once (paths + the
@@ -131,7 +169,7 @@ since counts are component-invariant. `dyn_coord_traps` is a setup input;
 `nbs_accum_traps` comes from the split's accumulation resolution; culvert coupling
 is read off the trap.
 
-## 5. Build prerequisites (in place, commit `d131a30`)
+## 7. Build prerequisites (in place, commit `d131a30`)
 
 The counter relies on the build already guaranteeing:
 - **Every trap-to-trap link is a path.** Adjacent traps (spillpoint on the
@@ -144,7 +182,7 @@ The counter relies on the build already guaranteeing:
   connector); `_seeds_downstream_first` still grows a seed cell before any path
   passing through it, so a seed's own path is never mis-rooted.
 
-## 6. Phase 2 — live-lifecycle wiring (deferred)
+## 8. Phase 2 — live-lifecycle wiring (deferred)
 
 The "trap stopped overflowing" event lives in the dynamic solve / `fill_sequence`
 layer, which for the new `build_network` representation is not wired into the
@@ -156,7 +194,7 @@ stale-state absorption bugs).
 
 Build-time split (`network_utils.jl`) is unaffected.
 
-## 7. Verification
+## 9. Verification
 
 Isolated harness (as for the split tests): chain and diamond `DynNetwork`s.
 - `init_in_counts!` gives expected per-trap counts.
