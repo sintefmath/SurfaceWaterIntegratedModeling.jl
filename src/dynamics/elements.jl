@@ -79,6 +79,13 @@ mutable struct DynTrap <: DynObject
     # culvert inlets and outlets, each represented by a culvert ID
     culvert_inlets::Vector{Int}
     culvert_outlets::Vector{Int}
+
+    # Live incoming flow connections to dynamic sources (reachability count); the trap is
+    # dynamic while in_count > 0.  Set by init_in_counts! and maintained on grow/shrink.
+    in_count::Int
+
+    DynTrap(trap_ix, spill_path, culvert_inlets, culvert_outlets) =
+        new(trap_ix, spill_path, culvert_inlets, culvert_outlets, 0)
 end
 
 DynTrap(trap_ix, spill_path) = DynTrap(trap_ix, spill_path, Int[], Int[])
