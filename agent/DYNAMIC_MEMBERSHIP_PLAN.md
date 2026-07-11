@@ -24,18 +24,21 @@ spill path when a trap stops spilling, cascading downstream.
   us to *re-root* a surviving path to its live source, so the re-root/die
   decision subsumes any path counter — a path counter would be redundant.
   `DynFlowPath` stays immutable (re-root replaces the object, never mutates it).
-- **Sources are the seed-tied elements** (culvert outlets, NBS outlets/outflow
-  cells, `dyn_coords`). They are permanent within a solve window, so they never
-  detach. Marked `is_source`; not counted.
-- **Alive iff `is_source || in_count > 0`.**
+- **No source flag.** A `dyn_coord`-anchored trap (the trap *is* the seed, no
+  feeding path) is seeded with `in_count = 1` at build; that `+1` is never
+  decremented (decrements fire only per feeding-path death), so it floors at 1.
+  Culvert/NBS-fed traps need nothing special — their feeding source-path is never
+  orphaned (orphaning fires only when a *trap* stops spilling), so it persists and
+  keeps `in_count ≥ 1`.
+- **Alive iff `in_count > 0`.**
 - **Incremental during evolution.** Growth increments one trap; shrink decrements
   + cascades. A full count pass is used only at **bulk build** (the split), never
   while the net merely grows or shrinks.
 
 ## 1. Data model — `src/dynamics/elements.jl`
 
-Add two fields to `DynTrap` only; keep the existing 4-arg constructor working via
-an inner constructor that defaults them.
+Add one field to `DynTrap`; keep the existing 4-arg constructor working via an
+inner constructor that defaults it.
 
 ```julia
 mutable struct DynTrap <: DynObject
@@ -43,9 +46,8 @@ mutable struct DynTrap <: DynObject
     spill_path::Int
     culvert_inlets::Vector{Int}
     culvert_outlets::Vector{Int}
-    in_count::Int      # live incoming flow paths
-    is_source::Bool    # seed / culvert-outlet / NBS-fed -> never detaches
-    DynTrap(ix, sp, ci, co) = new(ix, sp, ci, co, 0, false)
+    in_count::Int      # live incoming flow paths (+1 seed if dyn_coord-anchored)
+    DynTrap(ix, sp, ci, co) = new(ix, sp, ci, co, 0)
 end
 ```
 
@@ -53,22 +55,34 @@ end
 
 ## 2. Primitives — new `src/dynamics/network_reachability.jl` (included after `network_utils.jl`)
 
-**Bulk init (build/split only):** count incoming paths per trap. Run once when a
-component's `DynNetwork` is minted (`_build_subnetwork`), where trap indices are
-freshly remapped. **Not** run during growth/shrink.
+**Build-time seed pass** (once, on the monolithic net). Counts are
+component-invariant (a trap's feeders are all in its component), so the split just
+**copies** each `in_count` through `_localize_trap` — no per-component recompute.
+
+`in_count` = live incoming spill paths (transient) **plus a permanent floor** of
+one per persistent coupling to a dynamic element that is *not* a path: a culvert
+with an endpoint in the trap (intrinsic, `trap.culvert_*`), an NBS accumulation
+coupling (`nbs_accum_traps`, from the split's accumulation resolution), and a
+dyn_coord anchor (`dyn_coord_traps`, a setup input). Floor terms are never
+decremented.
 ```julia
-function init_in_counts!(net::DynNetwork)
+function init_in_counts!(net::DynNetwork, dyn_coord_traps, nbs_accum_traps)
     for t in net.traps; t.in_count = 0; end
     for p in net.flow_paths
-        p.target_trap > 0 && (net.traps[p.target_trap].in_count += 1)
+        p.target_trap > 0 && (net.traps[p.target_trap].in_count += 1)   # spill / source paths
     end
+    for t in net.traps                                                  # direct culvert coupling
+        (!isempty(t.culvert_inlets) || !isempty(t.culvert_outlets)) && (t.in_count += 1)
+    end
+    for i in dyn_coord_traps; net.traps[i].in_count += 1; end           # dyn_coord seed
+    for i in nbs_accum_traps; net.traps[i].in_count += 1; end           # NBS accumulation
     return net
 end
 ```
-(A path's `target_trap` is its single downstream trap — the only edge feeding a
-trap. Culvert/NBS feeds are captured by `is_source` on the fed trap, set at build
-time.) Reusing this to `@assert` the incremental value in tests is a test-only
-nicety, not a production path.
+(A culvert/NBS feed arriving *via a path* is already counted through `target_trap`
+and its source-headed path is never orphaned; the floor is for the *direct*
+couplings that are not paths.) Reusing this to `@assert` the incremental value in
+tests is a test-only nicety, not a production path.
 
 **Grow (trap starts spilling → new path targets `B`):** local increment, no
 cascade — adding a feed can't detach anything.
@@ -97,11 +111,11 @@ When a spill path `P` loses its head (its trap stopped spilling):
 2. **Found** → promote it: new surviving path = that injection's source path +
    `P` from the junction down to `P.target_trap`; drop the dead head stub; swap
    the new `DynFlowPath` into `net.flow_paths`; keep lower injections as
-   tributaries (re-based positions). `is_source` set if promoted from a
-   culvert/NBS outlet. `P.target_trap`'s `in_count` is **unchanged** (still fed).
+   tributaries (re-based positions). `P.target_trap`'s `in_count` is **unchanged**
+   (still fed). A path promoted from a culvert/NBS outlet is source-headed, so it
+   is never orphaned thereafter.
 3. **None** → `P` fully dies: `t = P.target_trap`; `t.in_count -= 1`; if
-   `!t.is_source && t.in_count == 0` → `t` detaches → recurse via
-   `detach_spill!(net, t)`.
+   `t.in_count == 0` → `t` detaches → recurse via `detach_spill!(net, t)`.
 
 Invariant that keeps "uppermost live" cheap: the net holds **only live paths**
 (re-root/remove eagerly), so uppermost-live == uppermost-present — no recursive
@@ -110,17 +124,25 @@ and its host die in one sweep.
 
 ## 4. Build-time init — `setup_network`
 
-After the net is built: set `is_source = true` on traps fed by a seed / culvert
-outlet / NBS emit, then call `init_in_counts!` so every component starts
-consistent. The seed set is known here (it is the input to the growth).
+After the monolithic net is built, call
+`init_in_counts!(net, dyn_coord_traps, nbs_accum_traps)` once (paths + the
+permanent floor); the split then copies each `in_count` through `_localize_trap`,
+since counts are component-invariant. `dyn_coord_traps` is a setup input;
+`nbs_accum_traps` comes from the split's accumulation resolution; culvert coupling
+is read off the trap.
 
-## 5. First-cell-truncation is already safe
+## 5. Build prerequisites (in place, commit `d131a30`)
 
-A culvert/NBS/`dyn_coord` seed is the first cell of its own path. A terrain path
-that passes through such a cell is terrain-downstream of *its* seed, so the
-seed-cell has a strictly higher topological rank and is grown first (see
-`_seeds_downstream_first`); the passing path then truncates at it (`ix > 1`) and
-merges. So promoting seeds to sources introduces no new truncation hazard.
+The counter relies on the build already guaranteeing:
+- **Every trap-to-trap link is a path.** Adjacent traps (spillpoint on the
+  downstream footprint, no cell between) are linked by a zero-length connector
+  (empty `cells`, `target_trap` set), so `init_in_counts!` counts them like any
+  other edge.
+- **A path's source is `departure_point`**, valid even when `cells` is empty or
+  truncated, so source-ID never depends on `cells[1]`. The old "first cell never
+  truncated" assert is gone (a first-cell intersection truncates to a zero-length
+  connector); `_seeds_downstream_first` still grows a seed cell before any path
+  passing through it, so a seed's own path is never mis-rooted.
 
 ## 6. Phase 2 — live-lifecycle wiring (deferred)
 
@@ -139,7 +161,7 @@ Build-time split (`network_utils.jl`) is unaffected.
 Isolated harness (as for the split tests): chain and diamond `DynNetwork`s.
 - `init_in_counts!` gives expected per-trap counts.
 - `detach_spill!` on a mid trap detaches exactly the traps that lose all feeds;
-  survivors keep `in_count > 0`; `is_source` roots never detach.
+  survivors keep `in_count > 0`; a dyn_coord-anchored trap (seeded `1`) never detaches.
 - Re-root case: a path with a live tributary keeps its target trap fed (no
   detach), and the surviving path emanates from the tributary's source.
 - (Test-only) incremental counts equal a fresh `init_in_counts!` after a sequence
@@ -147,9 +169,9 @@ Isolated harness (as for the split tests): chain and diamond `DynNetwork`s.
 
 ## Open questions
 
-- Confirm culverts/NBS are structurally permanent within a window (so
-  `is_source` never flips). If a culvert can be removed, it needs the same
-  cascade.
+- Confirm culverts/NBS are structurally permanent within a window (so their
+  feeding source-path is never orphaned). If a culvert can be removed, it needs
+  the same cascade.
 - Phase-2 hook location + how a detached subtree's water state migrates to
   static handling.
 - Re-root of a promoted tributary whose own source later dies — handled by the
