@@ -26,18 +26,35 @@ function setup_network(tstruct, full_traps;
                   Set(vcat([n.internal_accumulation_cells for n in nbs]...)),
                   Set(vcat([n.footprint_outflow_cells for n in nbs]...)))
 
-    # Generate map to keep track of all existing network elements on terrain 
+    # Generate map to keep track of all existing network elements on terrain
     pathmap = Dict{Int, Int}() # terrain cell -> flow path index
-    
-    # Track all seeds and build up corresponding network of paths and traps
+
+    # Track all seeds and build up corresponding network of paths and traps.  Seeds are
+    # grown downstream-first (see _seeds_downstream_first) so an upstream path always
+    # meets an already-registered downstream path at a non-first cell.
     monolithic_network = DynNetwork(culverts, nbs)
     foreach(s -> _grow_network_from_seed!(monolithic_network,
-                                          pathmap, s, tstruct, full_traps), seeds)
+                                          pathmap, s, tstruct, full_traps),
+            _seeds_downstream_first(seeds, tstruct))
 
     # Split network in connected components
     networks = split_network_into_connected_components(monolithic_network, tstruct)
 
     return networks
+end
+
+# ----------------------------------------------------------------------------
+# Order seeds downstream-first: the reverse of the flow graph's topological order, so
+# a cell is grown only after everything downstream of it.  This guarantees that when an
+# upstream path is traced it meets an already-registered downstream path at a non-first
+# cell (which `_update_pathmap!` requires), rather than claiming a cell that a later
+# downstream seed would then try to re-enter at its own first position.
+function _seeds_downstream_first(seeds, tstruct)
+    topo = Graphs.topological_sort(tstruct.flowgraph)  # sources first, sinks last
+    rank = Vector{Int}(undef, length(topo))
+    for (r, v) in enumerate(topo); rank[v] = r; end
+    LI = LinearIndices(tstruct.topography)
+    return sort(collect(seeds); by = s -> rank[LI[s]], rev = true)
 end
 
 # ----------------------------------------------------------------------------
