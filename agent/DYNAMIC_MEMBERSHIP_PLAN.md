@@ -1,6 +1,8 @@
 # Dynamic-network membership — plan
 
-Status: design settled, not yet implemented.
+Status: Phase 1 (data + primitives) and build-time init (§6) implemented + tested;
+Phase-2 live-lifecycle wiring (§8) pending. Commits `2cea3e1`, `75fcbc3`, `282234f`,
+`106a897`.
 Related: `agent/NBS_ROUTING_REDESIGN.md` (the network this runs on),
 `src/dynamics/build_network.jl`, `src/dynamics/network_utils.jl`.
 
@@ -46,7 +48,7 @@ mutable struct DynTrap <: DynObject
     spill_path::Int
     culvert_inlets::Vector{Int}
     culvert_outlets::Vector{Int}
-    in_count::Int      # live incoming flow paths (+1 seed if dyn_coord-anchored)
+    in_count::Int      # live incoming flow paths (+1 floor if a culvert inlet is in the trap)
     DynTrap(ix, sp, ci, co) = new(ix, sp, ci, co, 0)
 end
 ```
@@ -129,8 +131,8 @@ spill path and whatever it reaches must be added — mirror
    zero-length), any culverts/NBS on it, and the target it reaches.
 2. Attach the target:
    - existing dynamic trap `B` → link + `B.in_count += 1`;
-   - new trap → add the `DynTrap`, wire its culvert/NBS couplings + floor,
-     `in_count = 1` via the new path;
+   - new trap → add the `DynTrap`; its `in_count` = the new path (+ a culvert-inlet
+     floor if any), exactly as `init_in_counts!` would set it;
    - path merges into an existing path (pathmap) → register the merge.
 3. Set `A.spill_path` to the new connector.
 
@@ -178,26 +180,30 @@ The counter relies on the build already guaranteeing:
 
 ## 8. Phase 2 — live-lifecycle wiring (deferred)
 
-The "trap stopped overflowing" event lives in the dynamic solve / `fill_sequence`
-layer, which for the new `build_network` representation is not wired into the
-module yet. Phase 1 lands data + primitives + isolated tests only. Phase 2, once
-the new net is driven by `fill_sequence`: at the full→not-full transition call
+Phase 1 (data + primitives) and build-time init (§6) are done. What remains: the
+"trap stopped overflowing" event lives in the dynamic solve / `fill_sequence` layer,
+which for the new `build_network` representation is not wired into the module yet.
+Once the new net is driven by `fill_sequence`: at the full→not-full transition call
 `detach_spill!` and route the returned traps back to static handling, reusing the
-existing absorption path — carefully w.r.t. state transfer (cf. the prior
-stale-state absorption bugs).
+existing absorption path — carefully w.r.t. state transfer (cf. the prior stale-state
+absorption bugs) — plus grow (§4) and re-partitioning (§5).
 
 Build-time split (`network_utils.jl`) is unaffected.
 
-## 9. Verification
+## 9. Verification *(done for Phase 1 + §6)*
 
 Isolated harness (as for the split tests): chain and diamond `DynNetwork`s.
 - `init_in_counts!` gives expected per-trap counts.
 - `detach_spill!` on a mid trap detaches exactly the traps that lose all feeds;
-  survivors keep `in_count > 0`; a dyn_coord-anchored trap (seeded `1`) never detaches.
+  survivors keep `in_count > 0`; a seed-anchored trap (counted via its connector)
+  never detaches.
 - Re-root case: a path with a live tributary keeps its target trap fed (no
   detach), and the surviving path emanates from the tributary's source.
-- (Test-only) incremental counts equal a fresh `init_in_counts!` after a sequence
-  of grows/detaches.
+- (Test-only) incremental counts equal a fresh `init_in_counts!`.
+
+Also an integration test on real `mini.txt` terrain (inject build_network): `setup_network`
+runs `init_in_counts!`, the split copies counts (stored == fresh recompute), counts equal
+incoming-path counts, and `detach_spill!` cascades on a 20+-trap chain.
 
 ## Open questions
 
