@@ -90,29 +90,40 @@ B.in_count += 1
 ```
 
 **Shrink — detach on a trap ceasing to spill:** clear the spill edge, re-root or
-kill the path, and cascade. Returns the detached traps for the caller to hand off.
+kill the path, cascade, then **compact in place** (`_compact!`) — one event fires at a
+time, so there is no batching to gain by separating the passes. Returns the detached
+traps' **`trap_ix`** (stable spillanalysis indices — local indices are renumbered by the
+compaction) for the caller to hand off.
 ```julia
-# trap_id stopped overflowing. Returns detached trap ids (to migrate to static handling).
+# trap_id stopped overflowing. Returns detached trap_ix (to migrate to static handling).
 function detach_spill!(net::DynNetwork, trap_id::Int) -> Vector{Int}
+    detached = Int[]                       # local indices during the cascade
     sp = net.traps[trap_id].spill_path
     net.traps[trap_id].spill_path = 0
-    sp == 0 && return Int[]
-    _reroot_or_kill_path!(net, sp)   # see §3; decrements/cascades trap in_counts
+    sp > 0 && _reroot_or_kill_path!(net, sp, detached)   # §3; decrements/cascades in_counts
+    detached_ix = [net.traps[t].trap_ix for t in detached]  # before compaction drops them
+    _compact!(net)                         # drop tombstones + in_count==0 traps, reindex
+    return detached_ix
 end
 ```
+`_compact!` rebuilds each `DynFlowPath` slot with remapped `target_trap`/`merges` and
+patches `spill_path` in place (so `DynFlowPath` stays **immutable** — no boxing in the ODE's
+hot `flow_paths` vector; `DynNetwork`/`DynTrap` are already mutable). Culverts/NBS are
+untouched (a detach removes none).
 
 ## 3. Re-root-or-kill — the centerpiece
 
 When a spill path `P` loses its head (its trap stopped spilling):
 
-1. Scan `P`'s injections top-down (`merges` junctions + culvert/NBS outlet
-   positions) for the **uppermost still-present** one.
-2. **Found** → promote it: new surviving path = that injection's source path +
-   `P` from the junction down to `P.target_trap`; drop the dead head stub; swap
-   the new `DynFlowPath` into `net.flow_paths`; keep lower injections as
-   tributaries (re-based positions). `P.target_trap`'s `in_count` is **unchanged**
-   (still fed). A path promoted from a culvert/NBS outlet is source-headed, so it
-   is never orphaned thereafter.
+1. Scan `P`'s `merges` for the **uppermost still-present** tributary junction.
+   (Merges only: a culvert/NBS outlet is always seeded as its own connector, which
+   enters an intersected path as a co-located merge — or heads its own source path —
+   so an outlet never needs promoting on its own.)
+2. **Found** → promote it: new surviving path = that tributary `Q` + `P` from the
+   junction down to `P.target_trap`; drop the dead head stub; write the survivor into
+   **Q's slot** (its head trap already points there — no redirect) and tombstone the
+   orphaned head path; keep lower injections as tributaries (re-based positions).
+   `P.target_trap`'s `in_count` is **unchanged** (still fed).
 3. **None** → `P` fully dies: `t = P.target_trap`; `t.in_count -= 1`; if
    `t.in_count == 0` → `t` detaches → recurse via `detach_spill!(net, t)`.
 
@@ -157,6 +168,8 @@ one independent ODE solve, so this matters:
   still *correct* (the dead link carries zero flow), just larger. Fission is the
   hard direction incrementally (edge deletion / dynamic connectivity), so keep
   the over-large component and re-split lazily on the next rebuild if perf needs.
+  `detach_spill!` still `_compact!`s the surviving component (drops the tombstones /
+  dead traps) — that is index cleanup, independent of re-partitioning.
 
 ## 6. Build-time init — `setup_network`  *(done, `106a897`)*
 

@@ -67,24 +67,28 @@ couplings that are not paths.)
 **Grow:** no function — the call site does `net.traps[B].in_count += 1` when a new
 spill path targeting `B` is added. No cascade (a new feed can't detach anything).
 
-**Shrink / detach:**
+**Shrink / detach:** cascades, then `_compact!`s in place (one event at a time, so no
+batching to gain from separate passes) and returns the detached **`trap_ix`** (stable —
+compaction renumbers local indices).
 ```julia
-# trap_id stopped overflowing. Returns detached trap ids (to hand off to static handling).
+# trap_id stopped overflowing. Returns detached trap_ix (to hand off to static handling).
 function detach_spill!(net::DynNetwork, trap_id::Int)
     detached = Int[]
     sp = net.traps[trap_id].spill_path
     net.traps[trap_id].spill_path = 0
     sp != 0 && _reroot_or_kill_path!(net, sp, detached)
-    return detached
+    detached_ix = [net.traps[t].trap_ix for t in detached]  # before compaction drops them
+    _compact!(net)
+    return detached_ix
 end
 
 # The orphaned path lost its head: promote its uppermost live injection, else kill it
 # and cascade to its target trap.
 function _reroot_or_kill_path!(net, path_id, detached)
     fp = net.flow_paths[path_id]
-    j  = _uppermost_injection(fp)           # min pos over merges + culvert/NBS outlets
-    if j !== nothing
-        net.flow_paths[path_id] = _promote(net, fp, j)     # target trap unchanged
+    m  = _uppermost_merge(fp)               # (tributary, junction_pos) or nothing
+    if m !== nothing
+        _promote_tributary!(net, path_id, m[2], m[1])      # target trap unchanged
     else
         t = fp.target_trap
         _remove_path!(net, path_id)                        # tombstone, do not shift indices
@@ -103,17 +107,23 @@ end
 
 Careful bits (to solve during implementation):
 
-- `_uppermost_injection(fp)` = smallest `pos` over `fp.merges` ∪ `fp.culvert_outlets`
-  ∪ `fp.nbs_outlets`. `culvert_inlets` are excluded — they draw, not feed.
-  Tributaries in `merges` are live by the "only live paths present" invariant, so
-  no recursive aliveness check.
-- `_promote(net, fp, j)` rebuilds a `DynFlowPath`: culvert/NBS injection at `j` →
-  new cells `fp.cells[j:end]`; tributary `Q` → `Q.cells ++ fp.cells` after the
-  junction. Same `target_trap`; **re-base** surviving lower injections by the cut;
-  tombstone the folded `Q`. Target trap `in_count` unchanged.
-- `_remove_path!` = **tombstone, not `deleteat!`** — deleting would shift indices
-  and break `target_trap` / `spill_path` / `merges`. Mark inactive; compact after
-  the cascade settles (and hand detached traps off then).
+- `_uppermost_merge(fp)` = the `(tributary, pos)` with the smallest `pos` in `fp.merges`.
+  **Merges only** — a culvert/NBS outlet that intersects a path is always seeded as its
+  own connector, which enters as a co-located merge (or heads its own source path), so an
+  outlet never needs promoting on its own; scanning `culvert_outlets`/`nbs_outlets` would
+  be redundant (and `culvert_inlets` draw, not feed). Tributaries in `merges` are live by
+  the "only live paths present" invariant, so no recursive aliveness check.
+- `_promote_tributary!(net, path_id, j, q)` rebuilds the survivor `Q.cells ++ fp.cells`
+  after the junction, written into **Q's slot** (the survivor is Q's continuation, so Q's
+  head trap keeps pointing at it — no redirect), and tombstones the orphaned head path's
+  slot. Same `target_trap`; **re-base** surviving lower injections by the cut. Target trap
+  `in_count` unchanged. (No source-injection branch: see `_uppermost_merge`.)
+- `_remove_path!` = **tombstone, not `deleteat!`** — deleting mid-cascade would shift
+  indices and break `target_trap` / `spill_path` / `merges`. Mark inactive
+  (`departure_point == (0,0)`); `_compact!` removes the tombstones + `in_count==0` traps
+  and reindexes the survivors *after* the cascade settles, at the tail of `detach_spill!`.
+  `_compact!` rebuilds each `DynFlowPath` slot (immutable — no hot-loop boxing) and patches
+  `DynTrap.spill_path` in place; culverts/NBS untouched.
 
 ## 3. Deferred to Phase 2
 
