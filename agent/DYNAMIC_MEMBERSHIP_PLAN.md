@@ -207,8 +207,9 @@ The counter relies on the build already guaranteeing:
 - **A path's source is `departure_point`**, valid even when `cells` is empty or
   truncated, so source-ID never depends on `cells[1]`. The old "first cell never
   truncated" assert is gone (a first-cell intersection truncates to a zero-length
-  connector); `_seeds_downstream_first` still grows a seed cell before any path
-  passing through it, so a seed's own path is never mis-rooted.
+  connector). Because of this, **seed order no longer matters** — the downstream-first
+  `topological_sort` (an O(terrain) cost paid on every build *and* regrow) was removed;
+  builds under any seed order give identical coverage/partition (verified).
 
 ## 8. Phase 2 — live-lifecycle wiring
 

@@ -344,8 +344,7 @@ end
 function _regrow(seeds, culverts::Vector{DynCulvert}, nbs::Vector{DynNBSPlacement}, tstruct, full_traps)
     net = DynNetwork(culverts, nbs)
     pathmap = Dict{Int,Int}()
-    foreach(s -> _grow_network_from_seed!(net, pathmap, s, tstruct, full_traps),
-            _seeds_downstream_first(seeds, tstruct))
+    foreach(s -> _grow_network_from_seed!(net, pathmap, s, tstruct, full_traps), seeds)
     init_in_counts!(net)
     return split_network_into_connected_components(net, tstruct)
 end
