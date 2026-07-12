@@ -255,6 +255,18 @@ function _locate_trap(comps::Vector{DynNetwork}, trap_ix::Int)
     return nothing
 end
 
+# All trap_ix currently in the dynamic network (as a set).
+_live_trap_ix(comps::Vector{DynNetwork}) = Set(t.trap_ix for net in comps for t in net.traps)
+
+# True if filling `trap_ix` completes its parent's subtraps (all now full), so the region must
+# collapse to the parent supertrap — a hierarchy change the incremental grow cannot make, so we
+# regrow instead.  (One level suffices to trigger: the regrow's tracer cascades any further up.)
+function _fill_subsumes(tstruct, trap_ix, full_traps)
+    p = parentof(tstruct, trap_ix)
+    p === nothing && return false
+    return all(s in full_traps for s in subtrapsof(tstruct, p))
+end
+
 # ----------------------------------------------------------------------------
 """
     apply_fill!(comps, tstruct, full_traps, trap_ix) -> Vector{Int}
@@ -276,29 +288,34 @@ function apply_fill!(comps::Vector{DynNetwork}, tstruct, full_traps, trap_ix::In
     trapmap, cellmap = _index_components(comps, tstruct)
     haskey(trapmap, trap_ix) || return Int[]        # not dynamic — nothing to grow
     ci, li = trapmap[trap_ix]
+    before = _live_trap_ix(comps)
 
-    # grow the owning component from the newly-full trap
-    owner = comps[ci]
-    np0 = length(owner.flow_paths)
-    added = grow_spill!(owner, tstruct, full_traps, li)
+    if _fill_subsumes(tstruct, trap_ix, full_traps)
+        # hierarchy boundary: incremental grow can't collapse the sibling group into the parent,
+        # so regrow the owner (the build tracer picks the right supertrap node).
+        _fuse_components!(comps, [ci], tstruct, full_traps)
+    else
+        # incremental grow of the owning component
+        owner = comps[ci]
+        np0 = length(owner.flow_paths)
+        grow_spill!(owner, tstruct, full_traps, li)
 
-    # fusion detection: a newly-added trap that already lives elsewhere, or a new path cell that
-    # falls on another component (a shared corridor or an NBS footprint), couples that component
-    LI = LinearIndices(tstruct.topography)
-    coupled = Set{Int}()
-    for d in added
-        haskey(trapmap, d) && trapmap[d][1] != ci && push!(coupled, trapmap[d][1])
+        # fusion: a new trap already living elsewhere, or a new path cell on another component
+        # (a shared corridor or an NBS footprint), couples that component — regrow the union
+        LI = LinearIndices(tstruct.topography)
+        coupled = Set{Int}()
+        for t in owner.traps
+            haskey(trapmap, t.trap_ix) && trapmap[t.trap_ix][1] != ci && push!(coupled, trapmap[t.trap_ix][1])
+        end
+        for k in (np0 + 1):length(owner.flow_paths), c in owner.flow_paths[k].cells
+            cj = get(cellmap, LI[c], ci)
+            cj == ci || push!(coupled, cj)
+        end
+        isempty(coupled) || _fuse_components!(comps, push!(collect(coupled), ci), tstruct, full_traps)
     end
-    for k in (np0 + 1):length(owner.flow_paths), c in owner.flow_paths[k].cells
-        cj = get(cellmap, LI[c], ci)
-        cj == ci || push!(coupled, cj)
-    end
 
-    # regrow the owner together with every component it coupled into
-    isempty(coupled) || _fuse_components!(comps, push!(collect(coupled), ci), tstruct, full_traps)
-
-    # hand back only the genuinely-new traps (foreign ones were already dynamic)
-    return [d for d in added if !haskey(trapmap, d)]
+    # newly-dynamic traps (set difference handles both the incremental and regrow paths)
+    return collect(setdiff(_live_trap_ix(comps), before))
 end
 
 # ----------------------------------------------------------------------------
@@ -323,6 +340,9 @@ function apply_unfill!(comps::Vector{DynNetwork}, tstruct, trap_ix::Int)
     ci, li = loc
     # detach its spill: cascades downstream and compacts that component in place.  Fission is
     # deferred — the survivor may split into disconnected pieces but stays one correct solve.
+    # @@@ de-subsumption (a subsumed child dropping below its rim) is the symmetric hierarchy
+    #     boundary; its event names a *child* that is not a node while subsumed, so it is
+    #     gate-coupled (depends on how fill_sequence phrases the event) and handled there.
     return detach_spill!(comps[ci], li)
 end
 

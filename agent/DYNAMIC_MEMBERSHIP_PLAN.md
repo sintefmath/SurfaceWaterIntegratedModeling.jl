@@ -215,16 +215,28 @@ The counter relies on the build already guaranteeing:
 
 Done and tested standalone (`network_updating.jl`): the per-network mechanisms
 `detach_spill!` (+ `_compact!`, §3) and `grow_spill!` (§4), and the set-level entry points
-`apply_unfill!` (locate → detach) and `apply_fill!` (locate → grow → detect coupling →
-fuse, §5).  Each returns the migrated `trap_ix` (newly-static on unfill, newly-dynamic on
-fill) for the caller's state handoff.
+`apply_unfill!` (locate → detach) and `apply_fill!`.  Each returns the migrated `trap_ix`
+(newly-static on unfill, newly-dynamic on fill) for the caller's state handoff.
 
-What remains is the **gate** — driving them from `fill_sequence`/`network_context`, which
+**`apply_fill!` — incremental fast path with boundary regrow (option B).** Regrow (O(component),
+cheap since the terrain sort is gone, §7) is used only at the two boundaries the incremental
+grow can't handle; every other fill stays incremental:
+- **subsumption** — a fill that completes a parent's subtraps (`_fill_subsumes`) must collapse
+  the sibling group into the parent supertrap; regrow the owner (the tracer picks the right node).
+- **fusion** (§5) — the grown chain couples another component; regrow the union.
+Otherwise `grow_spill!` incrementally. Chosen over "always regrow" (option C) because dynamic
+networks can grow large and regrow is O(component) per event vs O(new chain) for grow.
+
+What remains is the **gate** — driving these from `fill_sequence`/`network_context`, which
 does not yet use the new `build_network` representation:
 - at full→not-full call `apply_unfill!` and route the returned `trap_ix` back to static
   handling — carefully w.r.t. state transfer (cf. the prior stale-state absorption bugs);
 - at not-full→full call `apply_fill!` and seed the newly-added traps' state from their
   current static level;
+- **de-subsumption** (the symmetric boundary: a subsumed child dropping below its rim) is
+  gate-coupled — its event names a child that is not a node while subsumed, so how it is
+  triggered depends on the `fill_sequence` event model; handle it there (regrow the parent's
+  component). Flagged `@@@` in `apply_unfill!`.
 - plus the distributor / rate-layer re-impl and retiring `DynNBS`.
 
 Build-time split (`network_utils.jl`) is unaffected.
@@ -248,10 +260,12 @@ Also integration tests on real `mini.txt` terrain (inject build_network):
   duplicate `trap_ix`;
 - `_fuse_components!` regrow round-trips single/pair components to the exact trap coverage;
 - `apply_fill!` sweep (fills incl. 4 real fusions) and `apply_unfill!` keep counts
-  consistent, no duplicate `trap_ix`, no trap loss, migrated traps genuinely new.
-
-Still to add: a composition harness scripting random fill/unfill sequences and asserting the
-incremental component set matches a fresh `setup_network` at each step.
+  consistent, no duplicate `trap_ix`, no trap loss, migrated traps genuinely new;
+- **composition harness** — random fill/unfill sequences (480 event-steps over 8 runs),
+  asserting at each step that the incremental component set matches a fresh `setup_network`:
+  same dynamic trap set, a *coarsening* of the fresh partition (incremental never under-merges;
+  fission is deferred so it may over-merge), and consistent `in_count`. This harness caught the
+  spill-path-overwrite bug (`stop_at_present` fix) and the subsumption gap (boundary regrow).
 
 ## Open questions
 
