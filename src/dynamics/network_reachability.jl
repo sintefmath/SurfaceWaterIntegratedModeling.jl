@@ -94,8 +94,39 @@ _tombstone_path!(net::DynNetwork, path_id::Int) =
     net.flow_paths[path_id] = DynFlowPath(CartesianIndex{2}[], CartesianIndex(0, 0), 0,
         Tuple{Int,Int}[], Tuple{Int,Int}[], Tuple{Int,Int}[], Tuple{Int,Int}[])
 
-# @@@ Phase 1c: re-root (promote a live tributary/culvert/NBS injection to take over the
-#     orphaned path's downstream role).  Until then a path with an injection cannot be
-#     detached.
-_promote!(net::DynNetwork, path_id::Int, j::Int) =
-    error("_promote! (re-root) not yet implemented — Phase 1c")
+# Re-root: the injection at position j takes over the orphaned path's downstream role.
+# The dead head stub (cells 1:j-1) is dropped; the target trap stays fed (in_count
+# unchanged).  Injections all sit at positions >= j, so none is lost.
+# @@@ a culvert *inlet* in the dropped stub (position < j) is dropped with it.
+function _promote!(net::DynNetwork, path_id::Int, j::Int)
+    P  = net.flow_paths[path_id]
+    mi = findfirst(m -> m[2] == j, P.merges)
+    mi === nothing ? _promote_source!(net, path_id, j) :
+                     _promote_tributary!(net, path_id, j, P.merges[mi][1])
+end
+
+# Injection at j is a tributary Q: the survivor is Q followed by P from the junction down.
+function _promote_tributary!(net::DynNetwork, path_id::Int, j::Int, q::Int)
+    P, Q = net.flow_paths[path_id], net.flow_paths[q]
+    lq = length(Q.cells)
+    reb(p) = lq + p - j + 1
+    ci = vcat(Q.culvert_inlets,  [(c, reb(p)) for (c, p) in P.culvert_inlets  if p >= j])
+    co = vcat(Q.culvert_outlets, [(c, reb(p)) for (c, p) in P.culvert_outlets if p >= j])
+    no = vcat(Q.nbs_outlets,     [(n, reb(p)) for (n, p) in P.nbs_outlets     if p >= j])
+    mg = vcat(Q.merges,          [(m, reb(p)) for (m, p) in P.merges          if p != j])
+    net.flow_paths[path_id] = DynFlowPath(vcat(Q.cells, P.cells[j:end]),
+        Q.departure_point, P.target_trap, ci, co, no, mg)
+    for t in net.traps; t.spill_path == q && (t.spill_path = path_id); end  # redirect Q's head
+    _tombstone_path!(net, q)
+end
+
+# Injection at j is a culvert/NBS outlet: the survivor is P from j down, now source-headed.
+function _promote_source!(net::DynNetwork, path_id::Int, j::Int)
+    P = net.flow_paths[path_id]
+    reb(p) = p - j + 1
+    ci = [(c, reb(p)) for (c, p) in P.culvert_inlets  if p >= j]
+    co = [(c, reb(p)) for (c, p) in P.culvert_outlets if p >= j]
+    no = [(n, reb(p)) for (n, p) in P.nbs_outlets     if p >= j]
+    mg = [(m, reb(p)) for (m, p) in P.merges          if p >= j]
+    net.flow_paths[path_id] = DynFlowPath(P.cells[j:end], P.cells[j], P.target_trap, ci, co, no, mg)
+end
