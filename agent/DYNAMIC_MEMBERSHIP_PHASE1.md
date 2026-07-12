@@ -37,7 +37,7 @@ The 4-arg inner constructor keeps every existing `DynTrap(ix, sp, ci, co)` call
 and the 2-arg convenience working. `DynFlowPath` is untouched (no path counter,
 stays immutable — re-root replaces the object).
 
-## 2. New `src/dynamics/network_reachability.jl` (+ `include` after `network_utils.jl`)
+## 2. New `src/dynamics/network_updating.jl` (+ `include` after `network_utils.jl`)
 
 **Build-time seed pass** (once, on the monolithic net). Counts are
 component-invariant (a trap's feeders are all in its component), so the split just

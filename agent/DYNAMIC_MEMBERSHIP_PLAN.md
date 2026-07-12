@@ -1,8 +1,10 @@
 # Dynamic-network membership — plan
 
-Status: Phase 1 (data + primitives) and build-time init (§6) implemented + tested;
-Phase-2 live-lifecycle wiring (§8) pending. Commits `2cea3e1`, `75fcbc3`, `282234f`,
-`106a897`.
+Status: Phase 1 (data + primitives), build-time init (§6), and the grow mechanism
+(§4, `grow_spill!`) implemented + tested standalone; Phase-2 live-lifecycle wiring (§8)
+— the full↔not-full trigger, state handoff, and fusion — still pending (needs
+`build_network` driving `fill_sequence`). Commits `2cea3e1`, `75fcbc3`, `282234f`,
+`106a897`, `96530e4`.
 Related: `agent/NBS_ROUTING_REDESIGN.md` (the network this runs on),
 `src/dynamics/build_network.jl`, `src/dynamics/network_utils.jl`.
 
@@ -55,7 +57,7 @@ end
 
 `DynFlowPath` is unchanged (no counter, stays immutable).
 
-## 2. Primitives — new `src/dynamics/network_reachability.jl` (included after `network_utils.jl`)
+## 2. Primitives — `src/dynamics/network_updating.jl` (included after `network_utils.jl`)
 
 **Build-time seed pass** (once, on the monolithic net). Counts are
 component-invariant (a trap's feeders are all in its component), so the split just
@@ -132,22 +134,32 @@ Invariant that keeps "uppermost live" cheap: the net holds **only live paths**
 aliveness check on the tributary. Use a worklist; mind ordering when a tributary
 and its host die in one sweep.
 
-## 4. Grow — trace and attach
+## 4. Grow — trace and attach  *(done: `grow_spill!` in `network_updating.jl`)*
 
 When a trap `A` already in the dynamic net becomes full and starts spilling, its
-spill path and whatever it reaches must be added — mirror
-`_grow_network_from_seed!` from `A`'s spillpoint:
+spill path and whatever it reaches must be added — `grow_spill!(net, tstruct,
+full_traps, trap_id)` mirrors `detach_spill!`, reusing the `_grow_network_from_seed!`
+tracer from `A`'s spillpoint:
 
-1. Trace `A`'s spill (`_trace_to_next_trap`): the connecting path (possibly
-   zero-length), any culverts/NBS on it, and the target it reaches.
-2. Attach the target:
-   - existing dynamic trap `B` → link + `B.in_count += 1`;
-   - new trap → add the `DynTrap`; its `in_count` = the new path (+ a culvert-inlet
-     floor if any), exactly as `init_in_counts!` would set it;
-   - path merges into an existing path (pathmap) → register the merge.
-3. Set `A.spill_path` to the new connector.
+1. Trace `A`'s spill: the connecting path(s) (possibly zero-length), any culverts/NBS
+   on them, and the target(s) reached.  The tracer runs with `departing_trap_ix = A`
+   (so `A.spill_path` is set to the first connector) and `stop_at_present = true` (stop
+   at the first already-present trap — its downstream is already represented; only the
+   connector is attached).  `A` spilling out of the domain → `A.spill_path = -1`, nothing
+   attached.
+2. `in_count` is then stamped **incrementally over the added elements only** (never a
+   full `init_in_counts!` pass): each new path `+1`s its `target_trap`; each new trap
+   additionally gets the culvert-inlet floor.  An existing trap the chain terminates into
+   is `+1`ed via the connector's `target_trap`; a connector that merges into an existing
+   path (target 0) adds nothing.  This is exactly `init_in_counts!` restricted to the new
+   elements.
+3. Returns the newly-added traps' `trap_ix` (for the caller to migrate from static and
+   seed their state).
 
-No cascade — a new feed can only keep/revive downstream, never detach it.
+No cascade — a new feed can only keep/revive downstream, never detach it.  Verified on
+real `mini.txt` terrain (inject `build_network`): across ~90 grow cases the incremental
+counts equal a fresh `init_in_counts!`, refs stay in range, and no `trap_ix` duplicates.
+Cross-component landing (fusion) is **not** handled here — see §5.
 
 **State absorption.** A newly attached trap enters the dynamic net carrying its
 current (static) water level; seed its volume from that, not from stale state
@@ -159,10 +171,14 @@ Grow and detach can change the connected-component partition — each component 
 one independent ODE solve, so this matters:
 
 - **Fusion (grow) — required.** If `A`'s new spill path lands in a *different*
-  component (`B` has its own seed/net), the two are now coupled; solving them
-  apart drops the coupling flow and breaks mass conservation. Detected for free
-  at grow time (the target lookup already identifies `B`'s component); merge the
-  two (edge insertion = union), or rebuild the pair.
+  component, the two are now coupled; solving them apart drops the coupling flow and
+  breaks mass conservation. The trigger is either the chain reaching a trap owned by
+  another component **or** a grown-path cell crossing another component's **NBS
+  footprint** (NBS coupling is decomposition-relevant even though the rate effect is
+  geometric). So the cross-component lookup must cover trap arrivals *and* NBS-footprint
+  crossings. Merge the two components (edge insertion = union), or rebuild the pair.
+  (NBS-crossing paths within the *same* component need nothing here — the rate function
+  derives the capture/emit from footprint geometry at eval time.)
 - **Fission (detach) — deferred.** When a chain detaches, the surviving net may
   fall into two pieces that no longer exchange flow. Solving them as one ODE is
   still *correct* (the dead link carries zero flow), just larger. Fission is the
@@ -193,13 +209,17 @@ The counter relies on the build already guaranteeing:
 
 ## 8. Phase 2 — live-lifecycle wiring (deferred)
 
-Phase 1 (data + primitives) and build-time init (§6) are done. What remains: the
-"trap stopped overflowing" event lives in the dynamic solve / `fill_sequence` layer,
-which for the new `build_network` representation is not wired into the module yet.
-Once the new net is driven by `fill_sequence`: at the full→not-full transition call
-`detach_spill!` and route the returned traps back to static handling, reusing the
-existing absorption path — carefully w.r.t. state transfer (cf. the prior stale-state
-absorption bugs) — plus grow (§4) and re-partitioning (§5).
+Phase 1 (data + primitives), build-time init (§6), and both structural mechanisms —
+`detach_spill!` (+ `_compact!`) and `grow_spill!` (§4) — are done and tested standalone.
+What remains is the **live trigger**: the full↔not-full transition lives in the dynamic
+solve / `fill_sequence` layer, which for the new `build_network` representation is not
+wired into the module yet. Once the new net is driven by `fill_sequence`:
+- at full→not-full call `detach_spill!` and route the returned `trap_ix` back to static
+  handling, reusing the absorption path — carefully w.r.t. state transfer (cf. the prior
+  stale-state absorption bugs);
+- at not-full→full call `grow_spill!` and seed the newly-added traps' state from their
+  current static level;
+- handle **fusion** (§5) when a grow lands cross-component.
 
 Build-time split (`network_utils.jl`) is unaffected.
 

@@ -122,24 +122,33 @@ function _trace_to_next_trap(tstruct, start_cell, full_traps)
 end
 
 # ----------------------------------------------------------------------------
+# `departing_trap_ix` seeds the trap whose spill_path the first connector sets (used by
+# grow, where the seed is an existing trap's spillpoint; 0 at build, where seeds are
+# dyn_coords / culvert / NBS cells).  `stop_at_present` (grow only) stops the trace when it
+# reaches a trap already in the network — its downstream is already represented, so we only
+# attach the connector rather than re-tracing.  At build it stays false (chains that meet an
+# existing trap continue and merge via the pathmap).
 function _grow_network_from_seed!(network, pathmap, seed::CartesianIndex{2},
-                                 tstruct, full_traps)
+                                 tstruct, full_traps;
+                                 departing_trap_ix::Int=0, stop_at_present::Bool=false)
     LI = LinearIndices(tstruct.topography)
     CI = CartesianIndices(tstruct.topography)
     terminus = CartesianIndex(0, 0)
-    departing_trap_ix = 0 # if the path exited a previous trap, this is the trap index
     while seed != terminus
         path, trap_ix = _trace_to_next_trap(tstruct, LI[seed], full_traps)
 
         trap_local = 0
+        was_present = false
         # registering trap if it exists
         if trap_ix > 0
             # switch 'trap' from index into tstruct to index into network.traps
             trap_local = findfirst(dtrap -> dtrap.trap_ix == trap_ix, network.traps)
-            if isnothing(trap_local)
+            was_present = !isnothing(trap_local)
+            if !was_present
                 # trap_ix is not yet in network.traps, so add it
                 cv_in, cv_out, nbs_out =
-                    _intersecting_culverts_and_nbs_outlets(CI[tstruct.footprints[trap_ix]], network.culverts, network.nbs)
+                    _intersecting_culverts_and_nbs_outlets(CI[tstruct.footprints[trap_ix]],
+                                                           network.culverts, network.nbs)
                 push!(network.traps, DynTrap(trap_ix, 0, cv_in, cv_out)) # @@ handle spill_path index later
                 trap_local = length(network.traps)
             end
@@ -168,16 +177,19 @@ function _grow_network_from_seed!(network, pathmap, seed::CartesianIndex{2},
         # tracing.  Otherwise, we are done.
         departing_trap_ix = trap_local
 
-        if trap_ix == 0
+        if trap_ix == 0 || (stop_at_present && was_present)
             seed = terminus
         else
             spoint = tstruct.spillpoints[trap_ix]
             seed = (trap_ix ∈ full_traps) && spoint.downstream_region_cell != spoint.current_region_cell ?
                 CI[spoint.downstream_region_cell] : terminus
         end
-        
+
     end
 end
+
+# `_grow_network_from_seed!`'s `departing_trap_ix` / `stop_at_present` kwargs above are used
+# by `grow_spill!` (in network_updating.jl), the live-grow counterpart of `detach_spill!`.
 
 # ----------------------------------------------------------------------------
 function _update_pathmap!(pathmap, path::Vector{Int}, path_ix)
