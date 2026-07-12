@@ -24,12 +24,12 @@ spill path when a trap stops spilling, cascading downstream.
   us to *re-root* a surviving path to its live source, so the re-root/die
   decision subsumes any path counter — a path counter would be redundant.
   `DynFlowPath` stays immutable (re-root replaces the object, never mutates it).
-- **No source flag.** A `dyn_coord`-anchored trap (the trap *is* the seed, no
-  feeding path) is seeded with `in_count = 1` at build; that `+1` is never
-  decremented (decrements fire only per feeding-path death), so it floors at 1.
-  Culvert/NBS-fed traps need nothing special — their feeding source-path is never
-  orphaned (orphaning fires only when a *trap* stops spilling), so it persists and
-  keeps `in_count ≥ 1`.
+- **No source flag.** A seed-anchored trap (dyn_coord / culvert or NBS outlet / NBS
+  accumulation) is counted by the persistent source-headed connector path its seed
+  grows — no floor needed. The only floor is a culvert *inlet* in a trap (a
+  persistent coupling that is neither a seed/connector nor a feed). Floor and
+  source-headed connectors are never decremented (orphaning fires only when a
+  *trap* stops spilling, and neither has a trap head).
 - **Alive iff `in_count > 0`.**
 - **Incremental during evolution.** Growth increments one trap; shrink decrements
   + cascades. A full count pass is used only at **bulk build** (the split), never
@@ -59,30 +59,26 @@ end
 component-invariant (a trap's feeders are all in its component), so the split just
 **copies** each `in_count` through `_localize_trap` — no per-component recompute.
 
-`in_count` = live incoming spill paths (transient) **plus a permanent floor** of
-one per persistent coupling to a dynamic element that is *not* a path: a culvert
-with an endpoint in the trap (intrinsic, `trap.culvert_*`), an NBS accumulation
-coupling (`nbs_accum_traps`, from the split's accumulation resolution), and a
-dyn_coord anchor (`dyn_coord_traps`, a setup input). Floor terms are never
-decremented.
+`in_count` = live incoming paths (`target_trap`) **plus a floor of 1 if a culvert
+inlet sits in the trap**. Every seed anchor (dyn_coord / culvert or NBS outlet /
+NBS accumulation) already grows a persistent source-headed connector path that
+targets its trap, so it is counted via `target_trap` — a floor for those would
+double-count. A culvert *inlet* is the only coupling with neither a connector (not
+a seed) nor a feed (it draws).
 ```julia
-function init_in_counts!(net::DynNetwork, dyn_coord_traps, nbs_accum_traps)
+function init_in_counts!(net::DynNetwork)
     for t in net.traps; t.in_count = 0; end
     for p in net.flow_paths
-        p.target_trap > 0 && (net.traps[p.target_trap].in_count += 1)   # spill / source paths
+        p.target_trap > 0 && (net.traps[p.target_trap].in_count += 1)
     end
-    for t in net.traps                                                  # direct culvert coupling
-        (!isempty(t.culvert_inlets) || !isempty(t.culvert_outlets)) && (t.in_count += 1)
+    for t in net.traps
+        isempty(t.culvert_inlets) || (t.in_count += 1)
     end
-    for i in dyn_coord_traps; net.traps[i].in_count += 1; end           # dyn_coord seed
-    for i in nbs_accum_traps; net.traps[i].in_count += 1; end           # NBS accumulation
     return net
 end
 ```
-(A culvert/NBS feed arriving *via a path* is already counted through `target_trap`
-and its source-headed path is never orphaned; the floor is for the *direct*
-couplings that are not paths.) Reusing this to `@assert` the incremental value in
-tests is a test-only nicety, not a production path.
+Reusing this to `@assert` the incremental value in tests is a test-only nicety,
+not a production path.
 
 **Grow (trap starts spilling → new path targets `B`):** local increment, no
 cascade — adding a feed can't detach anything. (Topology growth — trace + attach
@@ -160,14 +156,12 @@ one independent ODE solve, so this matters:
   hard direction incrementally (edge deletion / dynamic connectivity), so keep
   the over-large component and re-split lazily on the next rebuild if perf needs.
 
-## 6. Build-time init — `setup_network`
+## 6. Build-time init — `setup_network`  *(done, `106a897`)*
 
-After the monolithic net is built, call
-`init_in_counts!(net, dyn_coord_traps, nbs_accum_traps)` once (paths + the
-permanent floor); the split then copies each `in_count` through `_localize_trap`,
-since counts are component-invariant. `dyn_coord_traps` is a setup input;
-`nbs_accum_traps` comes from the split's accumulation resolution; culvert coupling
-is read off the trap.
+`setup_network` calls `init_in_counts!(net)` after growth (paths + the culvert-inlet
+floor; seed anchors are counted via their connector paths); the split then copies each
+`in_count` through `_localize_trap`, since counts are component-invariant. Self-contained
+(no `fill_sequence`); verified on the real `mini.txt` terrain.
 
 ## 7. Build prerequisites (in place, commit `d131a30`)
 

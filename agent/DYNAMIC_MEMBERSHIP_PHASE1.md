@@ -8,20 +8,17 @@ Prerequisite already in place (commit `d131a30`): every trap-to-trap link is a
 path — adjacent traps get a zero-length connector with `target_trap` set — so
 `init_in_counts!`'s `p.target_trap` count picks them up. See `PLAN.md` §5.
 
-## No `is_source` flag — dyn_coord seed = starting `in_count` of 1
+## No source flag — seed anchors counted via connectors
 
-There is no source flag. A trap anchored directly by a `dyn_coord` (the trap *is*
-the seed, no feeding path — dyn_coords are mostly a test/debug input and can sit
-inside a trap) is seeded with `in_count = 1` at build. That `+1` is never
-decremented — a decrement fires only per real feeding-path death, and there are
-only as many of those as there were paths — so `in_count` floors at 1 and the
-trap never detaches. **Aliveness is uniformly `in_count > 0`.**
+There is no source flag. A trap anchored by a seed (dyn_coord / culvert or NBS
+outlet / NBS accumulation) is fed by the persistent source-headed **connector path**
+its seed grows (zero-length if the seed sits in the trap), which targets the trap and
+is therefore counted via `target_trap`. That path is never orphaned (orphaning fires
+only when a *trap* stops spilling, and a seed-headed path has no trap head), so the
+count never drops. **Aliveness is uniformly `in_count > 0`.**
 
-Culvert/NBS-fed traps need nothing special: their feeding source-path is never
-orphaned (orphaning fires only when a *trap* stops spilling, and a
-culvert/NBS/dyn_coord-headed path has no trap head), so it persists and keeps
-`in_count ≥ 1`. (Assumes culvert/NBS outlets discharge onto terrain via a path;
-an outlet directly inside a trap would need its feed represented — revisit then.)
+The only coupling needing a floor is a culvert **inlet** in a trap — not a seed (no
+connector) and it draws rather than feeds (no `target_trap`).
 
 ## 1. `src/dynamics/elements.jl` — one field on `DynTrap`
 
@@ -31,7 +28,7 @@ mutable struct DynTrap <: DynObject
     spill_path::Int
     culvert_inlets::Vector{Int}
     culvert_outlets::Vector{Int}
-    in_count::Int      # live incoming flow paths (+1 seed if dyn_coord-anchored)
+    in_count::Int      # live incoming flow paths (+1 floor if a culvert inlet is in the trap)
     DynTrap(ix, sp, ci, co) = new(ix, sp, ci, co, 0)
 end
 ```
@@ -46,23 +43,20 @@ stays immutable — re-root replaces the object).
 component-invariant (a trap's feeders are all in its component), so the split just
 **copies** each `in_count` through `_localize_trap` — no per-component recompute.
 
-`in_count` = live incoming spill paths (transient) **plus a permanent floor** of
-one per persistent coupling to a dynamic element that is *not* carried by a path:
-a culvert with an endpoint in the trap (intrinsic, from `trap.culvert_*`), an NBS
-accumulation coupling (`nbs_accum_traps`, from the split's accumulation
-resolution), and a dyn_coord anchor (`dyn_coord_traps`, a setup input). Floor
-terms are never decremented, so path-deaths can't drop below them.
+Implemented as `init_in_counts!(net)` — floor simplified to culvert **inlets** only
+(commit `106a897`): every seed anchor (dyn_coord / culvert or NBS outlet / NBS
+accumulation) is already counted via the persistent connector path it grows, so only a
+culvert inlet (not a seed, and it draws) still needs a floor. Counts are
+component-invariant, so the split copies them through `_localize_trap`.
 ```julia
-function init_in_counts!(net::DynNetwork, dyn_coord_traps, nbs_accum_traps)
+function init_in_counts!(net::DynNetwork)
     for t in net.traps; t.in_count = 0; end
     for p in net.flow_paths
-        p.target_trap > 0 && (net.traps[p.target_trap].in_count += 1)   # spill / source paths
+        p.target_trap > 0 && (net.traps[p.target_trap].in_count += 1)
     end
-    for t in net.traps                                                  # direct culvert coupling
-        (!isempty(t.culvert_inlets) || !isempty(t.culvert_outlets)) && (t.in_count += 1)
+    for t in net.traps
+        isempty(t.culvert_inlets) || (t.in_count += 1)
     end
-    for i in dyn_coord_traps; net.traps[i].in_count += 1; end           # dyn_coord seed
-    for i in nbs_accum_traps; net.traps[i].in_count += 1; end           # NBS accumulation
     return net
 end
 ```
@@ -123,19 +117,19 @@ Careful bits (to solve during implementation):
 
 ## 3. Deferred to Phase 2
 
-The build-time `init_in_counts!` call (with the dyn_coord and NBS-accumulation
-trap sets) lives in `setup_network`, and the split copies counts through
-`_localize_trap`. The "trap stopped overflowing" hook lives in the solve /
+The build-time `init_in_counts!(net)` call already lives in `setup_network` and the
+split copies counts through `_localize_trap` (done, `106a897`; validated on real
+terrain without a solver). What remains for Phase 2: the live "trap stopped
+overflowing" hook calling `detach_spill!` (the transition lives in the solve /
 `fill_sequence` layer, which does not yet drive the new `build_network`
-representation. Phase-1 tests build `DynNetwork`s by hand and call the primitives
-directly.
+representation), plus grow / state-handoff / re-partitioning.
 
 ## 4. Tests (scratchpad harness first, like the split tests)
 
 Chain and diamond `DynNetwork`s:
 - `init_in_counts!` gives expected per-trap counts;
 - `detach_spill!` on a mid trap returns exactly the traps that lose all feeds;
-  survivors keep `in_count > 0`; a dyn_coord-anchored trap (seeded `in_count = 1`)
+  survivors keep `in_count > 0`; a seed-anchored trap (counted via its connector)
   never detaches;
 - re-root: a path with a live tributary keeps its target fed and the survivor
   emanates from the tributary's source;
