@@ -269,7 +269,8 @@ function apply_fill!(comps::Vector{DynNetwork}, tstruct, full_traps, trap_ix::In
     # 3. detect fusion: test the newly-added traps' trap_ix (trapmap) and the newly-added
     #    path cells / NBS crossings (cellmap) against the pre-grow index; any hit in a
     #    *different* component is a coupling.
-    # 4. fuse each such other component into the owner (_fuse_components!), lowest index kept.
+    # 4. if any coupling found, fuse the owner + those components via _fuse_components!(comps,
+    #    idxs, tstruct, full_traps) — regrows them into one clean component.
     # 5. return the migrated (newly-dynamic) trap_ix.
 end
 
@@ -297,42 +298,46 @@ function apply_unfill!(comps::Vector{DynNetwork}, tstruct, trap_ix::Int)
 end
 
 # ----------------------------------------------------------------------------
-# Fuse component `j` into component `i` (keep the lower index) in `comps`: build the combined
-# localized DynNetwork, write it to comps[i], and remove comps[j].  Returns `comps`.
-function _fuse_components!(comps::Vector{DynNetwork}, i::Int, j::Int, tstruct)
-    # 1. combine the two localized nets into one contiguous index space (_combine_localized).
-    # 2. resolve cross-net cell overlaps (a shared corridor) into merges (_resolve_cell_overlaps!).
-    # 3. dedup traps reached from both nets (same trap_ix), remapping references (_dedup_traps).
-    # 4. recompute in_count on the fused net (init_in_counts!) — a rebuild, so a full pass is ok.
-    # 5. comps[i] = fused; deleteat!(comps, j); return comps.
+# The root seed cells a component was grown from: the departure points of its source-headed
+# paths (those no trap spills into).  Culvert outlets and NBS seed cells are among them (each
+# heads its own path); the trap-spill connectors are omitted, as the tracer regrows those from
+# `full_traps`.  Regrowing from these seeds reproduces the whole component.
+function _component_seeds(net::DynNetwork)
+    spill = Set(t.spill_path for t in net.traps if t.spill_path > 0)   # paths a trap spills into
+    return [net.flow_paths[k].departure_point
+            for k in eachindex(net.flow_paths) if !(k in spill)]
 end
 
 # ----------------------------------------------------------------------------
-# Merge two already-localized DynNetworks into a single one (`b` appended after `a`, all
-# cross-references reindexed into the combined space, culverts and NBS carried over).
-# Any overlapping cells / duplicate traps between the two are left for the caller to resolve.
-function _combine_localized(a::DynNetwork, b::DynNetwork)
-    np, nt   = length(a.flow_paths), length(a.traps)
-    ncv, nnbs = length(a.culverts), length(a.nbs)
-    shift(x, off) = x <= 0 ? x : x + off        # 0 (none) / -1 (out-of-domain) pass through
+# Grow a fresh network from `seeds` (with the given culverts/NBS) and split it into components
+# — the core of `setup_network` minus input validation and the NBS cell precompute (the
+# passed NBS already carry theirs).  Used to regenerate fused components.
+function _regrow(seeds, culverts::Vector{DynCulvert}, nbs::Vector{DynNBSPlacement}, tstruct, full_traps)
+    net = DynNetwork(culverts, nbs)
+    pathmap = Dict{Int,Int}()
+    foreach(s -> _grow_network_from_seed!(net, pathmap, s, tstruct, full_traps),
+            _seeds_downstream_first(seeds, tstruct))
+    init_in_counts!(net)
+    return split_network_into_connected_components(net, tstruct)
+end
 
-    paths = copy(a.flow_paths)                  # a's paths keep indices 1:np
-    for p in b.flow_paths
-        push!(paths, DynFlowPath(p.cells, p.departure_point, shift(p.target_trap, nt),
-            [(c + ncv,  pos) for (c, pos) in p.culvert_inlets],
-            [(c + ncv,  pos) for (c, pos) in p.culvert_outlets],
-            [(n + nnbs, pos) for (n, pos) in p.nbs_outlets],
-            [(m + np,   j)   for (m, j)   in p.merges]))
+# ----------------------------------------------------------------------------
+# Fuse the components at indices `idxs` (coupled by a grow) into fresh, clean component(s) by
+# regrowing them from their seeds: the build tracer redoes cell overlaps, duplicate-trap
+# collapsing, and culvert/NBS assignment for free, so no bespoke surgery is needed.  Removes
+# the fused slots from `comps` and appends the regrown result (normally one component).
+function _fuse_components!(comps::Vector{DynNetwork}, idxs, tstruct, full_traps)
+    seeds    = CartesianIndex{2}[]
+    culverts = DynCulvert[]
+    nbs      = DynNBSPlacement[]
+    for c in idxs
+        append!(seeds,    _component_seeds(comps[c]))
+        append!(culverts, comps[c].culverts)
+        append!(nbs,      comps[c].nbs)
     end
-
-    traps = copy(a.traps)                       # a's traps keep indices 1:nt
-    for t in b.traps
-        lt = DynTrap(t.trap_ix, shift(t.spill_path, np),
-                     [c + ncv for c in t.culvert_inlets],
-                     [c + ncv for c in t.culvert_outlets])
-        lt.in_count = t.in_count
-        push!(traps, lt)
-    end
-
-    return DynNetwork(paths, traps, vcat(a.culverts, b.culverts), vcat(a.nbs, b.nbs))
+    unique!(culverts); unique!(nbs)              # a coupling element could sit in two of the fused
+    regrown = _regrow(seeds, culverts, nbs, tstruct, full_traps)
+    deleteat!(comps, sort(collect(idxs)))
+    append!(comps, regrown)
+    return comps
 end
