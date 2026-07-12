@@ -205,7 +205,7 @@ function grow_spill!(net::DynNetwork, tstruct, full_traps, trap_id::Int)
 
     np0, nt0 = length(net.flow_paths), length(net.traps)
     _grow_network_from_seed!(net, pathmap, CI[spoint.downstream_region_cell], tstruct, full_traps;
-                             departing_trap_ix=trap_id, stop_at_present=true)
+                             departing_trap_ix=trap_id)
 
     # Incremental in_count: each new path feeds its target trap; each new trap additionally
     # gets the culvert-inlet floor.  (A new path merging into an existing one has target 0 and

@@ -30,11 +30,12 @@ function setup_network(tstruct, full_traps;
     pathmap = Dict{Int, Int}() # terrain cell -> flow path index
 
     # Track all seeds and build up corresponding network of paths and traps.  Seeds are
-    # grown downstream-first (see _seeds_downstream_first) so an upstream path always
-    # meets an already-registered downstream path at a non-first cell.
+    # grown downstream-first (see _seeds_downstream_first) so an upstream path always meets
+    # an already-registered downstream path at a non-first cell, and a chain reaching an
+    # already-traced trap stops there (keeping that trap's single spill path) instead of
+    # re-tracing and overwriting it.
     monolithic_network = DynNetwork(culverts, nbs)
-    foreach(s -> _grow_network_from_seed!(monolithic_network,
-                                          pathmap, s, tstruct, full_traps),
+    foreach(s -> _grow_network_from_seed!(monolithic_network, pathmap, s, tstruct, full_traps),
             _seeds_downstream_first(seeds, tstruct))
 
     # Reachability counts for dynamic-membership tracking; the split copies them per component.
@@ -124,13 +125,11 @@ end
 # ----------------------------------------------------------------------------
 # `departing_trap_ix` seeds the trap whose spill_path the first connector sets (used by
 # grow, where the seed is an existing trap's spillpoint; 0 at build, where seeds are
-# dyn_coords / culvert / NBS cells).  `stop_at_present` (grow only) stops the trace when it
-# reaches a trap already in the network — its downstream is already represented, so we only
-# attach the connector rather than re-tracing.  At build it stays false (chains that meet an
-# existing trap continue and merge via the pathmap).
+# dyn_coords / culvert / NBS cells).  The trace stops when it reaches a trap already in the
+# network: its downstream is already represented, so we attach the incoming connector and
+# stop, rather than re-tracing and overwriting that trap's single spill path.
 function _grow_network_from_seed!(network, pathmap, seed::CartesianIndex{2},
-                                 tstruct, full_traps;
-                                 departing_trap_ix::Int=0, stop_at_present::Bool=false)
+                                 tstruct, full_traps; departing_trap_ix::Int=0)
     LI = LinearIndices(tstruct.topography)
     CI = CartesianIndices(tstruct.topography)
     terminus = CartesianIndex(0, 0)
@@ -177,7 +176,7 @@ function _grow_network_from_seed!(network, pathmap, seed::CartesianIndex{2},
         # tracing.  Otherwise, we are done.
         departing_trap_ix = trap_local
 
-        if trap_ix == 0 || (stop_at_present && was_present)
+        if trap_ix == 0 || was_present
             seed = terminus
         else
             spoint = tstruct.spillpoints[trap_ix]
@@ -188,8 +187,8 @@ function _grow_network_from_seed!(network, pathmap, seed::CartesianIndex{2},
     end
 end
 
-# `_grow_network_from_seed!`'s `departing_trap_ix` / `stop_at_present` kwargs above are used
-# by `grow_spill!` (in network_updating.jl), the live-grow counterpart of `detach_spill!`.
+# `_grow_network_from_seed!`'s `departing_trap_ix` kwarg above is used by `grow_spill!`
+# (in network_updating.jl), the live-grow counterpart of `detach_spill!`.
 
 # ----------------------------------------------------------------------------
 function _update_pathmap!(pathmap, path::Vector{Int}, path_ix)
