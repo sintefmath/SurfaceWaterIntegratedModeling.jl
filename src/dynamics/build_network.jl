@@ -37,6 +37,9 @@ function setup_network(tstruct, full_traps;
                                           pathmap, s, tstruct, full_traps),
             _seeds_downstream_first(seeds, tstruct))
 
+    # Reachability counts for dynamic-membership tracking; the split copies them per component.
+    init_in_counts!(monolithic_network)
+
     # Split network in connected components
     networks = split_network_into_connected_components(monolithic_network, tstruct)
 

@@ -136,8 +136,10 @@ function _localize_path(fp::DynFlowPath, tmap, cvmap, nbsmap, pmap)
 end
 
 function _localize_trap(tr::DynTrap, pmap, cvmap)
-    DynTrap(tr.trap_ix,
-            _relabel(tr.spill_path, pmap),
-            [cvmap[c] for c in tr.culvert_inlets],
-            [cvmap[c] for c in tr.culvert_outlets])
+    lt = DynTrap(tr.trap_ix,
+                 _relabel(tr.spill_path, pmap),
+                 [cvmap[c] for c in tr.culvert_inlets],
+                 [cvmap[c] for c in tr.culvert_outlets])
+    lt.in_count = tr.in_count   # component-invariant (a trap's feeders are all in its component)
+    return lt
 end
