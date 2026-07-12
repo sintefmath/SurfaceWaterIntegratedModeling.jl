@@ -45,6 +45,11 @@ standing guidance.
 - No linter is enforced, but the codebase uses 4-space indentation throughout.
 - Exported public API is documented with docstrings; internal helpers are
   prefixed with `_` and are not exported.
+- Document functions consistently, exported or not. Exported functions use a full
+  docstring: call signature, a 2–3 line description, then `# Arguments` and
+  `# Returns` sections. Internal (`_`-prefixed) helpers carry a brief comment in the
+  same spirit — what it does and, where not obvious from the signature, its inputs and
+  return value — kept terse (a few lines), without the section headings.
 - Type parameters use `{T<:Real}` / `{<:Real}` consistently; avoid
   introducing concrete-type constraints in new function signatures.
 - Parallelism is not used yet (commented-out tiling tests exist in

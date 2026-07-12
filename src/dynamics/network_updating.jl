@@ -1,18 +1,25 @@
-# Dynamic-network membership: a reachability counter on traps.  A trap is dynamic while
-# `in_count > 0`.  See agent/DYNAMIC_MEMBERSHIP_PLAN.md.
+# Dynamic-network updating: incremental grow/shrink of a DynNetwork as traps fill and
+# empty during a solve, tracked by a reachability counter on traps (a trap is dynamic while
+# `in_count > 0`).  `grow_spill!` and `detach_spill!` are the two symmetric per-network
+# mutations; `apply_fill!` / `apply_unfill!` drive them across the live component set
+# (fusing components a grow couples together).  See agent/DYNAMIC_MEMBERSHIP_PLAN.md.
 
-export init_in_counts!, detach_spill!
+export init_in_counts!, detach_spill!, grow_spill!, apply_fill!, apply_unfill!
 
 # ----------------------------------------------------------------------------
 """
     init_in_counts!(net) -> net
 
-Set every trap's `in_count` = its live incoming paths (`target_trap`) plus a floor of 1
-if a culvert *inlet* sits in the trap.  A culvert inlet is a persistent coupling that no
-path carries — it draws, and (unlike an outlet) is not a seed.  Every seed anchor
-(dyn_coord / culvert or NBS outlet / NBS accumulation) is already counted: each seeds a
-persistent source-headed connector path that targets its trap.  Run once at build; the
-split copies counts through `_localize_trap`.
+Recompute every trap's reachability `in_count` from scratch: the live flow paths targeting
+it, plus a floor of 1 when a culvert *inlet* sits in the trap (a persistent coupling that
+draws but is carried by no path; seed anchors are already counted via the connector paths
+they grow).  Full pass — used at build only, never during incremental grow/shrink.
+
+# Arguments
+- `net::DynNetwork`: network whose trap counts are (re)set in place.
+
+# Returns
+`net`, mutated.
 """
 function init_in_counts!(net::DynNetwork)
     # initialize all trap counts to zero
@@ -36,11 +43,18 @@ end
 """
     detach_spill!(net, trap_id) -> Vector{Int}
 
-Trap `trap_id` stopped overflowing: clear its spill edge and re-root-or-kill the orphaned
-spill path, cascading downstream.  Then compact the net in place (drop the tombstoned paths
-and detached traps, reindex the survivors).  Returns the `trap_ix` (stable spillanalysis
-indices) of the traps that left the dynamic network, for the caller to hand back to static
-handling — stable across the compaction, unlike local indices.
+Handle trap `trap_id` ceasing to overflow: clear its spill edge, re-root or kill the
+orphaned spill path and cascade the reachability decrement downstream, then compact the
+network in place (drop tombstoned paths and `in_count==0` traps, reindex survivors).
+
+# Arguments
+- `net::DynNetwork`: network, mutated in place.
+- `trap_id::Int`: local index (in `net.traps`) of the trap that stopped overflowing.
+
+# Returns
+The `trap_ix` (stable spillanalysis indices) of the traps that thereby left the dynamic
+network, for the caller to hand back to static handling.  Stable across the compaction,
+unlike local indices.
 """
 function detach_spill!(net::DynNetwork, trap_id::Int)
     detached = Int[]                       # local trap indices, collected during the cascade
@@ -52,10 +66,11 @@ function detach_spill!(net::DynNetwork, trap_id::Int)
     return detached_ix
 end
 
-# Remove the dead nodes a detach cascade leaves — tombstoned paths (departure_point == (0,0))
-# and traps with in_count == 0 — and reindex the survivors' cross-references, in place.
-# Culverts/NBS are untouched (a detach removes none).  DynNetwork/DynTrap are mutable, so the
-# vectors are reassigned and spill_path is patched directly; each DynFlowPath slot is rebuilt.
+# Remove the dead nodes a detach cascade leaves in `net` — tombstoned paths
+# (departure_point == (0,0)) and traps with in_count == 0 — and reindex the survivors'
+# cross-references, in place.  Culverts/NBS are untouched (a detach removes none).
+# DynNetwork/DynTrap are mutable, so the vectors are reassigned and spill_path is patched
+# directly; each DynFlowPath slot is rebuilt.  Returns `net`, mutated.
 function _compact!(net::DynNetwork)
     live_p = [p for p in eachindex(net.flow_paths)
               if net.flow_paths[p].departure_point != CartesianIndex(0, 0)]
@@ -74,7 +89,9 @@ function _compact!(net::DynNetwork)
     return net
 end
 
-# The spill path lost its head: promote its uppermost live tributary, else kill it.
+# The orphaned spill path `path_id` lost its head trap: promote its uppermost live tributary,
+# else kill it.  `detached` is an accumulator, appended with the local indices of traps that
+# lose all feeds as the kill cascades downstream.
 function _reroot_or_kill_path!(net::DynNetwork, path_id::Int, detached::Vector{Int})
     m = _uppermost_merge(net.flow_paths[path_id])
     m === nothing ? _kill_path!(net, path_id, detached) : _promote_tributary!(net, path_id, m[2], m[1])
@@ -93,8 +110,9 @@ function _uppermost_merge(fp::DynFlowPath)
     return best
 end
 
-# No live injection: the path dies.  If it targets a trap, decrement it and cascade when
-# that trap loses its last feed; if it is a tributary/domain-exit path, just remove it.
+# No live tributary: path `path_id` dies.  If it targets a trap, decrement that trap and, when
+# it loses its last feed, append it to `detached` and cascade; a tributary/domain-exit path is
+# just removed.
 function _kill_path!(net::DynNetwork, path_id::Int, detached::Vector{Int})
     t = net.flow_paths[path_id].target_trap
     if t > 0
@@ -126,9 +144,10 @@ _tombstone_path!(net::DynNetwork, path_id::Int) =
     net.flow_paths[path_id] = DynFlowPath(CartesianIndex{2}[], CartesianIndex(0, 0), 0,
         Tuple{Int,Int}[], Tuple{Int,Int}[], Tuple{Int,Int}[], Tuple{Int,Int}[])
 
-# Re-root: the tributary Q at junction j takes over the orphaned path's downstream role.
-# The survivor is Q followed by P from the junction down, kept in Q's slot (it is Q's
-# continuation): Q's head trap already spills into q, and path_id's head trap was cleared
+# Re-root: the tributary `Q` (path slot `q`) at junction position `j` takes over the orphaned
+# path `P` (slot `path_id`)'s downstream role.  The survivor is Q followed by P from the
+# junction down, kept in Q's slot (it is Q's continuation): Q's head trap already spills into
+# q, and path_id's head trap was cleared
 # before re-root, so no spill_path redirect is needed — tombstone the orphaned head path
 # (path_id) instead.  The dead head stub (P.cells 1:j-1) is dropped; the target trap stays
 # fed (in_count unchanged); injections all sit at positions >= j, so none is lost.
@@ -144,4 +163,159 @@ function _promote_tributary!(net::DynNetwork, path_id::Int, j::Int, q::Int)
     net.flow_paths[q] = DynFlowPath(vcat(Q.cells, P.cells[j:end]),
         Q.departure_point, P.target_trap, ci, co, no, mg)
     _tombstone_path!(net, path_id)
+end
+
+# ----------------------------------------------------------------------------
+"""
+    grow_spill!(net, tstruct, full_traps, trap_id) -> Vector{Int}
+
+Handle trap `trap_id` becoming full and starting to spill: trace its spill downstream and
+attach the new path(s)/trap(s), maintaining `in_count` incrementally over just the added
+elements (never a full `init_in_counts!` pass).  The mirror of [`detach_spill!`].
+
+# Arguments
+- `net::DynNetwork`: network, mutated in place.
+- `tstruct`: spillanalysis structure (terrain, spillpoints, footprints).
+- `full_traps`: set of currently-full trap indices; must include `trap_id`'s `trap_ix`.
+- `trap_id::Int`: local index (in `net.traps`) of the trap that started spilling.
+
+# Returns
+The `trap_ix` of the traps newly brought into the dynamic network, for the caller to
+migrate from static handling and seed their state.
+
+# Notes
+The trace stops at the first already-present trap (its downstream is already represented;
+only the connector is attached).  Growth crossing into a *different* component (fusion,
+PLAN §5) is **not** handled here.  Uses `_grow_network_from_seed!` from build_network.jl
+(not yet in the module include list), so this currently requires that file to be loaded.
+"""
+function grow_spill!(net::DynNetwork, tstruct, full_traps, trap_id::Int)
+    spoint = tstruct.spillpoints[net.traps[trap_id].trap_ix]
+    if spoint.downstream_region_cell == spoint.current_region_cell
+        net.traps[trap_id].spill_path = -1        # spills straight out of the domain
+        return Int[]
+    end
+
+    LI = LinearIndices(tstruct.topography)
+    CI = CartesianIndices(tstruct.topography)
+    pathmap = Dict{Int,Int}()                     # existing net: cell (linear) -> path index
+    for (pi, p) in enumerate(net.flow_paths), c in p.cells
+        pathmap[LI[c]] = pi
+    end
+
+    np0, nt0 = length(net.flow_paths), length(net.traps)
+    _grow_network_from_seed!(net, pathmap, CI[spoint.downstream_region_cell], tstruct, full_traps;
+                             departing_trap_ix=trap_id, stop_at_present=true)
+
+    # Incremental in_count: each new path feeds its target trap; each new trap additionally
+    # gets the culvert-inlet floor.  (A new path merging into an existing one has target 0 and
+    # adds nothing — the merge feeds a path, not a trap.)  Same rule as init_in_counts!, over
+    # the added elements only.
+    for pi in (np0 + 1):length(net.flow_paths)
+        tt = net.flow_paths[pi].target_trap
+        tt > 0 && (net.traps[tt].in_count += 1)
+    end
+    added = Int[]
+    for ti in (nt0 + 1):length(net.traps)
+        isempty(net.traps[ti].culvert_inlets) || (net.traps[ti].in_count += 1)
+        push!(added, net.traps[ti].trap_ix)
+    end
+    return added
+end
+
+# ----------------------------------------------------------------------------
+# Global lookup over the live components, rebuilt on demand each event (cheap, cannot go
+# stale, and doubles as the fusion detector).  Returns:
+#   trapmap: trap_ix -> (component index, local trap index) — locate a trap from an event;
+#   cellmap: occupied cell (linear) -> component index — flow-path cells, trap footprint
+#            cells, and NBS footprint cells.  A grown-path cell hitting a *different*
+#            component here is a fusion trigger.
+# Components are disjoint by construction, so each cell/trap resolves to exactly one.
+function _index_components(comps::Vector{DynNetwork}, tstruct)
+    LI = LinearIndices(tstruct.topography)
+    trapmap = Dict{Int, Tuple{Int,Int}}()
+    cellmap = Dict{Int, Int}()
+    for (ci, net) in enumerate(comps)
+        for (li, t) in enumerate(net.traps)
+            trapmap[t.trap_ix] = (ci, li)
+            for k in tstruct.footprints[t.trap_ix]; cellmap[k] = ci; end
+        end
+        for p in net.flow_paths, c in p.cells;  cellmap[LI[c]] = ci; end
+        for nb in net.nbs, k in nb.footprint;    cellmap[k]     = ci; end
+    end
+    return trapmap, cellmap
+end
+
+# ----------------------------------------------------------------------------
+"""
+    apply_fill!(comps, tstruct, full_traps, trap_ix) -> Vector{Int}
+
+Apply a not-full → full transition for trap `trap_ix` across the live component set: grow
+the owning component, then fuse in any component the growth coupled into.
+
+# Arguments
+- `comps::Vector{DynNetwork}`: live components, mutated in place.
+- `tstruct`: spillanalysis structure.
+- `full_traps`: currently-full trap indices (must already include `trap_ix`).
+- `trap_ix::Int`: spillanalysis index of the trap that filled (must be dynamic already).
+
+# Returns
+The `trap_ix` of traps newly brought into the dynamic network, for the caller's state handoff.
+"""
+function apply_fill!(comps::Vector{DynNetwork}, tstruct, full_traps, trap_ix::Int)
+    # 1. index the pre-grow components: locate trap_ix's owning component + local index,
+    #    and keep trapmap/cellmap as the fusion detector snapshot.
+    # 2. grow the owning component from that local trap (grow_spill!), collecting added trap_ix.
+    # 3. detect fusion: test the newly-added traps' trap_ix (trapmap) and the newly-added
+    #    path cells / NBS crossings (cellmap) against the pre-grow index; any hit in a
+    #    *different* component is a coupling.
+    # 4. fuse each such other component into the owner (_fuse_components!), lowest index kept.
+    # 5. return the migrated (newly-dynamic) trap_ix.
+end
+
+# ----------------------------------------------------------------------------
+"""
+    apply_unfill!(comps, tstruct, trap_ix) -> Vector{Int}
+
+Apply a full → not-full transition for trap `trap_ix`: detach its spill in the owning
+component (compaction runs inside `detach_spill!`; fission is deferred).
+
+# Arguments
+- `comps::Vector{DynNetwork}`: live components, mutated in place.
+- `tstruct`: spillanalysis structure.
+- `trap_ix::Int`: spillanalysis index of the trap that stopped overflowing.
+
+# Returns
+The `trap_ix` of traps that left the dynamic network, for handoff back to static handling.
+"""
+function apply_unfill!(comps::Vector{DynNetwork}, tstruct, trap_ix::Int)
+    # 1. index the components to locate trap_ix's owning component + local index.
+    # 2. detach the spill (detach_spill!) — cascades + compacts that component in place.
+    # 3. fission deferred: the surviving component may fall into disconnected pieces but is
+    #    still one correct (if larger) solve; re-split lazily on the next full rebuild.
+    # 4. return the detached trap_ix.
+end
+
+# ----------------------------------------------------------------------------
+# Fuse component `j` into component `i` (keep the lower index) in `comps`: build the combined
+# localized DynNetwork, write it to comps[i], and remove comps[j].  Returns `comps`.
+function _fuse_components!(comps::Vector{DynNetwork}, i::Int, j::Int, tstruct)
+    # 1. combine the two localized nets into one contiguous index space (_combine_localized).
+    # 2. resolve cross-net cell overlaps (a shared corridor) into merges (_resolve_cell_overlaps!).
+    # 3. dedup traps reached from both nets (same trap_ix), remapping references (_dedup_traps).
+    # 4. recompute in_count on the fused net (init_in_counts!) — a rebuild, so a full pass is ok.
+    # 5. comps[i] = fused; deleteat!(comps, j); return comps.
+end
+
+# ----------------------------------------------------------------------------
+# Combine two already-localized DynNetworks into one index space: offset `b`'s path / trap /
+# culvert / NBS indices past `a`'s counts, concatenate the vectors, and remap every
+# cross-reference (target_trap, spill_path, merges, culvert/NBS (id,pos)); 0/-1 sentinels
+# pass through.  Unlike `_combine_subnets` it preserves culverts/NBS (localized nets carry
+# them).  Returns the combined DynNetwork (overlaps/duplicate traps not yet resolved).
+function _combine_localized(a::DynNetwork, b::DynNetwork)
+    # 1. offsets: np = length(a.flow_paths), nt = length(a.traps), ncv, nnbs from a's vectors.
+    # 2. take a's paths/traps/culverts/nbs unchanged.
+    # 3. append b's, each cross-reference shifted by the matching offset.
+    # 4. return DynNetwork(paths, traps, culverts, nbs).
 end
