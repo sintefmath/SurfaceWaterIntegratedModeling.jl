@@ -308,14 +308,31 @@ function _fuse_components!(comps::Vector{DynNetwork}, i::Int, j::Int, tstruct)
 end
 
 # ----------------------------------------------------------------------------
-# Combine two already-localized DynNetworks into one index space: offset `b`'s path / trap /
-# culvert / NBS indices past `a`'s counts, concatenate the vectors, and remap every
-# cross-reference (target_trap, spill_path, merges, culvert/NBS (id,pos)); 0/-1 sentinels
-# pass through.  Unlike `_combine_subnets` it preserves culverts/NBS (localized nets carry
-# them).  Returns the combined DynNetwork (overlaps/duplicate traps not yet resolved).
+# Merge two already-localized DynNetworks into a single one (`b` appended after `a`, all
+# cross-references reindexed into the combined space, culverts and NBS carried over).
+# Any overlapping cells / duplicate traps between the two are left for the caller to resolve.
 function _combine_localized(a::DynNetwork, b::DynNetwork)
-    # 1. offsets: np = length(a.flow_paths), nt = length(a.traps), ncv, nnbs from a's vectors.
-    # 2. take a's paths/traps/culverts/nbs unchanged.
-    # 3. append b's, each cross-reference shifted by the matching offset.
-    # 4. return DynNetwork(paths, traps, culverts, nbs).
+    np, nt   = length(a.flow_paths), length(a.traps)
+    ncv, nnbs = length(a.culverts), length(a.nbs)
+    shift(x, off) = x <= 0 ? x : x + off        # 0 (none) / -1 (out-of-domain) pass through
+
+    paths = copy(a.flow_paths)                  # a's paths keep indices 1:np
+    for p in b.flow_paths
+        push!(paths, DynFlowPath(p.cells, p.departure_point, shift(p.target_trap, nt),
+            [(c + ncv,  pos) for (c, pos) in p.culvert_inlets],
+            [(c + ncv,  pos) for (c, pos) in p.culvert_outlets],
+            [(n + nnbs, pos) for (n, pos) in p.nbs_outlets],
+            [(m + np,   j)   for (m, j)   in p.merges]))
+    end
+
+    traps = copy(a.traps)                       # a's traps keep indices 1:nt
+    for t in b.traps
+        lt = DynTrap(t.trap_ix, shift(t.spill_path, np),
+                     [c + ncv for c in t.culvert_inlets],
+                     [c + ncv for c in t.culvert_outlets])
+        lt.in_count = t.in_count
+        push!(traps, lt)
+    end
+
+    return DynNetwork(paths, traps, vcat(a.culverts, b.culverts), vcat(a.nbs, b.nbs))
 end
