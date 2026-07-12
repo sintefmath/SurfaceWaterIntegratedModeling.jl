@@ -272,15 +272,33 @@ the owning component, then fuse in any component the growth coupled into.
 The `trap_ix` of traps newly brought into the dynamic network, for the caller's state handoff.
 """
 function apply_fill!(comps::Vector{DynNetwork}, tstruct, full_traps, trap_ix::Int)
-    # 1. index the pre-grow components: locate trap_ix's owning component + local index,
-    #    and keep trapmap/cellmap as the fusion detector snapshot.
-    # 2. grow the owning component from that local trap (grow_spill!), collecting added trap_ix.
-    # 3. detect fusion: test the newly-added traps' trap_ix (trapmap) and the newly-added
-    #    path cells / NBS crossings (cellmap) against the pre-grow index; any hit in a
-    #    *different* component is a coupling.
-    # 4. if any coupling found, fuse the owner + those components via _fuse_components!(comps,
-    #    idxs, tstruct, full_traps) — regrows them into one clean component.
-    # 5. return the migrated (newly-dynamic) trap_ix.
+    # index the pre-grow components (fusion-detector snapshot); locate the event trap
+    trapmap, cellmap = _index_components(comps, tstruct)
+    haskey(trapmap, trap_ix) || return Int[]        # not dynamic — nothing to grow
+    ci, li = trapmap[trap_ix]
+
+    # grow the owning component from the newly-full trap
+    owner = comps[ci]
+    np0 = length(owner.flow_paths)
+    added = grow_spill!(owner, tstruct, full_traps, li)
+
+    # fusion detection: a newly-added trap that already lives elsewhere, or a new path cell that
+    # falls on another component (a shared corridor or an NBS footprint), couples that component
+    LI = LinearIndices(tstruct.topography)
+    coupled = Set{Int}()
+    for d in added
+        haskey(trapmap, d) && trapmap[d][1] != ci && push!(coupled, trapmap[d][1])
+    end
+    for k in (np0 + 1):length(owner.flow_paths), c in owner.flow_paths[k].cells
+        cj = get(cellmap, LI[c], ci)
+        cj == ci || push!(coupled, cj)
+    end
+
+    # regrow the owner together with every component it coupled into
+    isempty(coupled) || _fuse_components!(comps, push!(collect(coupled), ci), tstruct, full_traps)
+
+    # hand back only the genuinely-new traps (foreign ones were already dynamic)
+    return [d for d in added if !haskey(trapmap, d)]
 end
 
 # ----------------------------------------------------------------------------

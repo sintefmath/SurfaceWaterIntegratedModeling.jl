@@ -1,10 +1,12 @@
 # Dynamic-network membership — plan
 
-Status: Phase 1 (data + primitives), build-time init (§6), and the grow mechanism
-(§4, `grow_spill!`) implemented + tested standalone; Phase-2 live-lifecycle wiring (§8)
-— the full↔not-full trigger, state handoff, and fusion — still pending (needs
-`build_network` driving `fill_sequence`). Commits `2cea3e1`, `75fcbc3`, `282234f`,
-`106a897`, `96530e4`.
+Status: Phase 1 (data + primitives), build-time init (§6), and the full set-level
+mechanism — `grow_spill!`/`detach_spill!` (§3–4), fusion (§5), and the `apply_fill!` /
+`apply_unfill!` entry points — implemented + tested standalone on real terrain. What
+remains is the **gate**: driving these from `fill_sequence`/`network_context` (state
+handoff at the transitions) plus the distributor re-impl / retiring `DynNBS`.  Commits
+`2cea3e1`, `75fcbc3`, `282234f`, `106a897`, `96530e4`, `a16a842`, `5ea40a6`, `52d1f71`,
+`03a5828`, `3fd1319`.
 Related: `agent/NBS_ROUTING_REDESIGN.md` (the network this runs on),
 `src/dynamics/build_network.jl`, `src/dynamics/network_utils.jl`.
 
@@ -170,15 +172,16 @@ current (static) water level; seed its volume from that, not from stale state
 Grow and detach can change the connected-component partition — each component is
 one independent ODE solve, so this matters:
 
-- **Fusion (grow) — required.** If `A`'s new spill path lands in a *different*
-  component, the two are now coupled; solving them apart drops the coupling flow and
-  breaks mass conservation. The trigger is either the chain reaching a trap owned by
-  another component **or** a grown-path cell crossing another component's **NBS
-  footprint** (NBS coupling is decomposition-relevant even though the rate effect is
-  geometric). So the cross-component lookup must cover trap arrivals *and* NBS-footprint
-  crossings. Merge the two components (edge insertion = union), or rebuild the pair.
-  (NBS-crossing paths within the *same* component need nothing here — the rate function
-  derives the capture/emit from footprint geometry at eval time.)
+- **Fusion (grow) — done (`apply_fill!` + `_fuse_components!`).** If a grow lands in a
+  *different* component the two are now coupled; solving them apart drops the coupling flow
+  and breaks mass conservation. Detected against the pre-grow index (`_index_components`):
+  a newly-added trap that already lives elsewhere, or a new path cell that falls on another
+  component (a shared corridor **or** an NBS footprint — NBS coupling is
+  decomposition-relevant even though the rate effect is geometric). The coupled components
+  are then **regrown from their seeds** (`_fuse_components!` → `_regrow`): the build tracer
+  redoes overlaps, duplicate-trap collapsing, and culvert/NBS assignment for free, so no
+  hand-merging is needed. (NBS-crossing paths within the *same* component need nothing —
+  the rate function derives capture/emit from footprint geometry at eval time.)
 - **Fission (detach) — deferred.** When a chain detaches, the surviving net may
   fall into two pieces that no longer exchange flow. Solving them as one ODE is
   still *correct* (the dead link carries zero flow), just larger. Fission is the
@@ -207,19 +210,21 @@ The counter relies on the build already guaranteeing:
   connector); `_seeds_downstream_first` still grows a seed cell before any path
   passing through it, so a seed's own path is never mis-rooted.
 
-## 8. Phase 2 — live-lifecycle wiring (deferred)
+## 8. Phase 2 — live-lifecycle wiring
 
-Phase 1 (data + primitives), build-time init (§6), and both structural mechanisms —
-`detach_spill!` (+ `_compact!`) and `grow_spill!` (§4) — are done and tested standalone.
-What remains is the **live trigger**: the full↔not-full transition lives in the dynamic
-solve / `fill_sequence` layer, which for the new `build_network` representation is not
-wired into the module yet. Once the new net is driven by `fill_sequence`:
-- at full→not-full call `detach_spill!` and route the returned `trap_ix` back to static
-  handling, reusing the absorption path — carefully w.r.t. state transfer (cf. the prior
-  stale-state absorption bugs);
-- at not-full→full call `grow_spill!` and seed the newly-added traps' state from their
+Done and tested standalone (`network_updating.jl`): the per-network mechanisms
+`detach_spill!` (+ `_compact!`, §3) and `grow_spill!` (§4), and the set-level entry points
+`apply_unfill!` (locate → detach) and `apply_fill!` (locate → grow → detect coupling →
+fuse, §5).  Each returns the migrated `trap_ix` (newly-static on unfill, newly-dynamic on
+fill) for the caller's state handoff.
+
+What remains is the **gate** — driving them from `fill_sequence`/`network_context`, which
+does not yet use the new `build_network` representation:
+- at full→not-full call `apply_unfill!` and route the returned `trap_ix` back to static
+  handling — carefully w.r.t. state transfer (cf. the prior stale-state absorption bugs);
+- at not-full→full call `apply_fill!` and seed the newly-added traps' state from their
   current static level;
-- handle **fusion** (§5) when a grow lands cross-component.
+- plus the distributor / rate-layer re-impl and retiring `DynNBS`.
 
 Build-time split (`network_utils.jl`) is unaffected.
 
@@ -234,9 +239,18 @@ Isolated harness (as for the split tests): chain and diamond `DynNetwork`s.
   detach), and the surviving path emanates from the tributary's source.
 - (Test-only) incremental counts equal a fresh `init_in_counts!`.
 
-Also an integration test on real `mini.txt` terrain (inject build_network): `setup_network`
-runs `init_in_counts!`, the split copies counts (stored == fresh recompute), counts equal
-incoming-path counts, and `detach_spill!` cascades on a 20+-trap chain.
+Also integration tests on real `mini.txt` terrain (inject build_network):
+- `setup_network` runs `init_in_counts!`, the split copies counts (stored == fresh
+  recompute), counts equal incoming-path counts, and `detach_spill!` cascades on a 20+-trap
+  chain;
+- `grow_spill!` over ~90 fills: incremental counts == fresh recompute, refs in range, no
+  duplicate `trap_ix`;
+- `_fuse_components!` regrow round-trips single/pair components to the exact trap coverage;
+- `apply_fill!` sweep (fills incl. 4 real fusions) and `apply_unfill!` keep counts
+  consistent, no duplicate `trap_ix`, no trap loss, migrated traps genuinely new.
+
+Still to add: a composition harness scripting random fill/unfill sequences and asserting the
+incremental component set matches a fresh `setup_network` at each step.
 
 ## Open questions
 
