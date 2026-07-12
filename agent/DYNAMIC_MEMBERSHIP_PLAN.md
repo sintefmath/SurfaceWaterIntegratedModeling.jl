@@ -214,9 +214,12 @@ The counter relies on the build already guaranteeing:
 ## 8. Phase 2 — live-lifecycle wiring
 
 Done and tested standalone (`network_updating.jl`): the per-network mechanisms
-`detach_spill!` (+ `_compact!`, §3) and `grow_spill!` (§4), and the set-level entry points
-`apply_unfill!` (locate → detach) and `apply_fill!`.  Each returns the migrated `trap_ix`
-(newly-static on unfill, newly-dynamic on fill) for the caller's state handoff.
+`detach_spill!` (+ `_compact!`, §3) and `grow_spill!` (§4), and three set-level entry points,
+one per structural event, each returning the migrated `trap_ix` for the caller's state handoff:
+- **`apply_fill!`** — a trap starts spilling (locate → grow, or regrow on subsumption/fusion);
+- **`apply_unfill!`** — a trap stops spilling (locate → detach);
+- **`apply_empty!`** — a supertrap drains below the level that merged its subtraps → de-subsume
+  (regrow the parent's component; the tracer emits the child nodes, split re-partitions them).
 
 **`apply_fill!` — incremental fast path with boundary regrow (option B).** Regrow (O(component),
 cheap since the terrain sort is gone, §7) is used only at the two boundaries the incremental
@@ -233,10 +236,10 @@ does not yet use the new `build_network` representation:
   handling — carefully w.r.t. state transfer (cf. the prior stale-state absorption bugs);
 - at not-full→full call `apply_fill!` and seed the newly-added traps' state from their
   current static level;
-- **de-subsumption** (the symmetric boundary: a subsumed child dropping below its rim) is
-  gate-coupled — its event names a child that is not a node while subsumed, so how it is
-  triggered depends on the `fill_sequence` event model; handle it there (regrow the parent's
-  component). Flagged `@@@` in `apply_unfill!`.
+- when a subsuming supertrap drains below its merge level call `apply_empty!` and distribute
+  the parent's water across the children it splits back into. The **mechanism** is done and
+  tested; what remains gate-side is the **trigger** (the solver detecting that threshold — a
+  level *between* full and empty) and the **state distribution** across the children.
 - plus the distributor / rate-layer re-impl and retiring `DynNBS`.
 
 Build-time split (`network_utils.jl`) is unaffected.
@@ -265,7 +268,10 @@ Also integration tests on real `mini.txt` terrain (inject build_network):
   asserting at each step that the incremental component set matches a fresh `setup_network`:
   same dynamic trap set, a *coarsening* of the fresh partition (incremental never under-merges;
   fission is deferred so it may over-merge), and consistent `in_count`. This harness caught the
-  spill-path-overwrite bug (`stop_at_present` fix) and the subsumption gap (boundary regrow).
+  spill-path-overwrite bug (`stop_at_present` fix) and the subsumption gap (boundary regrow);
+- **`apply_empty!`** — a full fill→subsume→empty→de-subsume cycle: filling the last sibling
+  collapses the group to the parent node, `apply_empty!` on that parent restores the children
+  and matches a fresh build's partition.
 
 ## Open questions
 

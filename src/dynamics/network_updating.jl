@@ -4,7 +4,7 @@
 # mutations; `apply_fill!` / `apply_unfill!` drive them across the live component set
 # (fusing components a grow couples together).  See agent/DYNAMIC_MEMBERSHIP_PLAN.md.
 
-export init_in_counts!, detach_spill!, grow_spill!, apply_fill!, apply_unfill!
+export init_in_counts!, detach_spill!, grow_spill!, apply_fill!, apply_unfill!, apply_empty!
 
 # ----------------------------------------------------------------------------
 """
@@ -340,10 +340,36 @@ function apply_unfill!(comps::Vector{DynNetwork}, tstruct, trap_ix::Int)
     ci, li = loc
     # detach its spill: cascades downstream and compacts that component in place.  Fission is
     # deferred — the survivor may split into disconnected pieces but stays one correct solve.
-    # @@@ de-subsumption (a subsumed child dropping below its rim) is the symmetric hierarchy
-    #     boundary; its event names a *child* that is not a node while subsumed, so it is
-    #     gate-coupled (depends on how fill_sequence phrases the event) and handled there.
+    # (A trap draining further, below the level that merged its subtraps, is de-subsumption —
+    # a separate drain event handled by `apply_empty!` on the parent node, not here.)
     return detach_spill!(comps[ci], li)
+end
+
+# ----------------------------------------------------------------------------
+"""
+    apply_empty!(comps, tstruct, full_traps, trap_ix) -> Vector{Int}
+
+Apply a de-subsumption: supertrap `trap_ix` has drained below the level that merged its
+subtraps into one pool, so the basin must split back into the now separately-tracked children.
+Regrow the owning component with the current `full_traps` — the build tracer emits the child
+nodes (and `split` re-partitions them if they are no longer connected).
+
+# Arguments
+- `comps::Vector{DynNetwork}`: live components, mutated in place.
+- `tstruct`: spillanalysis structure.
+- `full_traps`: currently-full trap indices (the emptied children already removed).
+- `trap_ix::Int`: the supertrap node that de-subsumed.
+
+# Returns
+The `trap_ix` of the nodes newly split out (for the caller to distribute the parent's water
+across them).
+"""
+function apply_empty!(comps::Vector{DynNetwork}, tstruct, full_traps, trap_ix::Int)
+    loc = _locate_trap(comps, trap_ix)
+    loc === nothing && return Int[]        # not a live node
+    before = _live_trap_ix(comps)
+    _fuse_components!(comps, [loc[1]], tstruct, full_traps)   # regrow → de-subsume (+ re-split)
+    return collect(setdiff(_live_trap_ix(comps), before))
 end
 
 # ----------------------------------------------------------------------------
