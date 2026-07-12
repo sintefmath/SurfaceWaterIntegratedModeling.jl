@@ -246,6 +246,15 @@ function _index_components(comps::Vector{DynNetwork}, tstruct)
     return trapmap, cellmap
 end
 
+# Locate trap `trap_ix` in the component set: (component index, local trap index), or nothing
+# if the trap is not currently dynamic.  O(traps) scan — no cell map built.
+function _locate_trap(comps::Vector{DynNetwork}, trap_ix::Int)
+    for (ci, net) in enumerate(comps), (li, t) in enumerate(net.traps)
+        t.trap_ix == trap_ix && return (ci, li)
+    end
+    return nothing
+end
+
 # ----------------------------------------------------------------------------
 """
     apply_fill!(comps, tstruct, full_traps, trap_ix) -> Vector{Int}
@@ -290,11 +299,13 @@ component (compaction runs inside `detach_spill!`; fission is deferred).
 The `trap_ix` of traps that left the dynamic network, for handoff back to static handling.
 """
 function apply_unfill!(comps::Vector{DynNetwork}, tstruct, trap_ix::Int)
-    # 1. index the components to locate trap_ix's owning component + local index.
-    # 2. detach the spill (detach_spill!) — cascades + compacts that component in place.
-    # 3. fission deferred: the surviving component may fall into disconnected pieces but is
-    #    still one correct (if larger) solve; re-split lazily on the next full rebuild.
-    # 4. return the detached trap_ix.
+    # locate the trap; if it is not dynamic there is nothing to detach
+    loc = _locate_trap(comps, trap_ix)
+    loc === nothing && return Int[]
+    ci, li = loc
+    # detach its spill: cascades downstream and compacts that component in place.  Fission is
+    # deferred — the survivor may split into disconnected pieces but stays one correct solve.
+    return detach_spill!(comps[ci], li)
 end
 
 # ----------------------------------------------------------------------------
