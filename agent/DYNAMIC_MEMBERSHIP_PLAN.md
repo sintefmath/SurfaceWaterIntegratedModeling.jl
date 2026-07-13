@@ -242,6 +242,15 @@ does not yet use the new `build_network` representation:
   level *between* full and empty) and the **state distribution** across the children.
 - plus the distributor / rate-layer re-impl and retiring `DynNBS`.
 
+**GATE COMPLETE (2026-07).** All of the above is done — see
+`agent/GATE_INTEGRATION_PLAN.md` for the phase-by-phase record. `DynNBS` is retired
+(`DynNBSPlacement` is the sole NBS type); the driver (`network_driver.jl`,
+`build_network.jl`) drives `apply_fill!` / `apply_unfill!` / `apply_empty!` from
+`fill_sequence` unconditionally, with the whole old full-retrace path deleted. Parity
+(dynamic vs analytic) holds across single / mixed / subtrap / full coverage, and all coupled
+mechanisms (culvert / NBS / shared spill / subsumption / fusion) are tested end-to-end.
+Combined dynamics suite: 1063 pass / 0 fail / 0 broken.
+
 Build-time split (`network_utils.jl`) is unaffected.
 
 ## 9. Verification — committed as `test/dynamic_membership_test.jl`

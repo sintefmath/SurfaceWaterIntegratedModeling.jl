@@ -279,8 +279,14 @@ structural source of truth). Suites 317/317.
     network that absorbs sibling trap 18 (subsumption) and `[233,220]` merges two seeds' networks
     (fusion) — both match plain to `PARITY_TOL`. All coupled mechanisms (culvert / NBS / shared
     spill / subsumption / fusion) now exercised end-to-end. Suite 1063 pass / 0 fail / 0 broken.
-- [ ] E3 `[doc]` update `AGENTS.md` (subsystem table), `DYNAMIC_MEMBERSHIP_PLAN.md` §8 (gate
-  done), and the memory status once `build_network` is in the module.
+- [x] E3 `[doc]` updated `AGENTS.md` (subsystem table → "Dynamic networks", nine files, + a new
+  "Dynamic networks (`dynamics/`)" architecture section with the full/transitory `spill_path`
+  invariant and the NBS terrain-exit rule); `DYNAMIC_MEMBERSHIP_PLAN.md` §8 marked GATE COMPLETE;
+  memory ([[gate-phase-c-driver]], [[pre-existing-broken-tests]]) updated.
+
+**GATE COMPLETE.** The dynamic-membership driver is the sole network path in `fill_sequence`;
+the old full-retrace path is gone. Parity holds across single/mixed/subtrap/full coverage; all
+coupled mechanisms tested end-to-end. Combined dynamics suite 1063 pass / 0 fail / 0 broken.
 
 ### Open-question spikes (do before the phase that needs them)
 - [x] S1 `[inv]` diff the old `network_context.jl` state-handoff arithmetic against the solver
