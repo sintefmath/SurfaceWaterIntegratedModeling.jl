@@ -244,19 +244,24 @@ structural source of truth). Suites 317/317.
   suite is 1046 pass / 0 fail / 3 broken. (`Trapping structure` grid2 is the pre-existing bay
   drift, unrelated.)
 
-**Two driver bugs the D2 parity tests surfaced → deferred to Phase E** (`@test_skip`, `@@@`):
-1. **Full coverage** (`dyn_traps = 1:numtraps`) trips `solveDynNetwork!`: a full trap spilling
-   into ANOTHER full trap can be left `spill_path == 0` after `apply_fill!`/`grow_spill!` (e.g.
-   trap 97 → 98 on mini.txt). Only at full coverage — single/mixed/subtrap-seed all pass. This is
-   a `grow_spill!` defect distinct from the D1 `-1` tracer fix (that was out-of-domain terminals).
-2. **Culvert-only seeding**: a culvert with no `dyn_traps` routes and conserves mass through the
-   driver, but its fill-time shift does not yet reach the old-path directional thresholds.
-
 ### Phase E — parity + regression tests
-- [ ] E1 `[test]` dynamic-vs-analytic parity: on cases with no true multi-trap coupling, the
-  dynamic fill/drain event times match `fill_sequence` to `PARITY_TOL`.
+- [x] E1 `[test]` dynamic-vs-analytic parity. **Full-coverage bug FIXED** (was the last blocker).
+  Root cause was NOT `grow_spill!` (the earlier guess): a full-coverage / heavy-rain instant
+  fills several traps at once; the b&b fires one and commits the others to `cur_time` at exactly
+  their capacity `C`. The seed then handed the solver a *transitory* frontier node (`spill_path ==
+  0`) at `V == C` → three-state-contract error. Fix in `_driver_state0`: clamp a NON-full trap's
+  seed to `prevfloat(C)`, so it stays transitory and its `:fill` fires on the next predict
+  (serialising simultaneous fills; mass preserved to a ULP). Full coverage now matches plain on
+  mini.txt: 462 events, same filled set, max fill-time drift 2.98e-5 < `PARITY_TOL`. Single /
+  mixed / subtrap-seed parity already passed. Restored the `dynamics_test.jl` slice-3 assertions.
 - [ ] E2 `[test]` coupled cases (culvert / NBS / shared spill / subsumption / fusion) exercised
   end-to-end through `fill_sequence`, structural invariants asserted.
+  - **Remaining (`@test_skip`, `@@@`):** a culvert with no `dyn_traps` routes and conserves mass
+    through the driver and DOES accelerate its outlet trap (direction correct, ~1e-5), but does
+    not measurably delay its inlet trap — the culvert only draws once the inlet surface reaches
+    the inlet cell (near full), so the inlet's FIRST fill time is unchanged. Whether the old path
+    bled the inlet during fill is a culvert-hydraulics question to settle here.
+  - **NBS through the driver is still untested** (no NBS fixture yet) — add here.
 - [ ] E3 `[doc]` update `AGENTS.md` (subsystem table), `DYNAMIC_MEMBERSHIP_PLAN.md` §8 (gate
   done), and the memory status once `build_network` is in the module.
 

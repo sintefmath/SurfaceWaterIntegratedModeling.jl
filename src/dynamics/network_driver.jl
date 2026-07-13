@@ -55,13 +55,21 @@ end
 #   * a node already in `vol_by_trapix` takes its committed volume;
 #   * a newly-absorbed trap (from the static path) has a STALE `cur_amounts` entry, so
 #     project it forward to `cur_time` under the saved inflow ([[stale-state0-...]] §7.2).
+# A NON-full trap is a transitory frontier (`spill_path == 0`), which the solver requires to
+# hold `V < capacity`.  When many traps reach capacity in the same instant (heavy rain / full
+# coverage) the b&b fires one and commits the others to `cur_time` at exactly `C`; seeding such
+# a trap at `C` would read as full on a `spill_path == 0` node (three-state-contract error).
+# Clamp a non-full seed to `prevfloat(C)`: it stays transitory and its `:fill` fires on the next
+# predict, serialising the simultaneous fills (mass preserved to a ULP).
 function _driver_state0(driver::NetworkDriver, tstruct, rateinfo, cur_amounts, full_set,
                         cur_time, z_vol_tables)
     project(g) = first(fill_trap_until(g, rateinfo, cur_amounts[g], cur_time,
                                        tstruct, z_vol_tables, use_saved = true))
-    return g -> g in full_set                    ? _own_capacity(tstruct, g) :
-                haskey(driver.vol_by_trapix, g)  ? driver.vol_by_trapix[g]   :
-                                                   project(g)
+    return function (g)
+        g in full_set && return _own_capacity(tstruct, g)
+        v = haskey(driver.vol_by_trapix, g) ? driver.vol_by_trapix[g] : project(g)
+        return min(v, prevfloat(_own_capacity(tstruct, g)))
+    end
 end
 
 # Rebuild every context from the current `comps` and committed volumes, then predict each

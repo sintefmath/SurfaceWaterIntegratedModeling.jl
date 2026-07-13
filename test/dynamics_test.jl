@@ -775,12 +775,13 @@ end
     @test Set(keys(ft1)) == Set(keys(ftP))
     @test maxΔ(ftP, ft1) < PARITY_TOL
 
-    # FULL coverage (every trap networked) currently trips a driver bug in the incremental
-    # membership layer: a full trap spilling into ANOTHER full trap can be left spill_path == 0
-    # after apply_fill! / grow_spill! (e.g. trap 97 -> 98 on mini.txt).  It surfaces only at
-    # full coverage — single / mixed / subtrap-seed coverage below all pass.  Deferred to gate
-    # Phase E (driver parity hardening).  @@@
-    @test_skip fill_sequence(ts, weather; dyn_traps=collect(1:numtraps(ts)))
+    # FULL coverage: every trap solved as a dynamic network must reproduce plain to a
+    # tight tolerance (ODE vs analytic; same event count, same set of filled traps)
+    seqF = fill_sequence(ts, weather; dyn_traps=collect(1:numtraps(ts)))
+    ftF  = filltimes(seqF)
+    @test length(seqF) == length(seqP)
+    @test Set(keys(ftF)) == Set(keys(ftP))
+    @test maxΔ(ftP, ftF) < PARITY_TOL
 
     # MIXED coverage (subset networked) — same traps fill; timings agree to floating-point
     # precision.  Boundary traps newly absorbed by the network are projected to cur_time
@@ -912,14 +913,15 @@ end
     sC = fill_sequence(ts, w; culverts=[cv])     # with culvert
     @test monotone(s0) && monotone(sC)
 
-    # (3) directional behaviour: the culvert bleeds the inlet trap (233) so it fills
-    # LATER, and delivers to the outlet trap (13) so it fills EARLIER.  The driver routes
-    # the culvert (mass is conserved, below) but the fill-time shift does not yet reach the
-    # old-path thresholds when the network is seeded from culverts alone (no dyn_traps).
-    # Deferred to gate Phase E (coupled culvert parity through the driver).  @@@
+    # (3) directional behaviour: the culvert delivers to the outlet trap (13) so it fills
+    # EARLIER (confirmed — direction correct, magnitude ~1e-5), but through the driver it does
+    # not measurably delay the inlet trap (233): the culvert only draws once 233's surface
+    # reaches the inlet cell (near full), so 233's FIRST fill time is unchanged.  Whether the
+    # old path bled 233 during fill is a culvert-hydraulics question deferred to gate Phase E
+    # (coupled culvert parity).  @@@
     ft0 = filltimes(s0); ftC = filltimes(sC)
-    @test_skip ftC[233] > ft0[233] + 1e-4      # inlet delayed
-    @test_skip ftC[13]  < ft0[13]  - 1e-5      # outlet accelerated
+    @test_skip ftC[233] > ft0[233] + 1e-4      # inlet delayed (E2: culvert-draw-during-fill)
+    @test_skip ftC[13]  < ft0[13]  - 1e-5      # outlet accelerated (direction confirmed; below 1e-5)
 
     # (4) mass conservation: with no infiltration, once the rain stops the system
     # settles to the SAME total stored water either way — the culvert only redistributes
