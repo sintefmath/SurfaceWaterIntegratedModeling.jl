@@ -2,16 +2,9 @@
 # init_in_counts!, detach_spill! (+ compaction / re-root), grow_spill!, fusion, and the
 # set-level entry points apply_fill! / apply_unfill! / apply_empty!.
 #
-# build_network.jl is not yet in the module include list (it is wired in at the fill_sequence
-# gate); inject it here so the new `setup_network` and the `_grow_network_from_seed!` tracer
-# are available.  Remove this injection once the file joins the module.
-
 using Test, SurfaceWaterIntegratedModeling, LazyArtifacts, Random
 
 const DM = SurfaceWaterIntegratedModeling
-
-isdefined(DM, :_grow_network_from_seed!) ||
-    @eval DM include(joinpath(pkgdir(SurfaceWaterIntegratedModeling), "src", "dynamics", "build_network.jl"))
 
 # ---------------------------------------------------------------------------
 # helpers

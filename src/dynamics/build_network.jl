@@ -1,9 +1,10 @@
 # NOTES TO SELF
 # - [x] DynNBSPlacement moved to elements.jl (renamed from NBSPlacement).  DynNBS still present;
-#       remove it once the distributor re-impl no longer needs the placement_ix overlay handle.
+#       remove it once the distributor re-impl no longer needs the placement_ix overlay handle
+#       (gate plan Phase B — agent/GATE_INTEGRATION_PLAN.md).
 # - [ ] Contract that all NBS footprints should have zero infiltration (to avoid special handling in fill_sequence)
-# - [ ] This file is not yet included in the module (src/SurfaceWaterIntegratedModeling.jl); wire it in
-#       once the path-construction (culvert/nbs tuples + merges arg) and distributor are ready.
+# - [x] Included in the module (after network_updating.jl); its `setup_network` coexists with the
+#       old elements.jl one by arity until the gate (Phase D) retires the old path.
 
 
 # ----------------------------------------------------------------------------
