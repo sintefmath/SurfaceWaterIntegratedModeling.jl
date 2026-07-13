@@ -184,7 +184,45 @@ path to retire: `elements.jl` `setup_network` (L302), `setup_network_cached` (L4
   done), and the memory status once `build_network` is in the module.
 
 ### Open-question spikes (do before the phase that needs them)
-- [ ] S1 `[inv]` diff the old `network_context.jl` state-handoff arithmetic against the solver
-  protocol (§1 table) — decide port-vs-rewrite per function (before C).
-- [ ] S2 `[inv]` confirm the solver's `:empty` exposed-children volumes + `full_traps` deltas
-  match `apply_empty!`'s post-regrow expectation (before C4).
+- [x] S1 `[inv]` diff the old `network_context.jl` state-handoff arithmetic against the solver
+  protocol — see §7.
+- [x] S2 `[inv]` confirm `:empty` exposed-children volumes + `full_traps` deltas match
+  `apply_empty!` — see §7.
+
+## 7. Spike findings (S1, S2)
+
+**S2 — `:empty` ↔ `apply_empty!` (confirmed match).** The solver's `:empty` condition is
+`V[parent] → 0`; `affect!` reports `(kind=:empty, trap=parent_global_ix)`. Protocol after it:
+clamp `state[parent]=0`, **remove the parent AND all its immediate children from `full_traps`**,
+set each `state[child]=prevfloat(C_child)`, rebuild. That maps exactly onto `apply_empty!`:
+- the driver removes the children from `full_traps` first, then calls
+  `apply_empty!(comps, tstruct, full_traps, parent)`, which regrows the parent's component;
+  with the children no longer full they de-subsume into separate nodes (parent disappears as a
+  node — matching the tested cycle).
+- **Critical ordering**: children must leave `full_traps` *before* the regrow, else it
+  re-subsumes them under the parent at `V=0` and `:empty` re-fires forever. The old
+  `_expand_empty_fill_updates` already encodes exactly this hazard — a reusable insight.
+- Multi-level: only *immediate* children are exposed; deeper still-full descendants stay
+  subsumed, which the regrow reproduces for free. `apply_empty!` needs no change.
+
+**S1 — old state-handoff arithmetic is largely correct and reusable; structural core is not.**
+Reusable, and matching the protocol (§1 table):
+- `_apply_fired_boundaries!` — `:empty`→parent 0 / children `prevfloat(C)`; `:unspill`→`prevfloat(C)`. ✓
+- `_clamp_full_traps!` — full trap pinned to exact `C` (kills ODE drift). ✓
+- `_assemble_contexts.state0` — full→`C`, committed→committed, else `project` from the static
+  path (`fill_trap_until` use_saved) — the seed for grown/newly-absorbed traps. ✓ (concept)
+- `_finalize_networks!` — advance to `endtime`; node→settled volume, subsumed descendant→`C`. ✓
+- `_external_inflow` / `_inflow_sources` — per-node inflow summed over **leaf** descendants
+  (robust to `_reconcile_spillgraph!` withdrawing covered children's flow). ✓
+Replaced by `apply_*` (do NOT port): `setup_network_cached` retrace, `_reuse_plan` gating, the
+full-recompute `_reconcile_spillgraph!` diff, `_touch_networks!` orchestration.
+
+Three details to **re-verify while building C** (the "likely wrong" risk lives here):
+1. **Recompute `covered`/`inflow` from the post-`apply_*` components**, don't diff — the driver
+   must read coverage/external-inflow off the mutated component set, not an incremental delta.
+2. **Grown-trap state projection** (`project(g)`) is the stale-state absorption hazard
+   ([[stale-state0-network-absorption-bug]]); seed a newly-absorbed trap from its value
+   projected to `cur_time`, not its stale `cur_amounts` entry.
+3. **Commit each affected component to `cur_time` under its cached `extern_inflow` BEFORE
+   applying the structural change** (order-independence); mutate topology only on the
+   committed state.
