@@ -254,14 +254,20 @@ structural source of truth). Suites 317/317.
   (serialising simultaneous fills; mass preserved to a ULP). Full coverage now matches plain on
   mini.txt: 462 events, same filled set, max fill-time drift 2.98e-5 < `PARITY_TOL`. Single /
   mixed / subtrap-seed parity already passed. Restored the `dynamics_test.jl` slice-3 assertions.
-- [ ] E2 `[test]` coupled cases (culvert / NBS / shared spill / subsumption / fusion) exercised
+- [~] E2 `[test]` coupled cases (culvert / NBS / shared spill / subsumption / fusion) exercised
   end-to-end through `fill_sequence`, structural invariants asserted.
-  - **Remaining (`@test_skip`, `@@@`):** a culvert with no `dyn_traps` routes and conserves mass
-    through the driver and DOES accelerate its outlet trap (direction correct, ~1e-5), but does
-    not measurably delay its inlet trap — the culvert only draws once the inlet surface reaches
-    the inlet cell (near full), so the inlet's FIRST fill time is unchanged. Whether the old path
-    bled the inlet during fill is a culvert-hydraulics question to settle here.
-  - **NBS through the driver is still untested** (no NBS fixture yet) — add here.
+  - **Culvert coupling FIXED.** Root cause of the directional-effect gap: the new `setup_network`
+    seeded culvert *outlets* only, so a culvert's *inlet trap* was not an evolving node — it
+    filled statically and the culvert never drew from it (the old `_expand_with_culverts` seeded
+    BOTH endpoints). Fix in `build_network.jl`: seed `culvert.inlet` as well. Now the culvert
+    couples both traps — on mini.txt a large-bore culvert drains its inlet (233) below capacity
+    so it never fills and delivers to its outlet (13), which fills far earlier. Verified
+    mass-conserving (the ~0.1 stored-water difference is exactly the drained inlet's capacity
+    leaving via 13's out-of-domain spill — nothing created/destroyed). Rewrote the
+    `culverts through fill_sequence` directional + mass assertions to the correct coupled
+    behaviour (no more `@test_skip`). Combined dynamics suite **1053 pass / 0 fail / 0 broken**.
+  - **Still TODO:** NBS through the driver (no NBS fixture yet); shared-spill / subsumption /
+    fusion end-to-end coupled cases.
 - [ ] E3 `[doc]` update `AGENTS.md` (subsystem table), `DYNAMIC_MEMBERSHIP_PLAN.md` §8 (gate
   done), and the memory status once `build_network` is in the module.
 

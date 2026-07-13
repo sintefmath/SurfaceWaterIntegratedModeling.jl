@@ -913,21 +913,21 @@ end
     sC = fill_sequence(ts, w; culverts=[cv])     # with culvert
     @test monotone(s0) && monotone(sC)
 
-    # (3) directional behaviour: the culvert delivers to the outlet trap (13) so it fills
-    # EARLIER (confirmed — direction correct, magnitude ~1e-5), but through the driver it does
-    # not measurably delay the inlet trap (233): the culvert only draws once 233's surface
-    # reaches the inlet cell (near full), so 233's FIRST fill time is unchanged.  Whether the
-    # old path bled 233 during fill is a culvert-hydraulics question deferred to gate Phase E
-    # (coupled culvert parity).  @@@
+    # (3) directional behaviour: the network seeds BOTH culvert endpoints, so the inlet trap
+    # (233) is an evolving node the culvert draws from — not just filled statically.  With this
+    # large bore the culvert bleeds 233 faster than the rain fills it, so 233 never reaches
+    # capacity, and it delivers that water to the outlet trap (13), which fills far EARLIER.
     ft0 = filltimes(s0); ftC = filltimes(sC)
-    @test_skip ftC[233] > ft0[233] + 1e-4      # inlet delayed (E2: culvert-draw-during-fill)
-    @test_skip ftC[13]  < ft0[13]  - 1e-5      # outlet accelerated (direction confirmed; below 1e-5)
+    @test haskey(ft0, 233)                     # 233 fills without the culvert
+    @test !haskey(ftC, 233)                    # but the culvert keeps it drained below capacity
+    @test ftC[13] < ft0[13] - 1e-3             # outlet strongly accelerated
 
-    # (4) mass conservation: with no infiltration, once the rain stops the system
-    # settles to the SAME total stored water either way — the culvert only redistributes
-    # water in space and time, it neither creates nor destroys it.  (Exact drawn ==
-    # delivered conservation at the routing layer is covered by the _route_flow tests.)
-    @test isapprox(total_stored(sC), total_stored(s0); atol = 1e-6)
+    # (4) mass conservation.  Exact drawn == delivered at the routing layer is covered by the
+    # _route_flow tests.  Here the culvert's outlet (trap 13) spills straight out of the domain,
+    # so the culvert only moves water OUT faster: the culvert run stores no MORE than the plain
+    # run (it never creates water), and the shortfall is bounded by the drained inlet's capacity.
+    @test total_stored(sC) <= total_stored(s0) + 1e-6
+    @test total_stored(s0) - total_stored(sC) <= SWIM._own_capacity(ts, 233) + 1e-6
 
     # (5) a different topology (terrain-outlet expansion) also survives the pipeline:
     # inlet (179,37) in a trap, outlet (8,119) on bare terrain traces a fresh chain.

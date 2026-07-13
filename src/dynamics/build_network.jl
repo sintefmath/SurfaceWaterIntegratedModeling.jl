@@ -23,9 +23,11 @@ function setup_network(tstruct, full_traps;
     # Compute inflow and outflow cells for each NBS footprint
     _compute_nbs_inflow_outflow_cells!(nbs, tstruct)
     
-    # seeds for tracking dynamic flows are the dyn_coords, the culvert outlet points,
-    # and all NBS outflow points
+    # seeds for tracking dynamic flows are the dyn_coords, BOTH culvert endpoints (the outlet
+    # so its downstream chain is traced, the inlet so its host trap is an evolving node the
+    # culvert can draw from — not just fill statically), and all NBS outflow points
     seeds = union(Set(dyn_coords),
+                  Set([culvert.inlet  for culvert in culverts]),
                   Set([culvert.outlet for culvert in culverts]),
                   Set(vcat([n.outlets for n in nbs]...)),
                   Set(vcat([n.internal_accumulation_cells for n in nbs]...)),
