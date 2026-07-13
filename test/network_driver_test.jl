@@ -85,10 +85,11 @@ end
 end
 
 # ---------------------------------------------------------------------------
-# Gate Phase D1: the driver wired into `fill_sequence` (`use_driver=true`), on the real
-# mini.txt terrain.  A `dyn_traps` network spanning a multi-trap chain that terminates
-# out of the domain exercises the incremental membership layer end-to-end (build → per-event
-# apply → reconcile → finalize) and the full-terminal `-1` spill-path the tracer must assign.
+# Gate Phase D: the driver IS the fill_sequence network path (D2 retired the old one), on
+# the real mini.txt terrain.  A `dyn_traps` network spanning a multi-trap chain that
+# terminates out of the domain exercises the incremental membership layer end-to-end (build →
+# per-event apply → reconcile → finalize) and the full-terminal `-1` spill-path the tracer
+# must assign.
 # ---------------------------------------------------------------------------
 @testset "network driver: through fill_sequence (D1)" begin
     grid = loadgrid(joinpath(artifact"swim_testdata", "data", "small", "mini.txt"))
@@ -111,15 +112,15 @@ end
     monotone(seq) = all(seq[i].timestamp <= seq[i+1].timestamp + 1e-9 for i in 1:length(seq)-1)
     caps = [SWIM._own_capacity(ts, t) for t in 1:nt]
 
-    # 1. the flag is inert without a network (no dyn_traps → identical to the old path)
-    off = fill_sequence(ts, we; use_driver = false)
-    on  = fill_sequence(ts, we; use_driver = true)
-    @test length(off) == length(on)
-    @test maximum(abs.(fold_amounts(off, nt) .- fold_amounts(on, nt))) == 0.0
+    # 1. no dyn_traps/culverts → the driver builds an empty network and the run is unchanged
+    #    (the plain fill_sequence result); a full snapshot per weather period plus events
+    plain = fill_sequence(ts, we)
+    @test !isempty(plain)
+    @test all(isfinite(a) for a in fold_amounts(plain, nt))
 
     # 2. a dynamic network at trap 233 (a multi-trap chain terminating out of domain) runs
     #    end-to-end through the driver with all invariants intact
-    seq = fill_sequence(ts, we; dyn_traps = [233], use_driver = true)
+    seq = fill_sequence(ts, we; dyn_traps = [233])
     amt = fold_amounts(seq, nt)
     @test monotone(seq)
     @test all(isfinite, amt)
