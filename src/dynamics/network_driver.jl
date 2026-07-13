@@ -181,3 +181,54 @@ finalize_network_driver!(driver::NetworkDriver, cur_amounts, tstruct, infiltrati
                          z_vol_tables, endtime) =
     _finalize_networks!(cur_amounts, driver.contexts, tstruct, infiltration,
                         z_vol_tables, driver.last_time, endtime, driver.nbs_state)
+
+# ----------------------------------------------------------------------------
+# D1 — the `fill_sequence` touch entry: the driver-based replacement for `_touch_networks!`.
+# Where the old touch RETRACES the structure every event (`setup_network_cached` + `_reuse_plan`
+# + `_assemble_contexts`), this applies the fired transitions incrementally via `apply_*`.  The
+# order mirrors the old touch so the state handoff matches the solver protocol: commit under the
+# cached inflow, mutate topology, reconcile the spillgraph to the new coverage (C5), then rebuild
+# the contexts reading the reconciled inflow.  `filled_traps` is ALREADY updated by the caller
+# (fired traps flipped, `:empty` children exposed).  Returns `(contexts, net_trap_set,
+# net_covered_set, committed)` — the same tuple the old `_touch_networks!` returns.
+function _touch_networks_driver!(driver::NetworkDriver, changetimeest, sgraph, tstruct,
+                                 filled_traps, cur_amounts, rateinfo, z_vol_tables,
+                                 infiltration, fill_updates, old_covered, cur_time, endtime)
+    isempty(driver.contexts) &&
+        return driver.contexts, Set{Int}(), Set{Int}(), Dict{Int,Float64}()
+
+    # which node traps fired this event, and how (captured from predictions before mutation)
+    fired = _capture_fired_kinds(driver.contexts, fill_updates)
+
+    # commit every context to cur_time under its cached inflow, harvest into the stores, then
+    # overlay the fired-trap boundary values (:unspill→prevfloat(C); :empty→parent 0 / children
+    # prevfloat(C); :fill→C is applied by the full-trap branch of the rebuild's seed rule)
+    for ctx in driver.contexts
+        _commit_network!(ctx, tstruct, infiltration, z_vol_tables, cur_time)
+    end
+    driver.last_time = cur_time
+    _harvest!(driver)
+    _apply_fired_boundaries!(driver.vol_by_trapix, fired, tstruct)
+    committed = copy(driver.vol_by_trapix)
+
+    # apply each fired structural transition to the live components
+    full_traps = findall(filled_traps)
+    for (ft, k) in fired
+        k == :fill    ? apply_fill!(driver.comps, tstruct, full_traps, ft) :
+        k == :unspill ? apply_unfill!(driver.comps, tstruct, ft)           :
+        k == :empty   ? apply_empty!(driver.comps, tstruct, full_traps, ft) : nothing
+    end
+
+    # reconcile the spillgraph/rateinfo to the new coverage BEFORE the rebuild reads inflow (C5)
+    new_covered = _covered_of(driver.comps, tstruct)
+    old_covered != new_covered &&
+        _reconcile_spillgraph!(sgraph, rateinfo, filled_traps, new_covered, tstruct)
+
+    # rebuild the contexts off the mutated component set, predict fresh events, publish estimates
+    _rebuild_contexts!(driver, tstruct, rateinfo, infiltration, z_vol_tables,
+                       cur_amounts, Set(full_traps), cur_time, endtime)
+    nts = _net_trap_set(driver.contexts)
+    ncs = _net_covered_set(driver.contexts, tstruct)
+    _apply_network_changetimeest!(changetimeest, driver.contexts, ncs)
+    return driver.contexts, nts, ncs, committed
+end

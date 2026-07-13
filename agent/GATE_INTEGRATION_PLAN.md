@@ -203,9 +203,23 @@ dropped the redundant `nbs_placements` / `culverts` / `dyn_coords` fields (the c
 structural source of truth). Suites 317/317.
 
 ### Phase D — swap `fill_sequence.jl` call sites, retire old path
-- [ ] D1 `[code]` replace L83 `_build_dyn_networks` → new build; L174 `_touch_networks!` → new
-  per-event dispatch (C3–C5); L232 `_finalize_networks!` → C6. Remove `SubnetCache` (L124) and
-  the `_expand_empty_fill_updates` / `_network_amount_updates` plumbing where the driver subsumes it.
+- [x] D1 `[code]` driver wired into `fill_sequence` behind a `use_driver` kwarg, **alongside** the
+  old path (reversible). Build → `build_network_driver`; touch → `_touch_networks_driver!` (the
+  driver equivalent of `_touch_networks!`: commit → `apply_*` → **C5 spillgraph/`rateinfo`
+  reconcile** → rebuild); finalize reuses `_finalize_networks!` on `driver.contexts`. Both paths
+  expose the same `net_contexts` interface, so `_expand_empty_fill_updates` /
+  `_network_amount_updates` / changetime plumbing are shared unchanged. `SubnetCache` (old-only)
+  left until D2. Verified on mini.txt: `use_driver` off/on identical without a network (462/462,
+  0.0 diff); a `dyn_traps=[233]` multi-trap chain runs end-to-end through the driver (462 events,
+  monotone, all amounts finite & within capacity). `Sequencing` grid1/grid3 (default path) still
+  pass. New test: `network_driver_test.jl` "through fill_sequence (D1)". Multi-trap absorption —
+  the C7 caveat — now works (the static loop keeps `cur_amounts` current).
+  - **Fixed a `build_network` tracer bug D1 surfaced**: when the trace stops at a FULL trap that
+    spills straight out of the domain (no distinct downstream cell), `_grow_network_from_seed!`
+    left its `spill_path` at 0 (reads as an unfilled frontier) instead of the `-1` out-of-domain
+    sentinel → `solveDynNetwork!` three-state-contract error. Now sets `-1`. Reproduced by a fresh
+    `setup_network` (not an `apply_*` divergence). Suites 317/317 after the fix.
+- [ ] D1-followup `[code]` remove `SubnetCache` (L124) once the old touch is gone (folds into D2).
 - [ ] D2 `[code]` delete the retired old path: `elements.jl` `setup_network` (L302),
   `setup_network_cached`, `_subnetwork`, `_merge_networks`, `SubnetCache`, and the old
   `network_context.jl` structural functions superseded by C.

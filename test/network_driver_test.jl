@@ -83,3 +83,47 @@ end
     @test inp.cur[g].amount ≈ SWIM._own_capacity(ts, g)    # settled at capacity
     @test all(isfinite(ca.amount) for ca in inp.cur)
 end
+
+# ---------------------------------------------------------------------------
+# Gate Phase D1: the driver wired into `fill_sequence` (`use_driver=true`), on the real
+# mini.txt terrain.  A `dyn_traps` network spanning a multi-trap chain that terminates
+# out of the domain exercises the incremental membership layer end-to-end (build → per-event
+# apply → reconcile → finalize) and the full-terminal `-1` spill-path the tracer must assign.
+# ---------------------------------------------------------------------------
+@testset "network driver: through fill_sequence (D1)" begin
+    grid = loadgrid(joinpath(artifact"swim_testdata", "data", "small", "mini.txt"))
+    ts   = spillanalysis(grid, usediags = true)
+    nt   = numtraps(ts)
+    we   = [SurfaceWaterIntegratedModeling.WeatherEvent(0.0, 1.0e-3)]
+
+    function fold_amounts(seq, n)
+        amt = fill(0.0, n)
+        for ev in seq
+            a = ev.amount
+            if eltype(a) <: SWIM.FilledAmount
+                for (i, fa) in enumerate(a); amt[i] = fa.amount; end
+            else
+                for u in a; amt[u.index] = u.value.amount; end
+            end
+        end
+        return amt
+    end
+    monotone(seq) = all(seq[i].timestamp <= seq[i+1].timestamp + 1e-9 for i in 1:length(seq)-1)
+    caps = [SWIM._own_capacity(ts, t) for t in 1:nt]
+
+    # 1. the flag is inert without a network (no dyn_traps → identical to the old path)
+    off = fill_sequence(ts, we; use_driver = false)
+    on  = fill_sequence(ts, we; use_driver = true)
+    @test length(off) == length(on)
+    @test maximum(abs.(fold_amounts(off, nt) .- fold_amounts(on, nt))) == 0.0
+
+    # 2. a dynamic network at trap 233 (a multi-trap chain terminating out of domain) runs
+    #    end-to-end through the driver with all invariants intact
+    seq = fill_sequence(ts, we; dyn_traps = [233], use_driver = true)
+    amt = fold_amounts(seq, nt)
+    @test monotone(seq)
+    @test all(isfinite, amt)
+    @test all(amt[t] <= caps[t] + 1e-6 for t in 1:nt)     # never over capacity
+    @test all(amt[t] >= -1e-6 for t in 1:nt)              # never negative
+    @test amt[233] ≈ caps[233] rtol=1e-6                   # the seeded trap fills
+end

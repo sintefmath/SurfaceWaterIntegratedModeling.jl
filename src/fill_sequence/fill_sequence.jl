@@ -36,6 +36,7 @@ function fill_sequence(tstruct::TrapStructure{<:Real},
             dyn_traps::Vector{Int} = Int[],
             culverts::Vector{DynCulvert} = DynCulvert[],
             nbs::Vector{DynNBSPlacement} = DynNBSPlacement[],
+            use_driver::Bool = false,
             verbose::Bool=false)::Vector{SpillEvent}
     @assert !isempty(weather_events)
 
@@ -78,11 +79,26 @@ function fill_sequence(tstruct::TrapStructure{<:Real},
         rateinfo = compute_flow(sgraph, we.rain_rate, infiltration, tstruct, verbose; nbs=nbs)
 
         # build the dynamic networks for this weather period (§3); empty when no
-        # dyn_traps/culverts are supplied, in which case behaviour is unchanged
-        net_contexts, net_trap_set, net_covered_set =
-            _build_dyn_networks(tstruct, dyn_traps, culverts, findall(filled_traps),
-                                cur_amounts, rateinfo, infiltration, z_vol_tables,
-                                cur_time, end_time, nbs, nbs_state)
+        # dyn_traps/culverts are supplied, in which case behaviour is unchanged.
+        # `use_driver` selects the incremental gate driver (Phase D) over the old
+        # full-retrace path; both expose the same `net_contexts` interface.
+        if use_driver
+            driver = build_network_driver(tstruct,
+                                          _dyn_seeds(tstruct, dyn_traps, DynCulvert[]),
+                                          culverts, findall(filled_traps), cur_amounts,
+                                          rateinfo, infiltration, z_vol_tables,
+                                          cur_time, end_time;
+                                          nbs_placements = nbs, nbs_state = nbs_state)
+            net_contexts    = driver.contexts
+            net_trap_set    = _net_trap_set(net_contexts)
+            net_covered_set = _net_covered_set(net_contexts, tstruct)
+        else
+            driver = nothing
+            net_contexts, net_trap_set, net_covered_set =
+                _build_dyn_networks(tstruct, dyn_traps, culverts, findall(filled_traps),
+                                    cur_amounts, rateinfo, infiltration, z_vol_tables,
+                                    cur_time, end_time, nbs, nbs_state)
+        end
 
         # compute initial time estimates for when a trap become filled, or split
         # into subtraps (network traps are overridden from their network prediction)
@@ -102,7 +118,8 @@ function fill_sequence(tstruct::TrapStructure{<:Real},
                                           filled_traps, cur_amounts, z_vol_tables,
                                           tstruct, infiltration, end_time, time_slack,
                                           net_contexts, net_trap_set, net_covered_set,
-                                          dyn_traps, culverts, verbose, nbs, nbs_state)
+                                          dyn_traps, culverts, verbose, nbs, nbs_state,
+                                          driver)
     end
 
     return seq
@@ -115,7 +132,8 @@ function _fill_sequence_for_weather_event!(seq, sgraph, rateinfo, changetimeest,
                                            net_contexts, net_trap_set, net_covered_set,
                                            dyn_traps, culverts, verbose,
                                            nbs = DynNBSPlacement[],
-                                           nbs_state = Dict{Int,Vector{Float64}}())
+                                           nbs_state = Dict{Int,Vector{Float64}}(),
+                                           driver = nothing)
     cur_time = cur_amounts[1].time
 
     fill_updates = Vector{IncrementalUpdate{Bool}}()
@@ -171,11 +189,16 @@ function _fill_sequence_for_weather_event!(seq, sgraph, rateinfo, changetimeest,
         end
         if network_touched
             net_contexts, net_trap_set, net_covered_set, net_committed =
-                _touch_networks!(net_contexts, changetimeest, sgraph, tstruct,
-                                 dyn_traps, culverts, filled_traps,
-                                 cur_amounts, rateinfo, z_vol_tables, infiltration,
-                                 fill_updates, old_covered, cur_time, endtime, subnet_cache,
-                                 nbs, nbs_state)
+                driver === nothing ?
+                    _touch_networks!(net_contexts, changetimeest, sgraph, tstruct,
+                                     dyn_traps, culverts, filled_traps,
+                                     cur_amounts, rateinfo, z_vol_tables, infiltration,
+                                     fill_updates, old_covered, cur_time, endtime, subnet_cache,
+                                     nbs, nbs_state) :
+                    _touch_networks_driver!(driver, changetimeest, sgraph, tstruct,
+                                            filled_traps, cur_amounts, rateinfo, z_vol_tables,
+                                            infiltration, fill_updates, old_covered,
+                                            cur_time, endtime)
             # traps that LEFT the networks need a fresh constant-rate changetime estimate
             for t in setdiff(old_covered, net_covered_set)
                 changetimeest[t] = _compute_changetime_estimate(t, cur_amounts, cur_time,

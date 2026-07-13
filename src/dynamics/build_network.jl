@@ -170,8 +170,16 @@ function _grow_network_from_seed!(network, pathmap, seed::CartesianIndex{2},
             seed = terminus
         else
             spoint = tstruct.spillpoints[trap_ix]
-            seed = (trap_ix ∈ full_traps) && spoint.downstream_region_cell != spoint.current_region_cell ?
-                CI[spoint.downstream_region_cell] : terminus
+            if (trap_ix ∈ full_traps) && spoint.downstream_region_cell != spoint.current_region_cell
+                seed = CI[spoint.downstream_region_cell]   # full trap spilling on: keep tracing
+            else
+                # Stop here.  A FULL trap with no distinct downstream cell spills straight out of
+                # the domain: mark its spill_path with the out-of-domain sentinel (-1), otherwise
+                # it reads as an unfilled transitory frontier (spill_path 0) and violates the
+                # solver's three-state contract.  An unfilled frontier keeps spill_path 0.
+                (trap_ix ∈ full_traps) && (network.traps[trap_local].spill_path = -1)
+                seed = terminus
+            end
         end
 
     end
