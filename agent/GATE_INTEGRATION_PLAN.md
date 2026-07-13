@@ -168,9 +168,9 @@ deleted the duplicate, use the canonical one; (2) `Vector(::Set)` → `collect`;
 ### Phase C — new network driver (replaces `network_context.jl`'s structural core)
 All in the new `src/dynamics/network_driver.jl` (`NetworkDriver` owns `comps` +
 `vol_by_trapix` + `nbs_state`; contexts rebuilt off the mutated component set each event).
-- [x] C1 `[code]` `_state_for(net, vol_by_trapix, seed0)` builds the trap portion of a
-  component's `state` in `net.traps` order; the shared seed rule (`full→C`, committed, else
-  project) is factored into `_driver_state0`, used by build and every rebuild.
+- [x] C1 `[code]` the shared seed rule (`full→C`, committed, else project) is `_driver_state0`,
+  a per-trap closure `_make_context` consumes directly (used by build and every rebuild). The
+  earlier standalone `_state_for` vector form was redundant and has been removed.
 - [x] C2 `[code]` `build_network_driver`: components from the new `setup_network`, one context
   each via `_make_context`, `_predict_network!` for the next event. `_driver_next_event` picks
   the earliest.
@@ -186,11 +186,21 @@ All in the new `src/dynamics/network_driver.jl` (`NetworkDriver` owns `comps` +
   `filled_traps`; the reconcile belongs at the call site alongside `_reconcile_spillgraph!`).
 - [x] C6 `[code]` `finalize_network_driver!` reuses `_finalize_networks!` (settles nodes +
   subsumed descendants into `cur_amounts`, carries NBS state forward).
-- [~] C7 `[test]` `test/network_driver_test.jl` (16 assertions): build/predict, `_state_for`,
+- [~] C7 `[test]` `test/network_driver_test.jl` (14 assertions): build/predict,
   `_driver_next_event`, and a stepped single-basin evolution (time-ordered events + finalize at
   capacity) on synthetic terrain. Multi-trap absorption parity needs `fill_sequence`'s static
   loop to keep `cur_amounts` current (isolated, a grown trap's projection over-fills) → that
-  parity lands in **E**.
+  parity lands in **E**. The driver's **NBS path is still untested** (no NBS in the C7 fixture)
+  → first exercised in **E**.
+
+**Cleanup after C (commit `340f976`).** Fixed a B3-induced defect: `_nbs_layer_block` /
+`_store_nbs_state!` read `nb.placement_ix`, gone from `DynNBSPlacement` (now `.system` / `.id`);
+the OLD path masked it (empty `net.nbs`) but the driver's NBS path would have thrown. That
+removed the need to thread a placement list: `solveDynNetwork!`'s `nbs_placements` arg is unused
+since B2, and `DynNetworkContext.seeds` was read nowhere — both context fields dropped,
+`_make_context` slimmed to `(net, tstruct, rateinfo, state0, cur_time, nbs_state)`. `NetworkDriver`
+dropped the redundant `nbs_placements` / `culverts` / `dyn_coords` fields (the components are the
+structural source of truth). Suites 317/317.
 
 ### Phase D — swap `fill_sequence.jl` call sites, retire old path
 - [ ] D1 `[code]` replace L83 `_build_dyn_networks` → new build; L174 `_touch_networks!` → new
