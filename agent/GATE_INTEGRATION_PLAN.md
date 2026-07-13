@@ -266,8 +266,14 @@ structural source of truth). Suites 317/317.
     leaving via 13's out-of-domain spill — nothing created/destroyed). Rewrote the
     `culverts through fill_sequence` directional + mass assertions to the correct coupled
     behaviour (no more `@test_skip`). Combined dynamics suite **1053 pass / 0 fail / 0 broken**.
-  - **Still TODO:** NBS through the driver (no NBS fixture yet); shared-spill / subsumption /
-    fusion end-to-end coupled cases.
+  - **NBS through the driver now TESTED** (`network_driver_test.jl` "NBS through fill_sequence
+    (E2)"): a slow-draining `puddle` NBS upstream of a pit runs end-to-end through the driver and
+    markedly delays the pit's fill (t≈111 → t≈197 on the synthetic plane) — the placement_ix→id
+    fix (post-C cleanup) is exercised for the first time. NBS overlay geometry note: a terrain-
+    re-emit NBS (`n_terrain≥1`) needs a footprint with a downhill terrain exit; an endorheic
+    (closed-basin) footprint throws in `_nbs_exit_weights` and requires piped outlets.
+  - **Still TODO:** explicit shared-spill / subsumption / fusion end-to-end coupled cases (the
+    membership layer handles them; add fill_sequence-level coverage).
 - [ ] E3 `[doc]` update `AGENTS.md` (subsystem table), `DYNAMIC_MEMBERSHIP_PLAN.md` §8 (gate
   done), and the memory status once `build_network` is in the module.
 

@@ -128,3 +128,41 @@ end
     @test all(amt[t] >= -1e-6 for t in 1:nt)              # never negative
     @test amt[233] ≈ caps[233] rtol=1e-6                   # the seeded trap fills
 end
+
+# ---------------------------------------------------------------------------
+# Gate Phase E2: an NBS placement carried end-to-end through the driver.  A west-flowing
+# plane with a pit near the west edge; a slow-draining `puddle` NBS sits upstream on the
+# flow path into the pit.  The overlay must run through fill_sequence (build → per-event
+# apply → finalize) and visibly DELAY the downstream pit's fill by holding runoff back.
+# ---------------------------------------------------------------------------
+@testset "network driver: NBS through fill_sequence (E2)" begin
+    N    = 30
+    grid = Float64[j for i in 1:N, j in 1:N]              # rising east → flow west
+    for i in 12:18, j in 3:6; grid[i, j] = 1.0; end       # pit near the west edge
+    ts   = spillanalysis(grid, usediags = true)
+    LI   = LinearIndices(size(grid))
+    @test numtraps(ts) == 1
+    pit  = 1
+
+    # NBS footprint upstream (east) of the pit, on the flow path into it; a slow overflow
+    # (kOUT small) so it stores runoff and releases it gradually.
+    fp = [LI[CartesianIndex(i, j)] for i in 12:18 for j in 15:20]
+    pl = SurfaceWaterIntegratedModeling.DynNBSPlacement(
+             SurfaceWaterIntegratedModeling.puddle(50.0; kOUT = 0.01), fp,
+             CartesianIndex{2}[])
+    w  = [SurfaceWaterIntegratedModeling.WeatherEvent(0.0, 1.0e-3)]
+
+    filltimes(seq) = (d = Dict{Int,Float64}();
+        for e in seq[2:end], u in e.filled
+            (u isa IncrementalUpdate) && u.value && !haskey(d, u.index) && (d[u.index] = e.timestamp)
+        end; d)
+    monotone(seq) = all(seq[i].timestamp <= seq[i+1].timestamp + 1e-9 for i in 1:length(seq)-1)
+
+    seq0 = fill_sequence(ts, w)                            # no NBS
+    seqN = fill_sequence(ts, w; nbs = [pl])                # NBS on the flow path
+    f0, fN = filltimes(seq0), filltimes(seqN)
+
+    @test monotone(seqN)                                  # runs end-to-end, ordered
+    @test haskey(f0, pit) && haskey(fN, pit)              # the pit fills either way
+    @test fN[pit] > f0[pit] * 1.2                         # the upstream NBS delays it markedly
+end
