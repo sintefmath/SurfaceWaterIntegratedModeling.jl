@@ -33,6 +33,7 @@ include("dynamics/network_context.jl")
 include("dynamics/network_utils.jl")
 include("dynamics/network_updating.jl")
 include("dynamics/build_network.jl")   # new setup_network + tracer (grow/detach/regrow build on it)
+include("dynamics/network_driver.jl")  # incremental per-event driver (gate Phase C)
 # ----------------------------------------------------------------------------
 include("IOandplot.jl")
 # ----------------------------------------------------------------------------

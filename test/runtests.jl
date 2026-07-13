@@ -5,6 +5,7 @@ include("basicTestFuns.jl")
 include("watercourses_test.jl")
 include("dynamics_test.jl")
 include("dynamic_membership_test.jl")  # grow/detach/fusion + apply_fill!/apply_unfill!/apply_empty!
+include("network_driver_test.jl")      # gate Phase C: build/predict/step/finalize driver
 include("nbs_overlay_test.jl")   # NBS footprint-as-sink overlay + terrain exit weights
 # Old carve-based NBS tests disabled: the integration is being re-architected as a
 # dynamic overlay (agent/NBS_OPTION1_OVERLAY_PLAN.md).  Their replacements land as

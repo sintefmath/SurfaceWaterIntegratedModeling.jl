@@ -166,23 +166,31 @@ deleted the duplicate, use the canonical one; (2) `Vector(::Set)` → `collect`;
 `inv_flow[cell]` KeyError → `get(…, Int[])`. `setup_network` now builds NBS components cleanly.
 
 ### Phase C — new network driver (replaces `network_context.jl`'s structural core)
-- [ ] C1 `[code]` `_state_for(net, vol_by_trapix, seed0)`: build a component's `state` vector in
-  `net.traps` order from a `trap_ix → volume` map, seeding new traps from `seed0` — the single
-  re-indexing helper used after every `apply_*`/regrow.
-- [ ] C2 `[code]` build entry: one context per component from the new `setup_network`; predict
-  each next event (reuse `_predict_network!` / `solveDynNetwork!`).
-- [ ] C3 `[code]` per-event dispatch: given the earliest component's `(trap, kind)`, update
-  `full_traps`, call `apply_fill!` / `apply_unfill!` / `apply_empty!`, and re-sync the affected
-  contexts' `state` via C1 using the returned migrated `trap_ix`.
-- [ ] C4 `[code]` state handoff: seed grown/newly-dynamic traps from `cur_amounts`; write
-  detached traps back to `cur_amounts`; on `:empty` distribute parent→children (parent 0,
-  child `prevfloat(C)`), honouring the solver protocol (§1 table).
-- [ ] C5 `[code]` minimal spillgraph/`rateinfo` reconcile for the changed coverage, driven by the
-  migrated sets (keep the essence of `_reconcile_spillgraph!`, drop the full recompute).
-- [ ] C6 `[code]` finalize: advance each context to `endtime`, write settled node volumes +
-  subsumed-descendant capacities to `cur_amounts` (port `_finalize_networks!`).
-- [ ] C7 `[test]` driver unit tests on real terrain: a scripted event sequence keeps
-  `cur_amounts` consistent and matches an independent recompute.
+All in the new `src/dynamics/network_driver.jl` (`NetworkDriver` owns `comps` +
+`vol_by_trapix` + `nbs_state`; contexts rebuilt off the mutated component set each event).
+- [x] C1 `[code]` `_state_for(net, vol_by_trapix, seed0)` builds the trap portion of a
+  component's `state` in `net.traps` order; the shared seed rule (`full→C`, committed, else
+  project) is factored into `_driver_state0`, used by build and every rebuild.
+- [x] C2 `[code]` `build_network_driver`: components from the new `setup_network`, one context
+  each via `_make_context`, `_predict_network!` for the next event. `_driver_next_event` picks
+  the earliest.
+- [x] C3 `[code]` `step_network_driver!` dispatch: earliest `(trap, kind)` → `apply_fill!` /
+  `apply_unfill!` / `apply_empty!`, then `_rebuild_contexts!` off the mutated `comps` (returns
+  the migrated `trap_ix`).
+- [x] C4 `[code]` state handoff: commit all contexts to the event time BEFORE the structural
+  change (§7.3), `_harvest!` into the stores, clamp per protocol (`:fill`→C, `:unspill`→
+  `prevfloat(C)`, `:empty`→parent 0 / children `prevfloat(C)` with children out of `full_traps`
+  first, §7.2); grown traps seeded via the projection rule.
+- [ ] C5 `[code]` spillgraph/`rateinfo` reconcile for the changed coverage — **deferred to D1**,
+  where `filled_traps`/`sgraph`/`rateinfo` are threaded from `fill_sequence` (the driver mutates
+  `filled_traps`; the reconcile belongs at the call site alongside `_reconcile_spillgraph!`).
+- [x] C6 `[code]` `finalize_network_driver!` reuses `_finalize_networks!` (settles nodes +
+  subsumed descendants into `cur_amounts`, carries NBS state forward).
+- [~] C7 `[test]` `test/network_driver_test.jl` (16 assertions): build/predict, `_state_for`,
+  `_driver_next_event`, and a stepped single-basin evolution (time-ordered events + finalize at
+  capacity) on synthetic terrain. Multi-trap absorption parity needs `fill_sequence`'s static
+  loop to keep `cur_amounts` current (isolated, a grown trap's projection over-fills) → that
+  parity lands in **E**.
 
 ### Phase D — swap `fill_sequence.jl` call sites, retire old path
 - [ ] D1 `[code]` replace L83 `_build_dyn_networks` → new build; L174 `_touch_networks!` → new
