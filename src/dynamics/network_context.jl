@@ -31,12 +31,8 @@ mutable struct DynNetworkContext
     state           ::Vector{Float64}            # trap volumes, then appended NBS layer states
     global_ix       ::Vector{Int}
     inflow_sources  ::Set{Int}
-    seeds           ::Vector{CartesianIndex{2}}  # the seed cells that produced this
-                                                 # component (for per-context rebuild)
     last_solve_time ::Float64
     extern_inflow   ::Vector{Float64}
-    nbs_placements  ::Vector{DynNBSPlacement}       # the caller's NBS placements (constant; the
-                                                 # solver's plan indexes them by placement_ix)
     extern_nbs_inflow::Vector{Float64}           # per-placement static footprint capture the
                                                  # state evolves under (cached at the last touch,
                                                  # like extern_inflow — keeps commit/predict
@@ -103,7 +99,6 @@ function _predict_network!(ctx::DynNetworkContext, tstruct, infiltration,
     res = solveDynNetwork!(copy(ctx.state), tstruct, ctx.net, infiltration,
                            ctx.extern_inflow;
                            tmax = endtime - ctx.last_solve_time, zvt = z_vol_tables,
-                           nbs_placements = ctx.nbs_placements,
                            nbs_inflow = ctx.extern_nbs_inflow)
     ctx.next_event = (; time = res.time + ctx.last_solve_time,
                         trap = res.trap, kind = res.kind)
@@ -120,7 +115,6 @@ function _commit_network!(ctx::DynNetworkContext, tstruct, infiltration,
     res = solveDynNetwork!(ctx.state, tstruct, ctx.net, infiltration,
                            ctx.extern_inflow;
                            tmax = T_commit - ctx.last_solve_time, zvt = z_vol_tables,
-                           nbs_placements = ctx.nbs_placements,
                            nbs_inflow = ctx.extern_nbs_inflow)
     ctx.last_solve_time = T_commit
     return res
@@ -161,26 +155,27 @@ end
 
 # The NBS layer-state block for `net`, read from the persistent `nbs_state` store in
 # `net.nbs` order (matching `_make_context`'s state layout and `_build_nbs_plan`'s
-# state_base offsets).  A placement not yet in the store starts empty (zeros).
-function _nbs_layer_block(net::DynNetwork, nbs_placements, nbs_state)
+# state_base offsets).  Each placement in `net.nbs` carries its own layer model and stable
+# `id`; a placement not yet in the store starts empty (zeros).
+function _nbs_layer_block(net::DynNetwork, nbs_state)
     block = Float64[]
     for nb in net.nbs
-        L      = length(nbs_placements[nb.placement_ix].system.layers)
-        stored = get(nbs_state, nb.placement_ix, nothing)
+        L      = length(nb.system.layers)
+        stored = get(nbs_state, nb.id, nothing)
         append!(block, stored === nothing ? zeros(Float64, L) : stored)
     end
     return block
 end
 
 # Write a context's current layer states back into the persistent `nbs_state` store
-# (the single source of truth across events and weather periods).  Keyed by placement,
+# (the single source of truth across events and weather periods).  Keyed by placement `id`,
 # so a later rebuild that regroups NBS into new components restores each layer correctly.
 function _store_nbs_state!(nbs_state, ctx::DynNetworkContext)
     nt   = length(ctx.global_ix)
     base = 0
     for nb in ctx.net.nbs
-        L = length(ctx.nbs_placements[nb.placement_ix].system.layers)
-        nbs_state[nb.placement_ix] = ctx.state[(nt + base + 1):(nt + base + L)]
+        L = length(nb.system.layers)
+        nbs_state[nb.id] = ctx.state[(nt + base + 1):(nt + base + L)]
         base += L
     end
     return nbs_state
@@ -197,8 +192,8 @@ function _build_dyn_networks(tstruct, dyn_traps, culverts, full_traps, cur_amoun
 
     contexts = DynNetworkContext[]
     for net in components
-        ctx = _make_context(net, tstruct, rateinfo, seeds,
-                            g -> cur_amounts[g].amount, cur_time, nbs_placements, nbs_state)
+        ctx = _make_context(net, tstruct, rateinfo,
+                            g -> cur_amounts[g].amount, cur_time, nbs_state)
         _predict_network!(ctx, tstruct, infiltration, z_vol_tables, endtime) # set ctx.next_event
         push!(contexts, ctx)
     end
@@ -206,28 +201,23 @@ function _build_dyn_networks(tstruct, dyn_traps, culverts, full_traps, cur_amoun
     return contexts, _net_trap_set(contexts), _net_covered_set(contexts, tstruct)
 end
 
-# Build one context from a single network component.  `seed_pool` is the full seed
-# list; the context records the subset that falls inside this component (used to
-# re-trace the same component on a rebuild).  `state0(g)` supplies the initial
-# committed volume for the global trap index `g`.
-function _make_context(net::DynNetwork, tstruct, rateinfo, seed_pool, state0, cur_time,
-                       nbs_placements = DynNBSPlacement[],
+# Build one context from a single network component.  `state0(g)` supplies the initial
+# committed volume for the global trap index `g`.  NBS placements travel on `net.nbs`.
+function _make_context(net::DynNetwork, tstruct, rateinfo, state0, cur_time,
                        nbs_state = Dict{Int,Vector{Float64}}())
     global_ix = Int[t.trap_ix for t in net.traps]
-    occ       = _occupied_cells(tstruct, [net])
-    seeds     = CartesianIndex{2}[s for s in seed_pool if s in occ]
     # Trap volumes, then one appended state per NBS layer (in `net.nbs` order, matching
     # `_build_nbs_plan`'s state_base offsets), restored from the persistent store so NBS
     # storage carries across events and weather periods.
     state     = vcat(Float64[state0(g) for g in global_ix],
-                     _nbs_layer_block(net, nbs_placements, nbs_state))
+                     _nbs_layer_block(net, nbs_state))
     # Cache the per-placement footprint capture the state evolves under (order-independent
     # commit/predict, like extern_inflow).  `rateinfo.nbs_inflow` is empty when no NBS.
     return DynNetworkContext(net, state, global_ix,
-                             _inflow_sources(net, tstruct), seeds,
+                             _inflow_sources(net, tstruct),
                              cur_time,
                              _external_inflow(net, rateinfo, tstruct),
-                             nbs_placements, copy(rateinfo.nbs_inflow),
+                             copy(rateinfo.nbs_inflow),
                              (; time = Inf, trap = 0, kind = :none))
 end
 
@@ -420,8 +410,7 @@ function _assemble_contexts(components, reuse, net_contexts, committed, full_set
         if reuse[k] != 0
             push!(out, net_contexts[reuse[k]])
         else
-            c = _make_context(net, tstruct, rateinfo, seeds, state0, cur_time,
-                              nbs_placements, nbs_state)
+            c = _make_context(net, tstruct, rateinfo, state0, cur_time, nbs_state)
             _predict_network!(c, tstruct, infiltration, z_vol_tables, endtime)
             push!(out, c)
         end

@@ -10,33 +10,19 @@
 # The driver owns the committed per-node volumes (`vol_by_trapix`) and the persistent
 # NBS layer store (`nbs_state`) as the source of truth that survives structural
 # change; contexts (holding the solver `state`) are rebuilt from them after every
-# structural mutation via `_make_context` (whose `state0` closure is `_state_for`'s
-# per-trap rule).  See agent/GATE_INTEGRATION_PLAN.md §2 / §7.
+# structural mutation via `_make_context` (seeded by the `_driver_state0` per-trap
+# rule).  See agent/GATE_INTEGRATION_PLAN.md §2 / §7.
 # ----------------------------------------------------------------------------
 
 mutable struct NetworkDriver
-    comps          ::Vector{DynNetwork}          # live components, mutated by apply_*
+    comps          ::Vector{DynNetwork}          # live components, mutated by apply_* (the
+                                                 # structural source of truth — culverts/NBS
+                                                 # travel on each component, not the driver)
     contexts       ::Vector{DynNetworkContext}   # one per comp, same order (rebuilt each event)
     vol_by_trapix  ::Dict{Int,Float64}           # node trap_ix -> committed volume at last_time
     nbs_state      ::Dict{Int,Vector{Float64}}   # placement id -> layer states (persistent)
-    nbs_placements ::Vector{DynNBSPlacement}
-    culverts       ::Vector{DynCulvert}
-    dyn_coords     ::Vector{CartesianIndex{2}}   # explicit dynamic seed cells (period-constant)
     last_time      ::Float64                      # absolute time the committed volumes hold at
 end
-
-# ----------------------------------------------------------------------------
-# C1 — re-indexing helper.  Build the trap-volume portion of a component's solver
-# `state`, in `net.traps` order, from the committed `vol_by_trapix` map.  A node not
-# yet in the map (freshly grown / absorbed) is seeded by `seed0(trap_ix)`.  NBS layer
-# states are appended separately by `_make_context` (keyed by the persistent store),
-# so this returns only the leading `length(net.traps)` trap entries.
-#   net           : the component whose state vector is being (re)built
-#   vol_by_trapix : trap_ix -> committed volume
-#   seed0         : trap_ix -> initial volume for a node absent from the map
-# returns a Vector{Float64} of length length(net.traps).
-_state_for(net::DynNetwork, vol_by_trapix, seed0) =
-    Float64[get(() -> seed0(t.trap_ix), vol_by_trapix, t.trap_ix) for t in net.traps]
 
 # ----------------------------------------------------------------------------
 # C2 — build entry.  Construct the driver for one weather period: build the components
@@ -57,8 +43,7 @@ function build_network_driver(tstruct, dyn_coords, culverts, full_traps, cur_amo
         vol[t.trap_ix] = cur_amounts[t.trap_ix].amount
     end
 
-    driver = NetworkDriver(comps, DynNetworkContext[], vol, nbs_state,
-                           nbs_placements, culverts, dyn_coords, cur_time)
+    driver = NetworkDriver(comps, DynNetworkContext[], vol, nbs_state, cur_time)
     _rebuild_contexts!(driver, tstruct, rateinfo, infiltration, z_vol_tables,
                        cur_amounts, Set(full_traps), cur_time, endtime)
     return driver
@@ -85,12 +70,15 @@ end
 # cheap — one solve per component).  `full_set`/`cur_amounts` feed the `state0` seed rule.
 function _rebuild_contexts!(driver::NetworkDriver, tstruct, rateinfo, infiltration,
                             z_vol_tables, cur_amounts, full_set, cur_time, endtime)
+
+    # initial state rule for every trap in the current component set, used by `_make_context`
     state0 = _driver_state0(driver, tstruct, rateinfo, cur_amounts, full_set,
                             cur_time, z_vol_tables)
     driver.contexts = DynNetworkContext[]
     for net in driver.comps
-        ctx = _make_context(net, tstruct, rateinfo, driver.dyn_coords, state0, cur_time,
-                            driver.nbs_placements, driver.nbs_state)
+        ctx = _make_context(net, tstruct, rateinfo, state0, cur_time, driver.nbs_state)
+
+        # sets `ctx.next_event` to the earliest predicted event for this component, or :none
         _predict_network!(ctx, tstruct, infiltration, z_vol_tables, endtime)
         push!(driver.contexts, ctx)
     end

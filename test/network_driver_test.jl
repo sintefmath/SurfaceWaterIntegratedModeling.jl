@@ -46,17 +46,8 @@ end
     @test driver.comps[1].traps[1].spill_path == 0
 end
 
-@testset "network driver: _state_for + _driver_next_event" begin
+@testset "network driver: _driver_next_event" begin
     ts  = _pit_terrain()
-    net = setup_network(ts, findall(Vector{Bool}(ts.trapvolumes .== 0.0));
-                        dyn_coords = [CartesianIndex(15, 15)])[1]
-    g   = net.traps[1].trap_ix
-    # committed volume is taken from the map; an absent node falls back to seed0
-    st = SWIM._state_for(net, Dict(g => 3.5), _ -> -1.0)
-    @test st == [3.5]
-    st2 = SWIM._state_for(net, Dict{Int,Float64}(), tix -> 7.0)
-    @test st2 == [7.0]
-
     inp = _driver_inputs(ts)
     driver = SWIM.build_network_driver(ts, [CartesianIndex(15, 15)], SWIM.DynCulvert[],
                                        findall(inp.filled), inp.cur, inp.rateinfo,
