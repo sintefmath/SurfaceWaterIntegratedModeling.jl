@@ -166,3 +166,38 @@ end
     @test haskey(f0, pit) && haskey(fN, pit)              # the pit fills either way
     @test fN[pit] > f0[pit] * 1.2                         # the upstream NBS delays it markedly
 end
+
+# ---------------------------------------------------------------------------
+# Gate Phase E2: SHARED SPILL through the driver.  A north-high plane (flow south) with two
+# northern pits (traps 2, 3) that BOTH spill into a wide southern trough (trap 1).  Driving
+# all three exercises the shared-downstream coupling end-to-end; the run must match the plain
+# analytic path (relative tolerance — fill times are large, so ODE-vs-analytic drift scales)
+# and the shared trough must fill only after both feeders spill into it.
+# ---------------------------------------------------------------------------
+@testset "network driver: shared spill through fill_sequence (E2)" begin
+    N    = 40
+    grid = Float64[100.0 - 1.0 * i for i in 1:N, j in 1:N]   # high north → flow south
+    for i in 6:9,   j in 8:12;  grid[i, j] -= 8;  end         # pit A → trap 2
+    for i in 6:9,   j in 28:32; grid[i, j] -= 8;  end         # pit B → trap 3
+    for i in 20:22, j in 5:35;  grid[i, j] -= 15; end         # wide trough → trap 1 (shared)
+    ts = spillanalysis(grid, usediags = true)
+    @test numtraps(ts) == 3
+    # precondition: both upper traps spill into the trough (shared downstream region)
+    @test ts.spillpoints[2].downstream_region == ts.spillpoints[3].downstream_region
+
+    w  = [SurfaceWaterIntegratedModeling.WeatherEvent(0.0, 1.0e-3)]
+    filltimes(seq) = (d = Dict{Int,Float64}();
+        for e in seq[2:end], u in e.filled
+            (u isa IncrementalUpdate) && u.value && !haskey(d, u.index) && (d[u.index] = e.timestamp)
+        end; d)
+    monotone(seq) = all(seq[i].timestamp <= seq[i+1].timestamp + 1e-9 for i in 1:length(seq)-1)
+
+    seq0 = fill_sequence(ts, w)
+    seqD = fill_sequence(ts, w; dyn_traps = [1, 2, 3])
+    f0, fD = filltimes(seq0), filltimes(seqD)
+
+    @test monotone(seqD)
+    @test Set(keys(f0)) == Set(keys(fD))                  # same traps fill
+    @test maximum(abs(f0[t] - fD[t]) / f0[t] for t in keys(f0)) < 2e-3   # relative parity
+    @test fD[1] > fD[2] && fD[1] > fD[3]                  # the shared trough fills after both feeders
+end

@@ -254,7 +254,7 @@ structural source of truth). Suites 317/317.
   (serialising simultaneous fills; mass preserved to a ULP). Full coverage now matches plain on
   mini.txt: 462 events, same filled set, max fill-time drift 2.98e-5 < `PARITY_TOL`. Single /
   mixed / subtrap-seed parity already passed. Restored the `dynamics_test.jl` slice-3 assertions.
-- [~] E2 `[test]` coupled cases (culvert / NBS / shared spill / subsumption / fusion) exercised
+- [x] E2 `[test]` coupled cases (culvert / NBS / shared spill / subsumption / fusion) exercised
   end-to-end through `fill_sequence`, structural invariants asserted.
   - **Culvert coupling FIXED.** Root cause of the directional-effect gap: the new `setup_network`
     seeded culvert *outlets* only, so a culvert's *inlet trap* was not an evolving node — it
@@ -272,8 +272,13 @@ structural source of truth). Suites 317/317.
     fix (post-C cleanup) is exercised for the first time. NBS overlay geometry note: a terrain-
     re-emit NBS (`n_terrain≥1`) needs a footprint with a downhill terrain exit; an endorheic
     (closed-basin) footprint throws in `_nbs_exit_weights` and requires piped outlets.
-  - **Still TODO:** explicit shared-spill / subsumption / fusion end-to-end coupled cases (the
-    membership layer handles them; add fill_sequence-level coverage).
+  - **Shared spill TESTED** (`network_driver_test.jl` "shared spill through fill_sequence (E2)"):
+    a north-high plane with two pits that both spill into one southern trough; driving all three
+    matches the plain path (relative tol) and the trough fills only after both feeders spill in.
+  - **Subsumption + fusion** are covered by `dynamics_test.jl` slice-3: `dyn_traps=[414]` seeds a
+    network that absorbs sibling trap 18 (subsumption) and `[233,220]` merges two seeds' networks
+    (fusion) — both match plain to `PARITY_TOL`. All coupled mechanisms (culvert / NBS / shared
+    spill / subsumption / fusion) now exercised end-to-end. Suite 1063 pass / 0 fail / 0 broken.
 - [ ] E3 `[doc]` update `AGENTS.md` (subsystem table), `DYNAMIC_MEMBERSHIP_PLAN.md` §8 (gate
   done), and the memory status once `build_network` is in the module.
 
