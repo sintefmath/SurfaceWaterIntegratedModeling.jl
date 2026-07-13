@@ -159,13 +159,6 @@ function _dyn_seeds(tstruct, dyn_traps, culverts)
     return unique!(seeds)
 end
 
-# One `DynNBS` overlay element per NBS placement, carrying its real footprint,
-# n_terrain, and piped outlets (no dug trap / region lookup — the overlay redesign).
-# Empty when there are no placements.
-_nbs_elements(nbs_placements::Vector{DynNBSPlacement}) =
-    DynNBS[DynNBS(pi, p.footprint, p.n_terrain, p.outlets)
-           for (pi, p) in enumerate(nbs_placements)]
-
 # The NBS layer-state block for `net`, read from the persistent `nbs_state` store in
 # `net.nbs` order (matching `_make_context`'s state layout and `_build_nbs_plan`'s
 # state_base offsets).  A placement not yet in the store starts empty (zeros).
@@ -197,13 +190,10 @@ function _build_dyn_networks(tstruct, dyn_traps, culverts, full_traps, cur_amoun
                              rateinfo, infiltration, z_vol_tables, cur_time, endtime,
                              nbs_placements = DynNBSPlacement[],
                              nbs_state = Dict{Int,Vector{Float64}}())
-    nbs_objs = _nbs_elements(nbs_placements)
-    seeds    = _dyn_seeds(tstruct, dyn_traps, culverts)
-    (isempty(seeds) && isempty(nbs_objs)) &&
-        return (DynNetworkContext[], Set{Int}(), Set{Int}())
+    seeds = _dyn_seeds(tstruct, dyn_traps, culverts)
+    isempty(seeds) && return (DynNetworkContext[], Set{Int}(), Set{Int}())
 
-    # Returns a vector of DynNetwork (NBS re-emit targets pull in their downstream).
-    components = setup_network(tstruct, seeds, full_traps; culverts=culverts, nbs=nbs_objs)
+    components = setup_network(tstruct, seeds, full_traps; culverts=culverts)
 
     contexts = DynNetworkContext[]
     for net in components
@@ -471,7 +461,7 @@ function _touch_networks!(net_contexts, changetimeest, sgraph, tstruct, dyn_trap
     # trap touched are retraced); the culvert endpoint-expansion and culvert-aware merge run
     # on top, exactly as in `setup_network`.
     components  = setup_network_cached(tstruct, seeds, full_traps, subnet_cache;
-                                       culverts=culverts, nbs=_nbs_elements(nbs_placements))
+                                       culverts=culverts)
     new_covered = _covered_of(components, tstruct)
     old_covered != new_covered &&
         _reconcile_spillgraph!(sgraph, rateinfo, filled_traps, new_covered, tstruct)

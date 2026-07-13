@@ -137,14 +137,33 @@ path to retire: `elements.jl` `setup_network` (L302), `setup_network_cached` (L4
 - [x] A4 `[test]` package precompiles clean; `dynamic_membership_test.jl` green (280/280).
 
 ### Phase B — distributor: retire `DynNBS` (geometric NBS coupling)
-- [ ] B1 `[inv]` enumerate every `DynNBS` use (solver `NBSPlan`/`_build_nbs_plan`/`_nbs_elements`,
-  `network_context._nbs_elements`/`_nbs_layer_block`/`_store_nbs_state!`, `build_network`).
-- [ ] B2 `[code]` rework `_build_nbs_plan` (+ helpers) to key off `DynNetwork.nbs ::
-  Vector{DynNBSPlacement}` and footprint geometry directly — no `DynNBS.placement_ix` handle.
-- [ ] B3 `[code]` delete `DynNBS` and `_nbs_elements`; `DynNBSPlacement` is the sole NBS type
-  end-to-end. Fix `DynNetwork` constructors / call sites.
-- [ ] B4 `[test]` NBS overlay + submergence solver tests still pass (port `nbs_dynamic_test.jl`
-  cases as needed).
+- [x] B1 `[inv]` enumerated `DynNBS` uses — solver (`_build_nbs_plan`, `NBSPlan`), the OLD
+  `elements.jl` path (`_expand_with_nbs`/`_nbs_union_edges`/`_build_component`/`_merge_networks`),
+  `network_context._nbs_elements`, tests. Found the layer half-migrated: `DynNetwork.nbs` is
+  `Vector{DynNBSPlacement}` but the solver read `nb.placement_ix` — a `DynNBS` field it doesn't
+  have (broken). See `agent/networksolver_callgraph.md`.
+- [x] B2 `[code]` reworked `_build_nbs_plan` (+ `_build_rate_params` call) to read
+  `nb.system.layers` and `nb.id` straight off `net.nbs`; `setup_network` now stamps
+  `nb.id = position` (the `nbs_inflow` key). Verified on a hand-built net + solve: NBS layer
+  fills from the id-keyed `nbs_inflow`, no `placement_ix` error.
+- [x] B3 `[code]` deleted `DynNBS` (struct + docstring) and `_nbs_elements`; `DynNBSPlacement`
+  is now the sole NBS type end-to-end. Gutted the OLD-path NBS wiring: `_expand_with_nbs`,
+  `_nbs_union_edges`, and the `nbs` args on `setup_network` / `setup_network_cached` /
+  `_merge_networks` / `_components` / `_build_component` all reverted to culvert-only forms;
+  `DynNetwork`'s 3-arg compat ctor now defaults to `DynNBSPlacement[]`. Context call sites
+  dropped `nbs=`. Removed the DynNBS-dependent testsets from `nbs_overlay_test.jl` (kept the
+  two live ones — watercourses footprint-sink + terrain exit weights) and deleted
+  `nbs_dynamic_test.jl`. Module loads; membership + overlay suites 303/303.
+- [x] B4 `[test]` NBS end-to-end verified: over a footprint sweep, `setup_network(...; nbs=…)`
+  builds NBS-carrying components and `solveDynNetwork!` runs (13/13 solved, NBS layer fills
+  from the id-keyed `nbs_inflow`). No committed test yet (a proper one needs a curated
+  coupling+draining footprint) — add with C's driver tests.
+
+**Fixed during B2 — three pre-existing new-path NBS *build* bugs** (the NBS build had never run
+with a real placement): (1) `build_network._downstream_cell` was shadowed by `utils.jl`'s
+more-specific typed `_downstream_cell(::SimpleDiGraph,::Int)` (returns `(cell, terminus)`) —
+deleted the duplicate, use the canonical one; (2) `Vector(::Set)` → `collect`; (3)
+`inv_flow[cell]` KeyError → `get(…, Int[])`. `setup_network` now builds NBS components cleanly.
 
 ### Phase C — new network driver (replaces `network_context.jl`'s structural core)
 - [ ] C1 `[code]` `_state_for(net, vol_by_trapix, seed0)`: build a component's `state` vector in

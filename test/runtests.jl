@@ -5,12 +5,11 @@ include("basicTestFuns.jl")
 include("watercourses_test.jl")
 include("dynamics_test.jl")
 include("dynamic_membership_test.jl")  # grow/detach/fusion + apply_fill!/apply_unfill!/apply_empty!
-include("nbs_overlay_test.jl")   # stage B1: footprint-as-sink overlay in watercourses
+include("nbs_overlay_test.jl")   # NBS footprint-as-sink overlay + terrain exit weights
 # Old carve-based NBS tests disabled: the integration is being re-architected as a
 # dynamic overlay (agent/NBS_OPTION1_OVERLAY_PLAN.md).  Their replacements land as
 # the B/C stages add the network element + submergence.
 # include("nbs_test.jl")
-# include("nbs_dynamic_test.jl")
 
 
 surf1_file = joinpath(artifact"swim_testdata", "data", "small", "mini.txt")

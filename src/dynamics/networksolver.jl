@@ -651,7 +651,7 @@ RouteScratch(nt::Int, np::Int, ncv::Int, nnbs::Int = 0) =
 # ============================================================================
 # NBS overlay routing plan.
 #
-# An NBS overlay element (see `DynNBS`) carries a vertical stack of storage layers
+# An NBS overlay element (a `DynNBSPlacement`) carries a vertical stack of storage layers
 # whose state lives in the solver's ODE vector, appended after the `nt` trap states.
 # Its topmost layer is fed by the static footprint capture (`nbs_inflow`, the sink-
 # overlay tally from `watercourses`); each lower layer is fed by the infiltration of
@@ -672,8 +672,8 @@ struct NBSLayerParams
 end
 
 struct NBSPlan
-    placement_ix    ::Vector{Int}         # per NBS: index into the caller's DynNBSPlacement vector
-                                          # (the key for the static nbs_inflow feed)
+    placement_ix    ::Vector{Int}         # per NBS: its DynNBSPlacement `id` (== position in the
+                                          # caller's vector); the key into `external_nbs_inflow`
     state_base      ::Vector{Int}         # per NBS: 0-based offset of its layer block, after the nt trap states
     layers          ::Vector{Vector{NBSLayerParams}}
     layer_slots     ::Vector{Vector{Vector{Tuple{Int,Float64}}}}  # per NBS, per layer: (slot, weight) deliveries
@@ -702,14 +702,14 @@ _nbs_saturated_draw(lp::NBSLayerParams) =
 # Number of appended NBS layer states for a rate-params object (0 when no NBS).
 _nbs_state_count(p) = p.nbsplan === nothing ? 0 : p.nbsplan.nlayer_total
 
-# Build the NBS routing plan for `net` (nothing when it has no NBS elements).
-# `placements` is the caller's `DynNBSPlacement` vector (indexed by `DynNBS.placement_ix`),
-# supplying the layer storage model.  Each outflowing layer's overflow is delivered to
+# Build the NBS routing plan for `net` (nothing when it has no NBS elements).  Reads the
+# `DynNBSPlacement`s straight off `net.nbs` — each supplies its own layer model (`nb.system`)
+# and its stable inflow key (`nb.id`).  Each outflowing layer's overflow is delivered to
 # resolved landing cells: the terrain exit boundary (top `n_terrain` layers, weighted by
 # `_nbs_exit_weights`) or a piped outlet (lower layers, weight 1).  A landing owned by an
 # in-network path gets a `(position, slot)` event; one owned by a trap gets a trap-outlet
 # slot; a landing off the network or off the domain is dropped (its water exits).
-function _build_nbs_plan(net::DynNetwork, tstruct, placements::Vector{DynNBSPlacement},
+function _build_nbs_plan(net::DynNetwork, tstruct,
                          submerged_of::Dict{Int,Bool} = Dict{Int,Bool}())
     isempty(net.nbs) && return nothing
     LI = LinearIndices(tstruct.topography)
@@ -755,9 +755,9 @@ function _build_nbs_plan(net::DynNetwork, tstruct, placements::Vector{DynNBSPlac
     end
 
     for nb in net.nbs
-        lyrs   = placements[nb.placement_ix].system.layers
+        lyrs   = nb.system.layers
         A_foot = Float64(length(nb.footprint))   # @@@ 1 m^2/cell; use real cell area when available
-        push!(placement_ix, nb.placement_ix)
+        push!(placement_ix, nb.id)               # nb.id is the key into external_nbs_inflow
         push!(state_base, base)
         push!(layers, NBSLayerParams[
             NBSLayerParams(float(L.Kout), float(L.nout), float(L.Smax),
@@ -791,7 +791,7 @@ function _build_nbs_plan(net::DynNetwork, tstruct, placements::Vector{DynNBSPlac
         push!(n_terrain,       nb.n_terrain)
         push!(containing_trap, get(trap_cell, lowcell, 0))
         push!(z_sub,           Float64(tstruct.topography[lowcell]))
-        push!(submerged,       get(submerged_of, nb.placement_ix, false))
+        push!(submerged,       get(submerged_of, nb.id, false))
 
         base += length(lyrs)
     end
@@ -862,6 +862,8 @@ function _build_rate_params(tstruct::TrapStructure,
                             infiltration::AbstractMatrix{<:Real},
                             external_inflow::AbstractVector{<:Real};
                             path_inflow = nothing,
+                            # @@@ nbs_placements is unused since B2 (net.nbs carries the
+                            #     DynNBSPlacements); kept until the old context stops passing it (gate C).
                             nbs_placements::Vector{DynNBSPlacement} = DynNBSPlacement[],
                             nbs_inflow::AbstractVector{<:Real} = Float64[],
                             nbs_submerged::Dict{Int,Bool} = Dict{Int,Bool}(),
@@ -876,7 +878,7 @@ function _build_rate_params(tstruct::TrapStructure,
     prefix          = [_infil_prefix(ci) for ci in cell_infil]
     sorted_tribs    = [sort([(j, m) for (m, j) in fp.merges]) for fp in net.flow_paths]
     cvplan  = isempty(net.culverts) ? nothing : _build_culvert_plan(net, tstruct)
-    nbsplan = isempty(net.nbs)      ? nothing : _build_nbs_plan(net, tstruct, nbs_placements, nbs_submerged)
+    nbsplan = isempty(net.nbs)      ? nothing : _build_nbs_plan(net, tstruct, nbs_submerged)
     # The event-driven router path is needed only for culverts (inlet draw / outlet
     # deliver at exact cell positions) or NBS overflow delivery at exit/outlet cells;
     # a net with neither needs no path events.

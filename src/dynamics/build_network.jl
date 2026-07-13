@@ -16,6 +16,10 @@ function setup_network(tstruct, full_traps;
     # Input validation (no culverts or dyn_coords inside NBS footprints)
     _validate_network_inputs(tstruct, dyn_coords, culverts, nbs)
 
+    # Stamp each placement's stable id = its position in this nbs vector, so the solver keys
+    # the static footprint capture (`nbs_inflow`, aligned to the same order) by `nb.id`.
+    for (i, nb) in enumerate(nbs); nb.id = i; end
+
     # Compute inflow and outflow cells for each NBS footprint
     _compute_nbs_inflow_outflow_cells!(nbs, tstruct)
     
@@ -258,19 +262,12 @@ function _validate_network_inputs(tstruct, dyn_coords, culverts, nbs)
 end
 
 # ----------------------------------------------------------------------------
-function _downstream_cell(flowgraph, ix)
-    ds = Graphs.outneighbors(flowgraph, ix)
-    @assert length(ds) <= 1
-    return isempty(ds) ? -1 : ds[1]
-end
-
-# ----------------------------------------------------------------------------
 function _footprint_outflow_cells(tstruct, footprint::Vector{Int})
     flowgraph = tstruct.flowgraph
     outflow_cells = Set{Int}()
     for cell in footprint
-        ds = _downstream_cell(flowgraph, cell)
-        if ds != -1 && !(ds in footprint)
+        ds, terminus = _downstream_cell(flowgraph, cell)   # utils.jl: (downstream cell, is-terminus?)
+        if !terminus && !(ds in footprint)
             push!(outflow_cells, ds)
         end
     end
@@ -280,13 +277,13 @@ function _footprint_outflow_cells(tstruct, footprint::Vector{Int})
     if isempty(outflow_cells)
         @warn "NBS placement footprint has no outflow cells."
     end
-    return Vector(outflow_cells)
+    return collect(outflow_cells)
 end
 
 # ----------------------------------------------------------------------------
 function _footprint_inflow_cells(inv_flow::Dict{Int, Vector{Int}},
                                  footprint::Vector{Int})
-    all_inflow_cells = vcat([inv_flow[cell] for cell in footprint]...)
-    return Vector(setdiff(Set(all_inflow_cells), Set(footprint)))
+    all_inflow_cells = vcat([get(inv_flow, cell, Int[]) for cell in footprint]...)
+    return collect(setdiff(Set(all_inflow_cells), Set(footprint)))
 end
 
