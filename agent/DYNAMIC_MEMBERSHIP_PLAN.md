@@ -244,9 +244,10 @@ does not yet use the new `build_network` representation:
 
 Build-time split (`network_utils.jl`) is unaffected.
 
-## 9. Verification *(done for Phase 1 + §6)*
+## 9. Verification — committed as `test/dynamic_membership_test.jl`
 
-Isolated harness (as for the split tests): chain and diamond `DynNetwork`s.
+The tests below (280 assertions, all passing) are committed; they inject `build_network.jl`
+until it joins the module.  Isolated harness: chain and diamond `DynNetwork`s.
 - `init_in_counts!` gives expected per-trap counts.
 - `detach_spill!` on a mid trap detaches exactly the traps that lose all feeds;
   survivors keep `in_count > 0`; a seed-anchored trap (counted via its connector)
