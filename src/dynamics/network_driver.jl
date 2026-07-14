@@ -1,11 +1,8 @@
 # ----------------------------------------------------------------------------
-# The incremental network driver: builds the components once per weather period, then per
-# event mutates the live `Vector{DynNetwork}` in place via `apply_fill!` / `apply_unfill!`
-# / `apply_empty!` rather than retracing the whole structure.
-#
-# It owns the committed per-node volumes (`vol_by_trapix`) and the persistent NBS layer
-# store (`nbs_state`) as the source of truth that survives structural change; contexts
-# (holding the solver `state`) are rebuilt from them after every mutation.
+# The incremental network driver: builds the components once per weather period, then mutates
+# the live `Vector{DynNetwork}` in place per event (`apply_fill!`/`apply_unfill!`/`apply_empty!`)
+# instead of retracing.  `vol_by_trapix` (committed node volumes) and `nbs_state` (NBS layers)
+# are the source of truth surviving structural change; contexts are rebuilt from them.
 # ----------------------------------------------------------------------------
 
 mutable struct NetworkDriver
@@ -19,9 +16,8 @@ mutable struct NetworkDriver
 end
 
 # ----------------------------------------------------------------------------
-# Build the driver for one weather period: trace the components, seed committed volumes
-# from `cur_amounts`, make one context per component and predict its next event.  Returns
-# the NetworkDriver, its contexts carrying the initial predictions.
+# Build the driver for one weather period: trace the components, seed committed volumes from
+# `cur_amounts`, and build + predict one context per component.
 function build_network_driver(tstruct, dyn_coords, culverts, full_traps, cur_amounts,
                               rateinfo, infiltration, z_vol_tables, cur_time, endtime;
                               nbs_placements = DynNBSPlacement[],
@@ -29,8 +25,7 @@ function build_network_driver(tstruct, dyn_coords, culverts, full_traps, cur_amo
     comps = setup_network(tstruct, full_traps;
                           dyn_coords = dyn_coords, culverts = culverts, nbs = nbs_placements)
 
-    # committed volume of every node, read from the caller's per-trap amounts (all current
-    # at build time, so no projection is needed here — see `_driver_state0`)
+    # committed volume of every node from the caller's amounts (all current at build, no projection)
     vol = Dict{Int,Float64}()
     for net in comps, t in net.traps
         vol[t.trap_ix] = cur_amounts[t.trap_ix].amount
@@ -62,30 +57,24 @@ function _driver_state0(driver::NetworkDriver, tstruct, rateinfo, cur_amounts, f
     end
 end
 
-# Rebuild every context from the current `comps` and committed volumes, then predict each
-# next event.  Called after build and after any structural mutation: a context is a pure
-# function of its component + the committed volumes, so a full rebuild is correct (and
-# cheap — one solve per component).  `full_set`/`cur_amounts` feed the `state0` seed rule.
+# Rebuild every context from the current `comps` and committed volumes and re-predict.  A
+# context is a pure function of its component + committed volumes, so a full rebuild is correct.
 function _rebuild_contexts!(driver::NetworkDriver, tstruct, rateinfo, infiltration,
                             z_vol_tables, cur_amounts, full_set, cur_time, endtime)
 
-    # initial state rule for every trap in the current component set, used by `_make_context`
     state0 = _driver_state0(driver, tstruct, rateinfo, cur_amounts, full_set,
                             cur_time, z_vol_tables)
     driver.contexts = DynNetworkContext[]
     for net in driver.comps
         ctx = _make_context(net, tstruct, rateinfo, state0, cur_time, driver.nbs_state)
-
-        # sets `ctx.next_event` to the earliest predicted event for this component, or :none
         _predict_network!(ctx, tstruct, infiltration, z_vol_tables, endtime)
         push!(driver.contexts, ctx)
     end
     return driver
 end
 
-# The earliest predicted event across all components, as `(ctx_index, event)` where
-# `event` is the context's `next_event` NamedTuple (`time`, `trap`, `kind`).  Returns
-# `nothing` when no component predicts a real event (all `:none`).
+# The earliest predicted event across all components as `(ctx_index, next_event)`, or `nothing`
+# when every component predicts `:none`.
 function _driver_next_event(driver::NetworkDriver)
     best_i = 0
     best_t = Inf
@@ -101,9 +90,8 @@ function _driver_next_event(driver::NetworkDriver)
     return (best_i, driver.contexts[best_i].next_event)
 end
 
-# Read every committed context back into the persistent stores: node volumes into
-# `vol_by_trapix`, NBS layer states into `nbs_state`.  Called after committing all
-# contexts to the event time, so the stores survive the structural mutation that follows.
+# Read every committed context back into the persistent stores (node volumes -> `vol_by_trapix`,
+# NBS layers -> `nbs_state`), so they survive the structural mutation that follows.
 function _harvest!(driver::NetworkDriver)
     for ctx in driver.contexts
         for (i, g) in enumerate(ctx.global_ix)
@@ -116,11 +104,9 @@ end
 
 # ----------------------------------------------------------------------------
 # Advance to the earliest predicted event, apply its structural transition to the live
-# components, hand off state, and rebuild the contexts on the mutated set.  `filled_traps`
-# is the caller's authoritative fill mask (mutated here to match the  fired event);
-# `cur_amounts` seeds the projection for any newly-absorbed trap.  Returns the  fired event
-# as `(; time, trap, kind, migrated)` (with the migrated `trap_ix` set), or `nothing` when
-# no event falls before `endtime`.
+# components, hand off state, and rebuild the contexts.  Mutates `filled_traps` to match the
+# fired event; `cur_amounts` seeds any newly-absorbed trap.  Returns the fired event
+# `(; time, trap, kind, migrated)`, or `nothing` if none falls before `endtime`.
 function step_network_driver!(driver::NetworkDriver, tstruct, rateinfo, infiltration,
                               z_vol_tables, filled_traps, cur_amounts, endtime)
     sel = _driver_next_event(driver)
@@ -129,17 +115,15 @@ function step_network_driver!(driver::NetworkDriver, tstruct, rateinfo, infiltra
     T = ev.time
     T >= endtime && return nothing        # beyond the period boundary — finalize handles it
 
-    # commit EVERY context to T under its cached inflow BEFORE the structural change; T is
-    # the earliest event, so this advance is event-free for the others and order-independent.
-    # Harvest the committed volumes / NBS states into the driver stores.
+    # commit EVERY context to T under its cached inflow before the structural change; T is the
+    # earliest event, so the advance is event-free and order-independent for the others
     for ctx in driver.contexts
         _commit_network!(ctx, tstruct, infiltration, z_vol_tables, T)
     end
     driver.last_time = T
     _harvest!(driver)
 
-    # Apply the  fired transition: update `filled_traps`, clamp the committed volumes per the
-    # solver protocol, and mutate the component topology via the incremental membership layer.
+    # apply the fired transition: update filled_traps, clamp committed volumes, mutate topology
     trap     = ev.trap
     migrated = Int[]
     if ev.kind == :fill
@@ -151,9 +135,8 @@ function step_network_driver!(driver::NetworkDriver, tstruct, rateinfo, infiltra
         driver.vol_by_trapix[trap] = prevfloat(_own_capacity(tstruct, trap))
         migrated = apply_unfill!(driver.comps, tstruct, trap)
     elseif ev.kind == :empty
-        # De-subsumption: the parent drains to its floor, exposing its immediate children.
-        # They MUST leave `full_traps` before the regrow, or it re-subsumes them at V=0 and
-        # :empty re-fires forever.
+        # de-subsumption: parent drains to its floor, exposing its children.  They MUST leave
+        # full_traps before the regrow, or it re-subsumes them at V=0 and :empty re-fires forever.
         for c in subtrapsof(tstruct, trap)
             filled_traps[c] = false
             driver.vol_by_trapix[c] = prevfloat(_own_capacity(tstruct, c))
@@ -163,62 +146,56 @@ function step_network_driver!(driver::NetworkDriver, tstruct, rateinfo, infiltra
         migrated = apply_empty!(driver.comps, tstruct, findall(filled_traps), trap)
     end
 
-    # rebuild the contexts off the MUTATED component set (coverage/inflow read fresh, not
-    # diffed); newly-grown traps are seeded via the projection rule in `_driver_state0`.
+    # rebuild the contexts off the mutated component set (coverage/inflow read fresh)
     _rebuild_contexts!(driver, tstruct, rateinfo, infiltration, z_vol_tables,
                        cur_amounts, Set(findall(filled_traps)), T, endtime)
     return (; time = T, trap = trap, kind = ev.kind, migrated = migrated)
 end
 
 # ----------------------------------------------------------------------------
-# Period-boundary finalize: advance each context to `endtime` and settle the node volumes
-# (and subsumed-descendant capacities) back into `cur_amounts`, carrying NBS layer storage
-# into the next period.
+# Period-boundary finalize: advance each context to `endtime` and settle node volumes (and
+# subsumed capacities) into `cur_amounts`, carrying NBS layer storage into the next period.
 finalize_network_driver!(driver::NetworkDriver, cur_amounts, tstruct, infiltration,
                          z_vol_tables, endtime) =
     _finalize_networks!(cur_amounts, driver.contexts, tstruct, infiltration,
                         z_vol_tables, driver.last_time, endtime, driver.nbs_state)
 
 # ----------------------------------------------------------------------------
-# The `fill_sequence` touch entry: apply this event's  fired transitions to the network.
-# Commit under the cached inflow, mutate topology via `apply_*`, reconcile the spillgraph to
-# the new coverage, then rebuild the contexts reading the reconciled inflow.  `filled_traps`
-# is ALREADY updated by the caller ( fired traps flipped, `:empty` children exposed).
-# Returns the refreshed `(net_trap_set, net_covered_set)`; the committed node volumes live in
-# `driver.vol_by_trapix` and the contexts in `driver.contexts`.
+# The `fill_sequence` touch entry: commit under cached inflow, apply the fired transitions via
+# `apply_*`, reconcile the spillgraph to the new coverage, then rebuild + re-predict the
+# contexts.  `filled_traps` is ALREADY updated by the caller.  Returns the refreshed
+# `(net_trap_set, net_covered_set)`; committed volumes live in `driver.vol_by_trapix`.
 function _touch_networks_driver!(driver::NetworkDriver, changetimeest, sgraph, tstruct,
                                  filled_traps, cur_amounts, rateinfo, z_vol_tables,
                                  infiltration, fill_updates, old_covered, cur_time, endtime)
     isempty(driver.contexts) && return Set{Int}(), Set{Int}()
 
-    # which node traps  fired this event, and how (captured from predictions before mutation)
-     fired = _capture_fired_kinds(driver.contexts, fill_updates)
+    # which node traps fired, and how (captured before the mutation below)
+    fired = _capture_fired_kinds(driver.contexts, fill_updates)
 
-    # commit every context to cur_time under its cached inflow, harvest into the stores, then
-    # overlay the  fired-trap boundary values (:unspill sets prevfloat(C); :empty sets parent 0
-    # and children prevfloat(C); :fill sets C via the full-trap branch of the rebuild seed rule)
+    # commit every context to cur_time under cached inflow, harvest, then overlay the fired-trap
+    # boundary values the solver expects
     for ctx in driver.contexts
         _commit_network!(ctx, tstruct, infiltration, z_vol_tables, cur_time)
     end
     driver.last_time = cur_time
     _harvest!(driver)
-    # set traps that emptied/unfilled and their children to the exact values that the solver expects
-    _apply_fired_boundaries!(driver.vol_by_trapix,  fired, tstruct)
+    _apply_fired_boundaries!(driver.vol_by_trapix, fired, tstruct)
 
-    # apply each  fired structural transition to the live components
+    # apply each fired structural transition to the live components
     full_traps = findall(filled_traps)
-    for (ft, k) in  fired
+    for (ft, k) in fired
         k == :fill    ? apply_fill!(driver.comps, tstruct, full_traps, ft) :
         k == :unspill ? apply_unfill!(driver.comps, tstruct, ft)           :
         k == :empty   ? apply_empty!(driver.comps, tstruct, full_traps, ft) : nothing
     end
 
-    # reconcile the spillgraph/rateinfo to the new coverage BEFORE the rebuild reads inflow
+    # reconcile the spillgraph/rateinfo to the new coverage before the rebuild reads inflow
     new_covered = _covered_of(driver.comps, tstruct)
     old_covered != new_covered &&
         _reconcile_spillgraph!(sgraph, rateinfo, filled_traps, new_covered, tstruct)
 
-    # rebuild the contexts off the mutated component set, predict fresh events, publish estimates
+    # rebuild the contexts off the mutated component set and re-predict
     _rebuild_contexts!(driver, tstruct, rateinfo, infiltration, z_vol_tables,
                        cur_amounts, Set(full_traps), cur_time, endtime)
     nts = _net_trap_set(driver.contexts)
