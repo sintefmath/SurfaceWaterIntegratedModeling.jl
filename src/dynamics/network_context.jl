@@ -38,27 +38,23 @@ mutable struct DynNetworkContext
 end
 
 # ----------------------------------------------------------------------------
-# Per-node external inflow: each node's sum of `trap_inflow` over its leaf
-# descendants (`lowest_subtraps_for[t]`, == [t] for a leaf).  Summed from the leaves,
-# not `getinflow(node)` directly, because `_reconcile_spillgraph!` withdraws covered
-# children's flow from the parent's `trap_inflow`, leaving it stale — leaf values stay current.
-function _external_inflow(net::DynNetwork, rateinfo, tstruct)
-    return Float64[sum(getinflow(rateinfo, leaf)
-                       for leaf in tstruct.lowest_subtraps_for[t.trap_ix])
-                   for t in net.traps]
-end
+# Each node's leaf spill regions (`lowest_subtraps_for[t]`, == [t] for a leaf), in
+# `net.traps` order.  Both the per-node `extern_inflow` and the flat `inflow_regions`
+# touch key are projections of this one relation, so the two stay in lock-step by
+# construction.
+_node_leaf_regions(net::DynNetwork, tstruct) =
+    [tstruct.lowest_subtraps_for[t.trap_ix] for t in net.traps]
 
-# The base spill regions whose `trap_inflow` feeds this network's external inflow: the
-# union over all nodes of their leaf descendants (a leaf trap and its spill region share
-# the same id).  Used for the touch test (a network is touched when one of these appears
-# in `getinflowupdates`).
-function _inflow_regions(net::DynNetwork, tstruct)
-    s = Set{Int}()
-    for t in net.traps
-        union!(s, tstruct.lowest_subtraps_for[t.trap_ix])
-    end
-    return s
-end
+# Per-node external inflow: each node's sum of `trap_inflow` over its leaf regions.  Summed
+# from the leaves, not `getinflow(node)` directly, because `_reconcile_spillgraph!` withdraws
+# covered children's flow from the parent's `trap_inflow`, leaving it stale — leaves stay current.
+_external_inflow(rateinfo, node_leaves) =
+    Float64[sum(getinflow(rateinfo, leaf) for leaf in leaves) for leaves in node_leaves]
+
+# The base spill regions feeding this network's external inflow: the union of the nodes' leaf
+# regions (a leaf trap and its spill region share the same id).  Used for the touch test (a
+# network is touched when one of these appears in `getinflowupdates`).
+_inflow_regions(node_leaves) = reduce(union!, node_leaves; init = Set{Int}())
 
 # All (transitive) sub-traps of `t`, walking the agglomeration hierarchy downward.
 function _descendants(tstruct, t::Int)
@@ -174,11 +170,14 @@ function _make_context(net::DynNetwork, tstruct, rateinfo, state0, cur_time,
     # storage carries across events and weather periods.
     state     = vcat(Float64[state0(g) for g in global_ix],
                      _nbs_layer_block(net, nbs_state))
+    # Both inflow fields are projections of the same per-node leaf-region relation (union of
+    # the regions vs. their per-node summed inflow), so compute that relation once.
+    node_leaves = _node_leaf_regions(net, tstruct)
     # Hold the oblivious runoff grid so the solver can build the NBS correction plan from it.
     return DynNetworkContext(net, state, global_ix,
-                             _inflow_regions(net, tstruct),
+                             _inflow_regions(node_leaves),
                              cur_time,
-                             _external_inflow(net, rateinfo, tstruct),
+                             _external_inflow(rateinfo, node_leaves),
                              rateinfo.runoff,
                              (; time = Inf, trap = 0, kind = :none))
 end
