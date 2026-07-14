@@ -586,70 +586,66 @@ end
 
 @testset "culvert_rate" begin
     A = pi * 0.5^2                       # r = 0.5 -> D = 1, A = pi/4
-    # steep drop: inlet invert 10 m above outlet, so outlet control never binds
-    steep = mock_ts([10.0 0.0])          # z[1,1]=10, z[1,2]=0
     cv = DynCulvert(c(1, 1), c(1, 2), 0.5, 0.6, 0.5, 1.0, 1.7)   # raw: Kf = 1.0
 
+    # steep drop (inlet invert 10 m above outlet, so outlet control never binds).
     # weir regime: inlet not submerged -> Q = Cw * D * H^1.5, inlet control governs
-    qw = culvert_rate(cv, steep; inlet_submerged = false, inlet_head = 0.5,
+    qw = culvert_rate(cv; inlet_invert = 10.0, outlet_invert = 0.0, inlet_submerged = false, inlet_head = 0.5,
                                  outlet_submerged = false, outlet_head = 0.0)
     @test qw ≈ 1.7 * 1.0 * 0.5^1.5 rtol = 1e-6
 
     # orifice regime: inlet submerged -> Q = Cd * A * sqrt(2 g H)
-    qo = culvert_rate(cv, steep; inlet_submerged = true, inlet_head = 2.0,
+    qo = culvert_rate(cv; inlet_invert = 10.0, outlet_invert = 0.0, inlet_submerged = true, inlet_head = 2.0,
                                  outlet_submerged = false, outlet_head = 0.0)
     @test qo ≈ 0.6 * A * sqrt(2 * 9.81 * 2.0) rtol = 1e-6
 
     # both submerged on flat terrain with small head difference -> outlet control
     # is the bottleneck and governs via the min().
-    flat = mock_ts([0.0 0.0])
-    qc = culvert_rate(cv, flat; inlet_submerged = true, inlet_head = 3.0,
+    qc = culvert_rate(cv; inlet_invert = 0.0, outlet_invert = 0.0, inlet_submerged = true, inlet_head = 3.0,
                                 outlet_submerged = true, outlet_head = 2.0)
     @test qc ≈ A * sqrt(2 * 9.81 * 1.0) / sqrt(1 + 0.5 + 1.0) rtol = 1e-6
     # and it is indeed the more restrictive of the two
     @test qc < 0.6 * A * sqrt(2 * 9.81 * 3.0)
 
     # free-outfall branch runs and stays bounded by inlet control
-    qf = culvert_rate(cv, flat; inlet_submerged = true, inlet_head = 1.0,
+    qf = culvert_rate(cv; inlet_invert = 0.0, outlet_invert = 0.0, inlet_submerged = true, inlet_head = 1.0,
                                 outlet_submerged = false, outlet_head = 0.0)
     @test 0.0 <= qf <= 0.6 * A * sqrt(2 * 9.81 * 1.0) + 1e-9
 
     # zero head -> zero flow
-    @test culvert_rate(cv, flat; inlet_submerged = false, inlet_head = 0.0,
+    @test culvert_rate(cv; inlet_invert = 0.0, outlet_invert = 0.0, inlet_submerged = false, inlet_head = 0.0,
                                  outlet_submerged = false, outlet_head = 0.0) == 0.0
 end
 
 @testset "culvert_rate reverse flow" begin
     A = pi * 0.5^2
-    flat = mock_ts([0.0 0.0])
     cv = DynCulvert(c(1, 1), c(1, 2), 0.5, 0.6, 0.5, 1.0, 1.7)   # Kf = 1.0
 
     # outlet pool higher than inlet pool: drowned.  Default (downhill-only) -> 0.
-    @test culvert_rate(cv, flat; inlet_submerged = true, inlet_head = 1.0,
+    @test culvert_rate(cv; inlet_invert = 0.0, outlet_invert = 0.0, inlet_submerged = true, inlet_head = 1.0,
                                  outlet_submerged = true, outlet_head = 3.0) == 0.0
 
     # same conditions with allow_reverse -> negative flow (outlet -> inlet),
     # governed here by outlet control on the reverse driving head dH = 3 - 1 = 2.
-    qr = culvert_rate(cv, flat; inlet_submerged = true, inlet_head = 1.0,
+    qr = culvert_rate(cv; inlet_invert = 0.0, outlet_invert = 0.0, inlet_submerged = true, inlet_head = 1.0,
                                 outlet_submerged = true, outlet_head = 3.0,
                                 allow_reverse = true)
     @test qr < 0
     @test qr ≈ -A * sqrt(2 * 9.81 * 2.0) / sqrt(1 + 0.5 + 1.0) rtol = 1e-6
 
     # symmetry: swapping the two heads flips the sign, same magnitude
-    qf = culvert_rate(cv, flat; inlet_submerged = true, inlet_head = 3.0,
+    qf = culvert_rate(cv; inlet_invert = 0.0, outlet_invert = 0.0, inlet_submerged = true, inlet_head = 3.0,
                                 outlet_submerged = true, outlet_head = 1.0,
                                 allow_reverse = true)
     @test qf ≈ -qr rtol = 1e-6
 
     # a forward-flow case is unchanged by allow_reverse
-    @test culvert_rate(cv, flat; inlet_submerged = true, inlet_head = 3.0,
+    @test culvert_rate(cv; inlet_invert = 0.0, outlet_invert = 0.0, inlet_submerged = true, inlet_head = 3.0,
                                  outlet_submerged = true, outlet_head = 1.0) ≈ qf rtol = 1e-6
 end
 
 @testset "culvert_rate: partial-depth tailwater & reverse" begin
     A = pi * 0.5^2
-    flat = mock_ts([0.0 0.0])
     cv = DynCulvert(c(1, 1), c(1, 2), 0.5, 0.6, 0.5, 1.0, 1.7)   # D=1, Kf=1.0
     # outlet-control rate for a real tailwater giving dH = 0.10 m
     q_dH(dH) = A * sqrt(2 * 9.81 * dH) / sqrt(1 + 0.5 + 1.0)
@@ -658,9 +654,9 @@ end
     # downstream pool -- not a free outfall -- sets the tailwater, so the driving
     # head is the real surface difference (0.95 - 0.85 = 0.10), and allow_reverse
     # must NOT change a forward-dominant result (it used to: Q_fwd - Q_rev bug).
-    nr_off = culvert_rate(cv, flat; inlet_submerged = false, inlet_head = 0.95,
+    nr_off = culvert_rate(cv; inlet_invert = 0.0, outlet_invert = 0.0, inlet_submerged = false, inlet_head = 0.95,
                                     outlet_submerged = false, outlet_head = 0.85)
-    nr_on  = culvert_rate(cv, flat; inlet_submerged = false, inlet_head = 0.95,
+    nr_on  = culvert_rate(cv; inlet_invert = 0.0, outlet_invert = 0.0, inlet_submerged = false, inlet_head = 0.95,
                                     outlet_submerged = false, outlet_head = 0.85,
                                     allow_reverse = true)
     @test nr_off ≈ q_dH(0.10) rtol = 1e-6     # real tailwater, not free outfall
@@ -668,9 +664,9 @@ end
 
     # outlet pool higher, neither submerged: downhill-only drowns (0), reverse
     # gives the genuine outlet->inlet flow as a negative, symmetric to nr_off.
-    @test culvert_rate(cv, flat; inlet_submerged = false, inlet_head = 0.85,
+    @test culvert_rate(cv; inlet_invert = 0.0, outlet_invert = 0.0, inlet_submerged = false, inlet_head = 0.85,
                                  outlet_submerged = false, outlet_head = 0.95) == 0.0
-    rev = culvert_rate(cv, flat; inlet_submerged = false, inlet_head = 0.85,
+    rev = culvert_rate(cv; inlet_invert = 0.0, outlet_invert = 0.0, inlet_submerged = false, inlet_head = 0.85,
                                  outlet_submerged = false, outlet_head = 0.95,
                                  allow_reverse = true)
     @test rev ≈ -q_dH(0.10) rtol = 1e-6
@@ -689,7 +685,7 @@ end
                                   Vector{Float64}[]; cvplan = plan, trap_level = levels)
 
     # trap 1 higher -> culvert flows 1 -> 2; drawn at inlet == delivered at outlet
-    Q = culvert_rate(cv, ts; inlet_submerged = true, inlet_head = 3.0,
+    Q = culvert_rate(cv; inlet_invert = 0.0, outlet_invert = 0.0, inlet_submerged = true, inlet_head = 3.0,
                      outlet_submerged = false, outlet_head = 0.0)
     @test Q > 0
     inflow = rf([3.0, 0.0])
@@ -719,7 +715,7 @@ end
     cellinfil = [[0.0, 0.0, 0.0]]                    # no path infiltration
 
     # capacity at the path endpoint (inlet head = D, outlet dry)
-    Q = culvert_rate(cv, ts; inlet_submerged = false, inlet_head = 1.0,
+    Q = culvert_rate(cv; inlet_invert = 0.0, outlet_invert = 0.0, inlet_submerged = false, inlet_head = 1.0,
                      outlet_submerged = false, outlet_head = 0.0)
     @test Q > 0
     rf(F) = SWIM._route_flow(net, [0.0], [false], [0.0], cellinfil;

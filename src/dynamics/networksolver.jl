@@ -34,12 +34,12 @@ and the state `V` ranges over `0 .. capacity`.
 - `v2z`: stored-volume -> water-level interpolation (see [`water_level`](@ref))
 """
 struct TrapGeometry
-    trap_ix::Int
-    capacity::Float64
-    footprint::Vector{Int}
-    bottom::Vector{Float64}
-    infil::Vector{Float64}
-    zmin::Float64
+    trap_ix::Int            # index of the trap in the TrapStructure
+    capacity::Float64       # own storage volume, net of subtraps
+    footprint::Vector{Int}  # linear indices of the footprint cells
+    bottom::Vector{Float64} # terrain bottom per footprint cell
+    infil::Vector{Float64}  # infiltration rate per footprint cell (0 where impermeable)
+    zmin::Float64           # lowest bottom elevation (level of an empty trap)
     v2z   # volume -> level map; untyped (perf is a later concern, correctness first)
 end
 
@@ -185,11 +185,12 @@ end
 # ----------------------------------------------------------------------------
 # Culvert routing data.  Each culvert's inlet/outlet is owned by a flow path or a trap
 # (resolved at construction).  `CulvertPlan` precomputes, per culvert, which kind owns each
-# endpoint and its local index, the barrel diameter, and the topography for invert lookups.
+# endpoint and its local index, the barrel diameter, and the two invert elevations.
 
 struct CulvertPlan
-    topo::AbstractMatrix          # tstruct.topography (invert elevations)
     diam::Vector{Float64}         # barrel diameter (2r) per culvert
+    inlet_invert::Vector{Float64} # terrain elevation at each culvert's inlet cell
+    outlet_invert::Vector{Float64}# terrain elevation at each culvert's outlet cell
     inlet_is_path::BitVector
     inlet_owner::Vector{Int}      # local path or trap index owning the inlet
     outlet_is_path::BitVector
@@ -198,7 +199,9 @@ end
 
 function _build_culvert_plan(net::DynNetwork, tstruct)
     nc   = length(net.culverts)
-    plan = CulvertPlan(tstruct.topography, [2 * cv.r for cv in net.culverts],
+    plan = CulvertPlan([2 * cv.r for cv in net.culverts],
+                       Float64[tstruct.topography[cv.inlet]  for cv in net.culverts],
+                       Float64[tstruct.topography[cv.outlet] for cv in net.culverts],
                        falses(nc), zeros(Int, nc), falses(nc), zeros(Int, nc))
     for (p, path) in enumerate(net.flow_paths)
         for (ci, _) in path.culvert_inlets;  plan.inlet_is_path[ci]  = true; plan.inlet_owner[ci]  = p; end
@@ -258,18 +261,18 @@ function _culvert_flow(plan::CulvertPlan, net::DynNetwork, ci::Int,
     if plan.inlet_is_path[ci]
         ih, isub = D, false
     else
-        ih   = max(trap_level[plan.inlet_owner[ci]] - plan.topo[cv.inlet], 0.0)
+        ih   = max(trap_level[plan.inlet_owner[ci]] - plan.inlet_invert[ci], 0.0)
         isub = ih >= D
     end
     if plan.outlet_is_path[ci]
         oh, osub = D, false
     else
-        oh   = max(trap_level[plan.outlet_owner[ci]] - plan.topo[cv.outlet], 0.0)
+        oh   = max(trap_level[plan.outlet_owner[ci]] - plan.outlet_invert[ci], 0.0)
         osub = oh >= D
     end
-    return culvert_rate(cv, (; topography = plan.topo);
-                        inlet_submerged = isub,  inlet_head  = ih,
-                        outlet_submerged = osub, outlet_head = oh,
+    return culvert_rate(cv;
+                        inlet_submerged = isub,  inlet_head  = ih,  inlet_invert  = plan.inlet_invert[ci],
+                        outlet_submerged = osub, outlet_head = oh,  outlet_invert = plan.outlet_invert[ci],
                         allow_reverse = false)
 end
 
@@ -652,17 +655,17 @@ end
 
 # ----------------------------------------------------------------------------
 struct DynNetworkRateParams
-    net::DynNetwork
-    geom::Vector{TrapGeometry}
-    external_inflow::Vector{Float64}
-    external_path_inflow::Vector{Float64}
-    footprint_infil::Vector{Float64}
-    path_infil_prefix::Vector{Vector{Float64}}
-    sorted_trib_info::Vector{Vector{Tuple{Int,Int}}}
-    order::Vector{Int}
-    merge_target::Vector{Int}
-    cvplan::Union{CulvertPlan,Nothing}   # culvert routing data, or nothing if none
-    path_events::Union{Vector{Vector{Tuple{Int,Symbol,Int}}},Nothing}  # per-path event templates
+    net::DynNetwork                       # The network being solved
+    geom::Vector{TrapGeometry}            # struct holding info about trap's geometry
+    external_inflow::Vector{Float64}      # constant inflow from terrain/weather per trap 
+    external_path_inflow::Vector{Float64} # constant inflow (rain) on flow path cells
+    footprint_infil::Vector{Float64}      # total footprint infiltration per trap (full trap loss)   
+    path_infil_prefix::Vector{Vector{Float64}} # `cumsum` of infiltration along each flow path's cells
+    sorted_trib_info::Vector{Vector{Tuple{Int,Int}}} # sorted tributaries per flow path
+    order::Vector{Int}                    # topological sort of the flowgraph 
+    merge_target::Vector{Int}             # path that each tributary feeds into (0 if none)
+    cvplan::Union{CulvertPlan,Nothing}    # key information per culvert for routing, or nothing if none
+    path_events::Union{Vector{Vector{Tuple{Int,Symbol,Int}}},Nothing}  # merges/culverts per path
     nbsplan::Union{NBSPlan,Nothing}      # NBS signed-correction data, or nothing if none
 end
 
@@ -1094,8 +1097,8 @@ function solveDynNetwork!(state::AbstractVector{Float64},
                           # step count vs 1e-8 on the culvert worst case (see PARITY_TOL in tests)
                           abstol = 1e-6, reltol = 1e-4,
                           zvt = nothing)
-
     nt = length(net.traps)
+    # Returns an (immutable) `DynNetworkRateParams` with all the static data the ODE needs
     p  = _build_rate_params(tstruct, net, infiltration, inflow;
                             path_inflow=path_inflow, runoff=runoff, zvt=zvt)
     @assert length(state) == nt + _nbs_state_count(p) """

@@ -12,24 +12,25 @@
 using SurfaceWaterIntegratedModeling
 import GLMakie
 
-# `culvert_rate` only reads `tstruct.topography`, so a NamedTuple is a fine stand-in.
-# A 1x2 grid with a small drop puts the inlet invert just above the outlet invert.
-# The drop is kept modest (1 m) on purpose: with a steep drop inlet control governs
-# regardless of tailwater and the two outlet conditions would plot identically.
-const _DROP_TS = (; topography = [1.0 0.0])   # z(inlet)=1 m, z(outlet)=0 m
+# A 1x2 grid with a small inlet-above-outlet drop, used by the `DynCulvert` constructor (for
+# the barrel length / Kf).  Kept modest (1 m) on purpose: with a steep drop inlet control
+# governs regardless of tailwater and the two outlet conditions would plot identically.
+const _DROP_TS = (; topography = [1.0 0.0])     # z(inlet)=1 m, z(outlet)=0 m
 const _INLET   = CartesianIndex(1, 1)
 const _OUTLET  = CartesianIndex(1, 2)
-const _TW_HIGH = 3.0                           # high tailwater for the submerged case
+const _INLET_INVERT  = _DROP_TS.topography[_INLET]    # 1 m
+const _OUTLET_INVERT = _DROP_TS.topography[_OUTLET]   # 0 m
+const _TW_HIGH       = 3.0                      # high tailwater for the submerged case
 
 # Sweep inlet head and return the rate for one outlet condition.  The inlet is
 # treated as submerged once the head reaches the barrel diameter (mimicking the
 # event the solver would raise), which is where weir flow gives way to orifice.
 function _rate_sweep(cv; outlet_submerged, outlet_head, heads, allow_reverse = false)
     D = 2 * cv.r
-    return [culvert_rate(cv, _DROP_TS;
-                         inlet_submerged  = h >= D, inlet_head = h,
+    return [culvert_rate(cv;
+                         inlet_submerged  = h >= D, inlet_head = h, inlet_invert = _INLET_INVERT,
                          outlet_submerged = outlet_submerged, outlet_head = outlet_head,
-                         allow_reverse = allow_reverse)
+                         outlet_invert = _OUTLET_INVERT, allow_reverse = allow_reverse)
             for h in heads]
 end
 

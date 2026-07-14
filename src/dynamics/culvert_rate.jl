@@ -58,14 +58,13 @@ function _directional_capacity(cv::DynCulvert,
 end
 
 """
-    culvert_rate(cv, tstruct;
-                 inlet_submerged,  inlet_head,
-                 outlet_submerged, outlet_head,
+    culvert_rate(cv;
+                 inlet_submerged,  inlet_head,  inlet_invert,
+                 outlet_submerged, outlet_head, outlet_invert,
                  allow_reverse = false) -> Float64
 
-Volumetric flow through culvert `cv` in m^3/s (SI), given the submergence state and
-water head (metres above the cell invert) at each end.  `tstruct` supplies the
-inlet/outlet invert elevations.
+Volumetric flow through culvert `cv` in m^3/s (SI), given the submergence state, water head
+(metres above the invert), and invert elevation at each end.
 
 A positive result is flow from the inlet to the outlet.  By default
 (`allow_reverse = false`) the culvert is downhill-only: if the outlet pool stands
@@ -81,14 +80,14 @@ bottleneck that physically governs.  See the module header for the assumptions.
     routing layer still assumes downhill flow (see `CLAUDE.md`/`AGENTS.md`).  Use
     `allow_reverse = true` only where the caller is prepared to handle it.
 """
-function culvert_rate(cv::DynCulvert, tstruct;
-                      inlet_submerged::Bool,  inlet_head::Real,
-                      outlet_submerged::Bool, outlet_head::Real,
+function culvert_rate(cv::DynCulvert;
+                      inlet_submerged::Bool,  inlet_head::Real,  inlet_invert::Real,
+                      outlet_submerged::Bool, outlet_head::Real, outlet_invert::Real,
                       allow_reverse::Bool = false)
     hi = max(float(inlet_head),  0.0)   # head above inlet invert
     ho = max(float(outlet_head), 0.0)   # head above outlet invert
-    z_in  = tstruct.topography[cv.inlet]
-    z_out = tstruct.topography[cv.outlet]
+    z_in  = float(inlet_invert)
+    z_out = float(outlet_invert)
 
     # Flow runs from the higher water surface to the lower one.  The downhill-only
     # default always treats the inlet as upstream; if the outlet pool is actually
