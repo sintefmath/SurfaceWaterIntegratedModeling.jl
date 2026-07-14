@@ -297,13 +297,11 @@ function _expand_empty_fill_updates(fill_updates, net_contexts, tstruct)
         ev.kind != :none && (kind_of[ev.trap] = ev.kind)
     end
     extra = IncrementalUpdate{Bool}[]
-    seen  = Set(u.index for u in fill_updates)
     for u in fill_updates
+        # an emptied network trap exposes its (subsumed) children as transitory traps
         (!u.value && get(kind_of, u.index, :none) == :empty) || continue
         for c in subtrapsof(tstruct, u.index)
-            c in seen && continue
             push!(extra, IncrementalUpdate{Bool}(c, false))
-            push!(seen, c)
         end
     end
     return isempty(extra) ? fill_updates : vcat(fill_updates, extra)
