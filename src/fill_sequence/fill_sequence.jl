@@ -3,13 +3,18 @@ using DifferentialEquations: solve, ODEProblem, VectorContinuousCallback, termin
 export fill_sequence
 
 """
-    fill_sequence(tstruct, weather_events, time_slack=0.0, infiltration=nothing, verbose=false)
+    fill_sequence(tstruct, weather_events; time_slack=0.0, infiltration=nothing,
+                  dyn_traps=Int[], culverts=DynCulvert[], nbs=DynNBSPlacement[], verbose=false)
 
 Compute the sequence of events that describes how water on the terrain evolves over time.
 
 For a given set of weather events, and a given terrain with associated trap structure,
 determine the sequence of events that describes how the flow and accumulation of water
 on the terrain changes over time.
+
+When any of `dyn_traps`, `culverts`, or `nbs` is supplied, the affected traps are solved
+as coupled multi-trap ODE networks (see `dynamics/`) rather than the constant-rate
+analytic path; the rest of the terrain is unaffected.
 
 Returns a `Vector{SpillEvent}` that expresses the discrete points in time
 when different traps fills/empties, and the resulting changes on the surface flow
@@ -22,12 +27,21 @@ patterns.
 - `time_slack::Real`: tolerance for when to merge events that are close to each other
                       in time.  Should be set to zero or a small number.
                       @@@ NB: Support for this currently unimplemented.
-- `infiltration::Union{Matrix{Real}, Nothing}`: 
+- `infiltration::Union{Matrix{Real}, Nothing}`:
                       grid of same shape as the terrain, giving the infiltration rate
-                      at each gridcell.
+                      at each gridcell.  NBS footprints are forced to zero infiltration
+                      (the layer model accounts for it instead).
+- `dyn_traps::Vector{Int}`: trap indices to solve as dynamic networks (e.g. traps whose
+                      inflow is coupled through culverts or NBS).
+- `culverts::Vector{DynCulvert}`: culverts linking cells across the terrain; both
+                      endpoints seed a dynamic network.
+- `nbs::Vector{DynNBSPlacement}`: nature-based solution placements.  Each applies a signed
+                      correction to the surface flow inside the network solver; the rest of
+                      the code is NBS-oblivious.
 - `verbose::Bool`: if `true`, dump progress information during computation
 
-See also [`TrapStructure`](@ref), [`WeatherEvent`](@ref), [`SpillEvent`](@ref)
+See also [`TrapStructure`](@ref), [`WeatherEvent`](@ref), [`SpillEvent`](@ref),
+[`DynCulvert`](@ref), [`DynNBSPlacement`](@ref)
 """
 function fill_sequence(tstruct::TrapStructure{<:Real},
             weather_events::Vector{WeatherEvent};
@@ -72,9 +86,8 @@ function fill_sequence(tstruct::TrapStructure{<:Real},
         # graph and new rain rate
         rateinfo = compute_flow(sgraph, we.rain_rate, infiltration, tstruct, verbose)
 
-        # build the dynamic networks for this weather period (§3) with the incremental
-        # membership driver; empty when no dyn_traps/culverts/nbs are supplied, in which
-        # case behaviour is unchanged.
+        # If there are any seeds for dynamic networks, build the supporting data
+        # structures for them now.
         driver = build_network_driver(tstruct,
                                       _dyn_seeds(tstruct, dyn_traps, DynCulvert[]),
                                       culverts, findall(filled_traps), cur_amounts,
