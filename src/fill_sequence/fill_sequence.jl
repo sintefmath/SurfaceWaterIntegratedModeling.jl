@@ -214,13 +214,19 @@ end
 function _collect_amount_updates(rateinfo, cur_amounts, filled_traps, tstruct, z_vol_tables,
                                  cur_time, fill_updates, driver, net_covered_set, old_covered,
                                  network_touched)
+
+    # amounts of non-network traps whose inflow changed
     amount_updates = _update_affected_amounts(rateinfo, cur_amounts, filled_traps, tstruct,
                                               z_vol_tables, cur_time, net_covered_set)
+    # a trap sits at its own capacity at the instant its fill-status flips; record it
+    # (network traps excluded — their amounts come from the network state below)
     append!(amount_updates,
             [IncrementalUpdate(tix, FilledAmount(tstruct.trapvolumes[tix] -
                 tstruct.subvolumes[tix], cur_time))
              for tix in [u.index for u in fill_updates]
              if tix ∉ net_covered_set && tix ∉ old_covered])
+
+    # update amounts of network traps if a network was touched
     if network_touched && !(isempty(net_covered_set) && isempty(old_covered))
         append!(amount_updates,
                 _network_amount_updates(driver.contexts, union(old_covered, net_covered_set),
