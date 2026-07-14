@@ -1161,6 +1161,25 @@ function _validate_network(tstruct::TrapStructure,
     end
 end
 
+# t=0 fast paths: an immediate event (no integration) when the entry state cannot be held,
+# else `nothing`.  A FULL trap already draining (du0<0) unspills; a parent at its floor (V==0)
+# with negative net inflow must expose its children now.  `du0`'s floor guard zeroes the rate
+# at V==0, so the parent check recomputes the unclamped net rate.
+function _t0_fast_path(V0, du0, p::DynNetworkRateParams, nreg::Int)
+    nt = length(p.geom)
+    for i in 1:nt
+        V0[i] == p.geom[i].capacity && du0[i] < 0.0 || continue
+        return (time = 0.0, trap = p.net.traps[i].trap_ix, kind = :unspill)
+    end
+    inflow0, _ = _routed_inflow(V0, p)
+    for i in 1:nt
+        (V0[i] == 0.0 && p.net.traps[i].trap_ix > nreg) || continue
+        inflow0[i] - wetted_infiltration(p.geom[i], 0.0) < 0.0 || continue
+        return (time = 0.0, trap = p.net.traps[i].trap_ix, kind = :empty)
+    end
+    return nothing
+end
+
 # ============================================================================
 # Driver: solveDynNetwork!.
 #
@@ -1247,10 +1266,8 @@ function solveDynNetwork!(state::AbstractVector{Float64},
                           tmax = Inf,
                           path_inflow = nothing,
                           runoff::Union{AbstractMatrix{<:Real},Nothing} = nothing,
-                          # Loosened from 1e-8: physical accuracy needs only ~mL (abstol, m^3)
-                          # and ~ms.  ~Halves the ODE step count on the culvert worst case;
-                          # fill-time drift vs the analytic path is ~3e-5 (tens of µs, far under
-                          # 1 ms).  See PARITY_TOL in test/dynamics_test.jl.
+                          # 1e-6 m^3 (~mL) / 1e-4: enough for physical accuracy, and ~halves the
+                          # step count vs 1e-8 on the culvert worst case (see PARITY_TOL in tests)
                           abstol = 1e-6, reltol = 1e-4,
                           zvt = nothing)
 
@@ -1264,63 +1281,34 @@ function solveDynNetwork!(state::AbstractVector{Float64},
 
     _validate_network(tstruct, net, V0, p.geom)
 
-    # Compute initial rates once: used for the t=0 fast-path checks.
+    # initial rates, for the t=0 fast-path checks
     du0 = similar(V0, Float64)
     dynNetworkRateFunction!(du0, V0, p, 0.0)
     nreg = numregions(tstruct)
 
-    # t=0 FULL→TRANSITORY fast path.  If any FULL trap already has du0 < 0 (net inflow
-    # below its footprint losses), it begins draining right now.  Return :unspill
-    # immediately without running the ODE.  `state` is left unchanged — the caller sets
-    # state[trap] = prevfloat(C) before the next call to make it TRANSITORY.
-    for i in 1:nt
-        V0[i] == p.geom[i].capacity && du0[i] < 0.0 || continue
-        return (time = 0.0, trap = net.traps[i].trap_ix, kind = :unspill)
-    end
+    # return an immediate event if the entry state cannot be held (state left for the caller)
+    ev0 = _t0_fast_path(V0, du0, p, nreg)
+    ev0 === nothing || return ev0
 
-    # t=0 parent-EMPTY fast path.  A parent node sitting at its floor (V == 0, its
-    # children submerged/full) whose net inflow is negative cannot keep that floor —
-    # its children must be exposed now, so report :empty immediately.  The floor guard
-    # zeroes `du0` at V == 0, so recompute the unclamped net rate here.
-    inflow0, _ = _routed_inflow(V0, p)
-    for i in 1:nt
-        (V0[i] == 0.0 && net.traps[i].trap_ix > nreg) || continue
-        inflow0[i] - wetted_infiltration(p.geom[i], 0.0) < 0.0 || continue
-        return (time = 0.0, trap = net.traps[i].trap_ix, kind = :empty)
-    end
-
-    # Zero/negative window: nothing to advance.  `state` is left unchanged (it already
-    # holds the volumes at the window's start) and no event is reported.
+    # empty window: nothing to advance
     tmax <= 0.0 && return (time = max(tmax, 0.0), trap = 0, kind = :none)
 
-    # Traps that evolve: everything that is not FULL.  Empty traps with zero initial
-    # inflow are included because inflow can start mid-integration (culverts, NBS
-    # overflow, ...) without a separate event.  Excluding them would leave such traps
-    # without a :fill callback and their volume could silently exceed capacity.
-    # FULL traps (V == C) are handled only by the :unspill callback.
+    # evolving = every non-FULL trap.  Empty/zero-inflow traps are included: their inflow can
+    # start mid-integration (culverts, NBS) and without a :fill callback V could exceed capacity.
     evolving = [i for i in 1:nt if V0[i] != p.geom[i].capacity]
 
-    # Steady-state test index set.  NBS layer states also evolve but never trigger a
-    # topology event, so they enter the steady test only (appended after the nt traps).
-    # Without NBS this is just `evolving`.
+    # NBS layer states evolve but never fire a topology event, so they join the steady test only
     ss_indices = p.nbsplan === nothing ? evolving :
         vcat(evolving, collect((nt + 1):(nt + p.nbsplan.nlayer_total)))
 
-    # Nothing evolves (no non-full trap and no NBS layer state): steady state.
+    # already steady: nothing evolving, or every evolving rate ~0
     isempty(ss_indices) && return (time = Inf, trap = 0, kind = :none)
-
-    # All evolving states at or near zero rate: steady state already.
-    # (abstol is a rate tolerance here, not a state classification guard.)
     all(abs(du0[i]) <= abstol for i in ss_indices) &&
         return (time = Inf, trap = 0, kind = :none)
 
-    # Integrate to the first topology-changing event or steady state.
-    # cb_topo (VectorContinuousCallback, LeftRootFind): topology events (:fill, :empty, :unspill).
-    # cb_ss   (DiscreteCallback): fires at the first accepted step where max|dV/dt| < abstol
-    #         across all evolving traps (and NBS layer states) — step-function infil means it
-    #         must check at accepted steps, not interpolated points.
-    # A trap-free (NBS-only) net has no topology events, so cb_topo is skipped to avoid a
-    # zero-length VectorContinuousCallback.
+    # cb_topo: topology events (:fill/:empty/:unspill).  cb_ss: steady state — a DiscreteCallback
+    # because step-function infil must be checked at accepted steps, not interpolated ones.  A
+    # trap-free NBS-only net has no topology events, so cb_topo is skipped.
     cb_ss = p.nbsplan === nothing ?
         _build_steadystate_callback(p, evolving, abstol, du0) :
         _build_steadystate_callback_nbs(p, ss_indices, abstol, du0)
@@ -1331,36 +1319,25 @@ function solveDynNetwork!(state::AbstractVector{Float64},
         cb_topo, event = _build_event_callback(p, evolving, V0, nreg)
         callback = CallbackSet(cb_topo, cb_ss)
     end
-    # Cap tmax at a large but finite value so DiffEq never receives Inf as a tspan
-    # endpoint (which triggers an internal range(t, Inf, n) that Julia rejects).  1e12
-    # is many orders of magnitude beyond any physical simulation horizon.
+    # finite cap so DiffEq never gets Inf as a tspan endpoint (its internal range(t,Inf,n) rejects it)
     tmax_ode = min(tmax, 1e12)
-    # Explicit `Tsit5`: the rate function is non-smooth (culvert regime switches + routing
-    # `min` are C0 kinks) but NOT stiff.  DiffEq's default auto-switcher misreads the kinks
-    # as stiffness, goes implicit, and pays for dense finite-diff Jacobians on the whole
-    # coupled system — ~4x slower on full-coverage+culvert, no accuracy gain.  Explicit just
-    # steps across the kinks and wins.
-    # @@@ If a genuinely stiff config appears (e.g. huge culvert draining a tiny trap),
-    #     revisit with an auto-switching solver + a sparse/colored Jacobian, not dense FD.
+    # Explicit Tsit5: the RHS has C0 kinks (culvert regime switches, routing `min`) but isn't
+    # stiff.  The auto-switcher misreads the kinks as stiffness and pays for dense Jacobians
+    # (~4x slower, no accuracy gain).
+    # @@@ revisit with an auto-switching solver + sparse Jacobian if a genuinely stiff config appears
     sol = solve(ODEProblem(dynNetworkRateFunction!, V0, (0.0, tmax_ode), p), Tsit5();
                 callback = callback,
                 abstol = abstol, reltol = reltol)
 
-    # Write ODE result back into state in place (saves one nt-length allocation per call).
-    state .= sol.u[end]
+    state .= sol.u[end]        # write ODE result back in place
 
-    # No topology event fired.  Two sub-cases, distinguished by the stop time:
-    #   - reached the `tmax_ode` cutoff (sol.t[end] ≈ tmax_ode): the window elapsed with
-    #     the network still evolving — report the caller's `tmax`, with `state` at tmax_ode.
-    #   - cb_ss terminated earlier (sol.t[end] < tmax_ode): genuine steady state — `Inf`.
+    # no topology event: tmax cutoff (stopped at tmax_ode) vs genuine steady state (earlier)
     if event.kind == :none
         return sol.t[end] >= tmax_ode ? (time = tmax, trap = 0, kind = :none) :
                                         (time = Inf,  trap = 0, kind = :none)
     end
 
-    # Clamp the triggering trap to its exact threshold so the validator passes on the
-    # next call without requiring the caller to handle floating-point residual at the
-    # event crossing.
+    # clamp the trigger to its exact threshold so the next call's validator passes
     if event.kind == :fill
         state[event.trap] = p.geom[event.trap].capacity
     elseif event.kind == :empty
