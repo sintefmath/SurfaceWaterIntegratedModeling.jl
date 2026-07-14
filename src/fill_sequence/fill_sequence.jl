@@ -62,7 +62,7 @@ function fill_sequence(tstruct::TrapStructure{<:Real},
     # ensuring no infiltration overlaps with NBS footprints
     infiltration[vcat([n.footprint for n in nbs]...)] .= 0.0
 
-    # compute tables to support computation of trap water volume as function of water level
+    # tables mapping water level -> trap volume
     z_vol_tables = _compute_z_vol_tables(tstruct)
 
     # set initial filled_traps, cur_amounts and spillgraph
@@ -79,44 +79,32 @@ function fill_sequence(tstruct::TrapStructure{<:Real},
         cur_time = we.timestamp
         end_time =
             (wix == length(weather_events)) ? Inf : weather_events[wix+1].timestamp
-    
         @assert(all([ca.time == cur_time for ca ∈ cur_amounts]))
 
-        # compute inflow/runoff/infiltration rates corresponding to the fill
-        # graph and new rain rate
+        # flow rates for the current spillgraph and rain rate
         rateinfo = compute_flow(sgraph, we.rain_rate, infiltration, tstruct, verbose)
 
-        # If there are any seeds for dynamic networks, build the supporting data
-        # structures for them now.
+        # supporting structures for the dynamic networks (empty if there are no seeds)
         driver = build_network_driver(tstruct,
                                       _dyn_seeds(tstruct, dyn_traps, DynCulvert[]),
                                       culverts, findall(filled_traps), cur_amounts,
                                       rateinfo, infiltration, z_vol_tables,
                                       cur_time, end_time;
                                       nbs_placements = nbs, nbs_state = nbs_state)
-        net_contexts    = driver.contexts
-        net_trap_set    = _net_trap_set(net_contexts)
-        net_covered_set = _net_covered_set(net_contexts, tstruct)
-
-        # compute initial time estimates for when a trap become filled, or split
-        # into subtraps (network traps are overridden from their network prediction)
+        # initial changetime estimates (network traps overridden from their prediction)
         changetimeest = _set_initial_changetime_estimates(rateinfo, cur_amounts,
-                                                          cur_time, filled_traps,
-                                                          tstruct, net_contexts,
-                                                          net_covered_set)
+                                                          cur_time, filled_traps, tstruct,
+                                                          driver.contexts,
+                                                          _net_covered_set(driver.contexts, tstruct))
 
-        # register the start of this weather event as a new, fully computed, spill event
+        # the weather event's start is itself a full spill event
         push!(seq, SpillEvent(cur_time, copy(cur_amounts), copy(filled_traps),
-                              copy(rateinfo.trap_inflow), copy(we.rain_rate),
-                              copy(rateinfo.runoff)))
+                              copy(rateinfo.trap_inflow), copy(we.rain_rate), copy(rateinfo.runoff)))
 
-        # Will add new events to `seq`.  `sgraph`, `rateinfo`, `changetimeest`,
-        # `filled_traps` and `cur_amounts` are also modified in the process
-        _fill_sequence_for_weather_event!(seq, sgraph, rateinfo, changetimeest,
-                                          filled_traps, cur_amounts, z_vol_tables,
-                                          tstruct, infiltration, end_time, time_slack,
-                                          net_contexts, net_trap_set, net_covered_set,
-                                          verbose, driver, nbs, nbs_state)
+        # extends seq; also mutates sgraph, rateinfo, changetimeest, filled_traps, cur_amounts
+        _fill_sequence_for_weather_event!(seq, sgraph, rateinfo, changetimeest, filled_traps,
+                                          cur_amounts, z_vol_tables, tstruct, infiltration,
+                                          end_time, time_slack, verbose, driver)
     end
 
     return seq
@@ -126,11 +114,14 @@ end
 function _fill_sequence_for_weather_event!(seq, sgraph, rateinfo, changetimeest,
                                            filled_traps, cur_amounts, z_vol_tables,
                                            tstruct, infiltration, endtime, time_slack,
-                                           net_contexts, net_trap_set, net_covered_set,
-                                           verbose, driver,
-                                           nbs = DynNBSPlacement[],
-                                           nbs_state = Dict{Int,Vector{Float64}}())
+                                           verbose, driver)
     cur_time = cur_amounts[1].time
+
+    # network membership, derived from the driver (the single source of truth); reassigned
+    # by the touch step below as the topology changes
+    net_contexts    = driver.contexts
+    net_trap_set    = _net_trap_set(net_contexts)
+    net_covered_set = _net_covered_set(net_contexts, tstruct)
 
     fill_updates = Vector{IncrementalUpdate{Bool}}()
     graph_updates = Vector{IncrementalUpdate{Int}}()
@@ -145,32 +136,22 @@ function _fill_sequence_for_weather_event!(seq, sgraph, rateinfo, changetimeest,
                                           cur_time, endtime,
                                           net_trap_set, net_covered_set)
 
-        (cur_time > endtime || isempty(fill_updates)) && break # do not register
-                                                               # more events
-        # A network parent that emptied exposes its immediate children as transitory
-        # traps; add them to the fill updates so they leave `filled_traps` too (§:empty).
+        (cur_time > endtime || isempty(fill_updates)) && break # no more events to register
+
+        # an emptied network parent exposes its children as transitory traps; flush them too
         fill_updates = _expand_empty_fill_updates(fill_updates, net_contexts, tstruct)
         for u in fill_updates
             filled_traps[u.index] = u.value
         end
-        # given changes in fill state, update spill graph.  Network traps (nodes AND
-        # subsumed descendants) are kept out of the spillgraph — their routing is handled
-        # by the ODE — so only non-covered fill updates drive it (§4/§8).
+        # network-covered traps route via the ODE, so keep them out of the spillgraph
         non_net_fill_updates = filter(u -> u.index ∉ net_covered_set, fill_updates)
         graph_updates = update_spillgraph!(sgraph, non_net_fill_updates, tstruct)
 
-        # given the updates ot the spill graph, update flow information in `rateinfo`
         setsavepoint!(rateinfo)
         _update_flow!(rateinfo, graph_updates, tstruct, sgraph)
 
-        # Touch the affected networks (commit → rebuild → predict), refreshing net_trap_set /
-        # net_covered_set and their changetimeest entries.  Runs AFTER _update_flow!.
-        #
-        # Touch gate (plan D4/§8): a network changes ONLY when a member fired (topology) or its
-        # external inflow changed (dynamics) — and its growth boundary (the terminal unfilled
-        # trap) is itself a node, so these two signals catch everything.  If no network meets
-        # either, the whole pass is skipped: cached state/prediction stay exact (extern_inflow
-        # unchanged).  Quiet events then cost no ODE solves — the dominant runtime win.
+        # Touch only the networks actually affected — a member trap fired, or external inflow
+        # changed.  Untouched networks keep exact cached state, so quiet events cost no ODE solves.
         old_covered   = net_covered_set
         net_committed = Dict{Int,Float64}()
         network_touched = false
@@ -194,9 +175,8 @@ function _fill_sequence_for_weather_event!(seq, sgraph, rateinfo, changetimeest,
             end
         end
 
-        # update water amount in traps whose inflow rate is about to change, or that
-        # just filled.  Network-covered traps are excluded — their amounts come from the
-        # network state instead (§9).
+        # update amounts for traps about to change inflow or just filled; covered traps come
+        # from the network state instead
         amount_updates = _update_affected_amounts(rateinfo, cur_amounts, filled_traps,
                                                   tstruct, z_vol_tables, cur_time,
                                                   net_covered_set)
@@ -205,28 +185,23 @@ function _fill_sequence_for_weather_event!(seq, sgraph, rateinfo, changetimeest,
                     tstruct.subvolumes[tix], cur_time))
                  for tix in [u.index for u in fill_updates]
                  if tix ∉ net_covered_set && tix ∉ old_covered])
-        # network-trap amounts (nodes from ODE state, subsumed full at capacity, just
-        # exited from their committed boundary value).  Only emitted when the networks
-        # were touched: an untouched network's `state` is not committed to `cur_time`,
-        # so its amounts are left to interpolate between touch events (plan §9).
+        # network-trap amounts, only when touched — an untouched network's state isn't
+        # committed to cur_time, so its amounts interpolate between touch events
         if network_touched && !(isempty(net_covered_set) && isempty(old_covered))
             append!(amount_updates,
                     _network_amount_updates(net_contexts, union(old_covered, net_covered_set),
                                             net_committed, tstruct, cur_amounts, cur_time))
         end
 
-        # integrate the changes into the continously updated `cur_amounts` vector
         _apply_updates!(cur_amounts, amount_updates)
 
-        # add current state to result
         push!(seq, SpillEvent(cur_time, amount_updates, fill_updates,
                               getinflowupdates(rateinfo), nothing,
                               getrunoffupdates(rateinfo)))
     end
 
-    # make sure all amounts are exactly computed at end.  Network-covered traps are
-    # excluded here — their end-of-period volumes follow the multi-trap ODE, not the
-    # constant-rate projection, and are set by _finalize_networks! below (§10).
+    # settle every non-covered trap's amount exactly at endtime; covered traps follow the
+    # multi-trap ODE and are set by _finalize_networks! below
     for (trap, cur_fill) ∈ enumerate(cur_amounts)
         (trap ∈ net_covered_set) && continue
         if cur_fill.time < endtime
@@ -238,10 +213,9 @@ function _fill_sequence_for_weather_event!(seq, sgraph, rateinfo, changetimeest,
         end
     end
 
-    # advance every network to `endtime` and read its traps' boundary volumes from the
-    # settled ODE state — the exact amounts the next weather period rebuilds from (§10)
+    # advance every network to endtime; its settled ODE volumes seed the next weather period
     _finalize_networks!(cur_amounts, net_contexts, tstruct, infiltration,
-                        z_vol_tables, cur_time, endtime, nbs_state)
+                        z_vol_tables, cur_time, endtime, driver.nbs_state)
 end
 
 # ----------------------------------------------------------------------------
@@ -251,8 +225,7 @@ function _update_affected_amounts(rateinfo, cur_amounts, filled_traps, tstruct,
     results = Vector{IncrementalUpdate{FilledAmount}}()
 
     for iu ∈ getinflowupdates(rateinfo)
-        # network-covered traps get their amount from the network state, not the
-        # constant-rate fill projection (§9)
+        # covered traps get their amount from the network state, not this projection
         net_covered_set !== nothing && iu.index ∈ net_covered_set && continue
         amount = _compute_exact_fill(rateinfo, cur_amounts, iu.index,
                                      filled_traps, tstruct, cur_time, z_vol_tables, true)
@@ -275,31 +248,24 @@ function _compute_changetime_estimate(trap, cur_amounts, cur_time, rateinfo, fil
     max_net_inflow = tr -> getinflow(rateinfo, tr) - getsmin(rateinfo, tr)
 
     if filled_traps[trap]
-        # Trap is currently full.  Return time when trap starts emptying
+        # full trap: return when it starts emptying
         if min_net_inflow(trap) >= 0
-            # trap is currently full, but will stay that way as it has a
-            # positive net inflow
-            return ChangeTimeEstimate(false, Inf, Inf)
+            return ChangeTimeEstimate(false, Inf, Inf) # positive net inflow: stays full
         end
-        # The trap has a negative inflow, and will eventually empty.  If trap
-        # does not have a parent, it will start emtpying right away.  Otherwise
-        # it will start emptying as soon as it is not submerged by parent.
+        # negative inflow, so it will empty — right away if it has no parent, otherwise
+        # once the parent no longer submerges it
         parent = parentof(tstruct, trap)
 
         if isnothing(parent)
             return ChangeTimeEstimate(false, cur_time, cur_time) # start emptying now
         elseif filled_traps[parent]
-            # parent must lose its 'filled' status before we can start
-            # estimating how much time is required to empty it
-            return ChangeTimeEstimate(false, Inf, Inf)
+            return ChangeTimeEstimate(false, Inf, Inf) # wait until the parent loses 'filled'
         else
-            # The trap will become unfilled as soon as no longer submerged by
-            # parent.  Compute when that will happen.
+            # unfills once the parent has drained enough to expose it; find when
             parent_min_net_inflow = min_net_inflow(parent)
             parent_max_net_inflow = max_net_inflow(parent)
             if parent_max_net_inflow > 0
-                # parent will not empty all the way to expose its subtraps
-                return ChangeTimeEstimate(false, Inf, Inf)
+                return ChangeTimeEstimate(false, Inf, Inf) # parent won't empty to expose subtraps
             else
                 parent_volume = cur_amounts[parent].amount
                 min_time =
@@ -313,9 +279,8 @@ function _compute_changetime_estimate(trap, cur_amounts, cur_time, rateinfo, fil
             end
         end
     else
-        # Trap is not yet full.  Return time when it switches to full.
-        if min_net_inflow(trap) < 0.0 # inflow will become negative before trap
-                                      # has been filled
+        # not yet full: return when it switches to full
+        if min_net_inflow(trap) < 0.0 # inflow turns negative before it fills
             return ChangeTimeEstimate(true, Inf, Inf)
         else
             ownvolume = tstruct.trapvolumes[trap] - tstruct.subvolumes[trap]
@@ -338,8 +303,7 @@ function _update_changetime_estimates!(changetimeest, cur_amounts, cur_time,
     inflow_updates = getinflowupdates(rateinfo)
     for update ∈ inflow_updates
         trap = update.index
-        # covered traps (network nodes + subsumed descendants) are governed by the
-        # network prediction, not the constant-rate estimate — skip them (§7)
+        # covered traps are governed by the network prediction, not this estimate — skip them
         net_covered_set !== nothing && trap ∈ net_covered_set && continue
         changetimeest[trap] =
             _compute_changetime_estimate(trap, cur_amounts, cur_time,
@@ -414,18 +378,14 @@ function _identify_next_status_change!(changetimeest, cur_amounts, rateinfo,
         ctest = _compute_exact_changetime(cur_candidate, changetimeest, cur_amounts,
                                           rateinfo, tstruct, filled_traps, z_vol_tables)
         # update 'changetimeest'
-        changetimeest[cur_candidate] = ctest
-        # check if we found an improvement
-        #(NB: ctest.min = ctest.max = exact changetime)
+        changetimeest[cur_candidate] = ctest # ctest.min == ctest.max == exact changetime
         if ctest.min < earliest_changetime
             cur_best_candidates = [cur_candidate] # discard previous, better found
             earliest_changetime = ctest.min
         elseif ctest.min == earliest_changetime
             push!(cur_best_candidates, cur_candidate)
         end
-        # remove current candidate from list of candidates (since we have already
-        # examined it), eliminate any other candidate with no possibility of
-        # improving on currently found earliest changetime
+        # drop the examined candidate and any that can no longer beat earliest_changetime
         eliminate_ix = findall(candidate_mintimes .> earliest_changetime)
         unique!(sort!(push!(eliminate_ix, best_candidate_ix)))
         deleteat!(candidates, eliminate_ix)
@@ -440,27 +400,23 @@ function _identify_next_status_change!(changetimeest, cur_amounts, rateinfo,
     for cand ∈ cur_best_candidates
         push!(fill_updates, IncrementalUpdate{Bool}(cand, changetimeest[cand].filling))
 
-        # this trap will not change again unless there is a weather change (in which
-        # case all changetime estimates will be recomputed), so set it to infinity
+        # won't change again until the next weather event recomputes everything
         changetimeest[cand] = ChangeTimeEstimate(false, Inf, Inf)
 
-        # Network nodes are re-predicted by the touch step (which also resets their
-        # subsumed children), so the constant-rate subtrap recompute below is both
-        # unnecessary and wrong for them — skip it.
+        # network traps are re-predicted by the touch step, so the constant-rate subtrap
+        # recompute below is both unnecessary and wrong for them
         is_node(cand) && continue
 
-        # Recompute changetimes for subtraps (which may change when parent
-        # change its filled status)
-        filled_traps[cand] = !filled_traps[cand] # temporary flip it while
-                                                 # recomputing estimates
+        # a subtrap's changetime depends on the parent's filled status, so recompute the
+        # children with `cand` temporarily flipped (restored afterwards)
+        filled_traps[cand] = !filled_traps[cand]
         children = subtrapsof(tstruct, cand)
         for c in children
             changetimeest[c] =
                 _compute_changetime_estimate(c, cur_amounts, earliest_changetime,
                                              rateinfo, filled_traps, tstruct)
         end
-        filled_traps[cand] = !filled_traps[cand] # flip it back so as not to have
-                                                 # this function argument changed.
+        filled_traps[cand] = !filled_traps[cand]
     end
     return earliest_changetime, fill_updates
 end
@@ -513,9 +469,7 @@ function _compute_exact_changetime(trap, changetimes, cur_amounts, rateinfo,
 end
 
 # ----------------------------------------------------------------------------
-# for each trap, compute a table expressing increasing waterlevel (z) as
-# function of trap water volume.  This is useful when we need to rapidly compute
-# water z level as function of volume, as is done in _update_waterlevel().
+# Per trap, a table mapping trap water volume to water level (z), for fast level lookups.
 function _compute_z_vol_tables(tstruct)
 
     N = numtraps(tstruct)
@@ -532,9 +486,7 @@ function _compute_z_vol_tables(tstruct)
         zsorted = sort(trap_bottom)
         append!(zsorted, tstruct.spillpoints[tix].elevation)
         vsorted = (zsorted .* (1:length(zsorted))) .- cumsum(zsorted) # trapvolume
-        # get rid of duplicates by keeping only the last of each duplicate
-        # (which also ensures that the corresponding volume in 'vsorted' will be
-        # the correct one)
+        # drop duplicate z levels, keeping the last (its volume is the correct one)
         keep = fill(true, length(zsorted))
         for i = 1:length(zsorted)-1
             keep[i] = zsorted[i+1] > zsorted[i]
@@ -545,24 +497,9 @@ function _compute_z_vol_tables(tstruct)
 end
 
 # ----------------------------------------------------------------------------
-# Spillpoint-exclusion rule for a trap's infiltration: a footprint cell whose (raised)
-# terrain bottom lies at or above the trap's spillpoint never ponds as part of the trap
-# (water reaching that level spills out rather than pooling), so it carries no trap
-# infiltration.  The canonical, allocation-free implementation is `_ponding_infiltration`
-# (flow.jl), used where no local bottom is at hand (Smax updates, the
-# `_compute_Smin_Smax_for_specific_trap!` utility).  The per-trap/per-event hot paths that
-# already compute the raised bottom — `fill_trap_until` below and the network solver's
-# `_build_trap_geometry` — apply the same `bottom >= spillpoint` test to that bottom
-# directly.  (Excluding these cells is what keeps the wetted-area loss continuous at
-# V = capacity and removes the fill/unfill chatter of a trap pinned at its spillpoint.)
-
-# ----------------------------------------------------------------------------
-# first return value: new amount of water in trap: any value between 0.0 (empty) and
-#                     the trap volume (or trap self-volume, if subtraps are excluded)
-# second return value: timepoint where the trap filled (if it became full) or emptied
-#                      (if it emptied).  If it neither reached filled or emptied status
-#                      during  before `endtim`, then the second return value will be
-#                      `nothing`.
+# Fills or empties `trap` over [cur_amount.time, endtime].  Returns (amount, tstop):
+# `amount` is the water volume (0 .. own capacity); `tstop` is when it became full/empty,
+# or `nothing` if neither happened before `endtime`.
 function fill_trap_until(trap, rateinfo, cur_amount, endtime, tstruct, z_vol_tables;
                          use_saved=false)
 
@@ -582,11 +519,9 @@ function fill_trap_until(trap, rateinfo, cur_amount, endtime, tstruct, z_vol_tab
     end
 
     if Smax == Smin
-        # net rate will not depend on the degree of fill, and we do not need to
-        # solve an ODE to get the time to trap filled (or emptied)
+        # net rate is fill-independent, so no ODE needed for the time to full/empty
         accum_rate = inflow - Smax
-        (accum_rate == 0.0) && return (cur_amount.amount, nothing) # no change in fill
-                                                                   # amount
+        (accum_rate == 0.0) && return (cur_amount.amount, nothing) # no change
         dt = (accum_rate > 0) ?
                 (tvolume - cur_amount.amount) / accum_rate : # time to full
                 cur_amount.amount / abs(accum_rate)          # time to empty
@@ -597,17 +532,14 @@ function fill_trap_until(trap, rateinfo, cur_amount, endtime, tstruct, z_vol_tab
             (accum_rate > 0.0 ? tvolume : 0.0, t) :
             (cur_amount.amount + (endtime - cur_amount.time) * accum_rate, nothing)
     end
-    # if we got here, the amount of infiltration at any time depends on how much
-    # the trap has been filled (since the footprint of its water content will vary).
-    # We must solve an ODE to determine how much it fills or empties over the time period.
+    # infiltration depends on fill level (wetted footprint varies), so solve an ODE
     fprint_infil =
         use_saved ? [-min(getsavedrunoff(rateinfo, i), 0.0) for i in footprint] :
                     -min.(getrunoff(rateinfo, footprint), 0.0)
-    # Cells whose terrain lies at or above the spillpoint never pond as part of the trap:
-    # drop their infiltration so the wetted-area loss is continuous at V = capacity
-    # (removing the fill/unfill chatter the discontinuity used to cause), consistent with
-    # `_ponding_infiltration` and the network solver.  Test the actual terrain height, not
-    # the raised `trap_bottom` (which would over-null a degenerate zero-own-volume parent).
+    # Footprint cells at or above the spillpoint never pond, so drop their infiltration: this
+    # keeps the wetted-area loss continuous at V = capacity and removes fill/unfill chatter
+    # (same rule as `_ponding_infiltration` and the network solver).  Test the actual terrain
+    # height, not the raised `trap_bottom`, which would over-null a zero-own-volume parent.
     _sp = Float64(tstruct.spillpoints[trap].elevation)   # concrete: Spillpoint.elevation is ::Real
     @inbounds for k in eachindex(fprint_infil)
         tstruct.topography[footprint[k]] >= _sp && (fprint_infil[k] = 0.0)
@@ -629,8 +561,8 @@ function fill_trap_until(trap, rateinfo, cur_amount, endtime, tstruct, z_vol_tab
         out[2] = v[1]           # trap empty
         deriv = [0.0]
         dvdt(deriv, v, 0, t)
-        out[3] = dv0[1] * deriv[1] # stagnation: sign of time derivative changed, meaning 
-    end                            #             it reached zero along the way
+        out[3] = dv0[1] * deriv[1] # stagnation: net rate changed sign (passed through zero)
+    end
 
     condition_reached = [0]
     
@@ -662,9 +594,7 @@ function _setup_dvdt(trap_bottom, trapvolume, infilfun, inflow, spillpoint, zvta
     v2z = length(zvtable[2]) == 1 ?
         x -> zmin : # degenerate case
         Interpolations.linear_interpolation(zvtable[2], zvtable[1],
-                                             extrapolation_bc=Interpolations.Line());
-        # Interpolations.LinearInterpolation(zvtable[2], zvtable[1],
-        #                                      extrapolation_bc=Interpolations.Line());
+                                             extrapolation_bc=Interpolations.Line())
     function _dvdt(dv, v, p, t)
         z = (v[1] <= 0)          ? zmin :
             (v[1] >= trapvolume) ? Inf :
@@ -672,5 +602,5 @@ function _setup_dvdt(trap_bottom, trapvolume, infilfun, inflow, spillpoint, zvta
         return dv[1] = inflow - infilfun(trap_bottom .<= z)
     end
 
-    return _dvdt # return a closure
+    return _dvdt
 end
