@@ -15,9 +15,10 @@ Fields:
 - `state`: committed trap volumes (net of subtraps) at `last_solve_time`, indexed
   as `net.traps`.  Never advanced past the committed time.
 - `global_ix`: the `TrapStructure` trap index of each `net.traps` entry.
-- `inflow_sources`: global trap indices whose `trap_inflow` feeds this network's
-  external inflow (the leaf descendants summed by `_external_inflow`); used by the
-  touch test in the event loop.
+- `inflow_regions`: the base spill regions whose `trap_inflow` feeds this network's
+  external inflow — the leaf descendants of the nodes (a leaf trap and its spill region
+  share the same id), summed by `_external_inflow`; used by the touch test in the event
+  loop.
 - `last_solve_time`: absolute time the committed `state` refers to.
 - `extern_inflow`: per-node external inflow the `state` is currently evolving
   under (cached at the last touch; the rate the commit/predict solves use).
@@ -28,7 +29,7 @@ mutable struct DynNetworkContext
     net             ::DynNetwork
     state           ::Vector{Float64}            # trap volumes, then appended NBS layer states
     global_ix       ::Vector{Int}
-    inflow_sources  ::Set{Int}
+    inflow_regions  ::Set{Int}                   # base spill regions feeding external inflow
     last_solve_time ::Float64
     extern_inflow   ::Vector{Float64}
     runoff          ::Matrix{Float64}            # the oblivious runoff grid (rateinfo.runoff), read
@@ -47,10 +48,11 @@ function _external_inflow(net::DynNetwork, rateinfo, tstruct)
                    for t in net.traps]
 end
 
-# Global trap indices whose `trap_inflow` feeds this network's external inflow:
-# the union over all nodes of their leaf descendants.  Used for the touch test
-# (a network is touched when one of these appears in `getinflowupdates`).
-function _inflow_sources(net::DynNetwork, tstruct)
+# The base spill regions whose `trap_inflow` feeds this network's external inflow: the
+# union over all nodes of their leaf descendants (a leaf trap and its spill region share
+# the same id).  Used for the touch test (a network is touched when one of these appears
+# in `getinflowupdates`).
+function _inflow_regions(net::DynNetwork, tstruct)
     s = Set{Int}()
     for t in net.traps
         union!(s, tstruct.lowest_subtraps_for[t.trap_ix])
@@ -174,7 +176,7 @@ function _make_context(net::DynNetwork, tstruct, rateinfo, state0, cur_time,
                      _nbs_layer_block(net, nbs_state))
     # Hold the oblivious runoff grid so the solver can build the NBS correction plan from it.
     return DynNetworkContext(net, state, global_ix,
-                             _inflow_sources(net, tstruct),
+                             _inflow_regions(net, tstruct),
                              cur_time,
                              _external_inflow(net, rateinfo, tstruct),
                              rateinfo.runoff,

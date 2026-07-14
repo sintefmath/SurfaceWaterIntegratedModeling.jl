@@ -178,7 +178,7 @@ function _fill_sequence_for_weather_event!(seq, sgraph, rateinfo, changetimeest,
             inflow_updated = Set(u.index for u in getinflowupdates(rateinfo))
             network_touched = any(net_contexts) do ctx
                 any(u.index ∈ ctx.global_ix for u in fill_updates) ||
-                    !isdisjoint(ctx.inflow_sources, inflow_updated)
+                    !isdisjoint(ctx.inflow_regions, inflow_updated)
             end
         end
         if network_touched
