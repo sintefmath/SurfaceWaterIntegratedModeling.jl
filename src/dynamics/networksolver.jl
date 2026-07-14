@@ -104,18 +104,9 @@ end
     water_level(g::TrapGeometry, V) -> Float64
 
 Water surface elevation of trap `g` at stored volume `V`.  Empty (`V <= 0`) → `zmin`;
-full (`V >= capacity`) → `Inf` (whole footprint reads as submerged); else interpolated.
+otherwise interpolated, held at the spill level once `V` reaches `capacity`.
 """
 function water_level(g::TrapGeometry, V::Real)
-    return V <= 0.0       ? g.zmin :
-           V >= g.capacity ? Inf    :
-                            Float64(g.v2z(V))
-end
-
-# Actual water-surface elevation of trap `g` at volume `V`, with no `Inf` sentinel:
-# a full trap sits at its spill level (the table top), not `Inf`.  Used for culvert
-# heads, where the real surface elevation matters and `Inf - Inf` would be `NaN`.
-function _surface_level(g::TrapGeometry, V::Real)
     return V <= 0.0 ? g.zmin : Float64(g.v2z(min(V, g.capacity)))
 end
 
@@ -124,8 +115,8 @@ end
     wetted_infiltration(g::TrapGeometry, V) -> Float64
 
 Infiltration loss of trap `g` at volume `V`: the per-cell rate summed over the
-currently-submerged footprint cells (bottom at or below the water level).  A full trap
-(level `Inf`) infiltrates over its whole footprint.
+currently-submerged footprint cells (bottom at or below the water level).  At capacity the
+level reaches the spillpoint, so the whole footprint infiltrates.
 """
 function wetted_infiltration(g::TrapGeometry, V::Real)
     z = water_level(g, V)
@@ -724,9 +715,9 @@ function _routed_inflow(V, p::DynNetworkRateParams)
     geom = p.geom
     nt   = length(geom)
     spilling = Bool[V[i] >= geom[i].capacity for i in 1:nt]
-    # culverts need each trap's real water-surface elevation (not the Inf sentinel)
+    # culverts need each trap's water-surface elevation for the head calc
     trap_level = p.cvplan === nothing ? nothing :
-                 Float64[_surface_level(geom[i], V[i]) for i in 1:nt]
+                 Float64[water_level(geom[i], V[i]) for i in 1:nt]
     inflow = _route_flow(p.net, p.external_inflow, spilling,
                          p.footprint_infil, p.path_infil_prefix, p.external_path_inflow,
                          p.path_events, p.order, p.merge_target,
