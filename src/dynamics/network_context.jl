@@ -38,23 +38,17 @@ mutable struct DynNetworkContext
 end
 
 # ----------------------------------------------------------------------------
-# Each node's leaf spill regions (`lowest_subtraps_for[t]`, == [t] for a leaf), in
-# `net.traps` order.  Both the per-node `extern_inflow` and the flat `inflow_regions`
-# touch key are projections of this one relation, so the two stay in lock-step by
-# construction.
+# Each node's leaf spill regions, in `net.traps` order; the shared source for both inflow fields.
 _node_leaf_regions(net::DynNetwork, tstruct) =
     [tstruct.lowest_subtraps_for[t.trap_ix] for t in net.traps]
 
-# Per-node external inflow: each node's sum of `trap_inflow` over its leaf regions.  Summed
-# from the leaves, not `getinflow(node)` directly, because `_reconcile_spillgraph!` withdraws
-# covered children's flow from the parent's `trap_inflow`, leaving it stale — leaves stay current.
+# Per-node external inflow.  Summed over leaves, not `getinflow(node)`: `_reconcile_spillgraph!`
+# leaves a parent node's own `trap_inflow` stale, whereas the leaf values stay current.
 _external_inflow(rateinfo, node_leaves) =
     Float64[sum(getinflow(rateinfo, leaf) for leaf in leaves) for leaves in node_leaves]
 
-# The base spill regions feeding this network's external inflow: the nodes' leaf regions
-# collected flat (a leaf trap and its spill region share the same id).  The nodes partition
-# their leaves — none is shared — so this is a plain flatten, not a merge.  Used for the touch
-# test (a network is touched when one of these appears in `getinflowupdates`).
+# Flat set of the network's leaf regions, for the touch test.  Nodes partition their leaves,
+# so this is a flatten, not a merge.
 _inflow_regions(node_leaves) = Set{Int}(Iterators.flatten(node_leaves))
 
 # All (transitive) sub-traps of `t`, walking the agglomeration hierarchy downward.
@@ -171,10 +165,9 @@ function _make_context(net::DynNetwork, tstruct, rateinfo, state0, cur_time,
     # storage carries across events and weather periods.
     state     = vcat(Float64[state0(g) for g in global_ix],
                      _nbs_layer_block(net, nbs_state))
-    # Both inflow fields are projections of the same per-node leaf-region relation (union of
-    # the regions vs. their per-node summed inflow), so compute that relation once.
+    # shared source for both inflow fields
     node_leaves = _node_leaf_regions(net, tstruct)
-    # Hold the oblivious runoff grid so the solver can build the NBS correction plan from it.
+    # `runoff` is held for the solver's NBS correction plan.
     return DynNetworkContext(net, state, global_ix,
                              _inflow_regions(node_leaves),
                              cur_time,
