@@ -50,9 +50,13 @@ storage         dS        =  d/dt of total layer storage
 terrain re-emit O_terrain  =  overflow of the top n_terrain layers, re-emitted at the
                               footprint's natural drainage targets (see below)
 piped discharge E_piped    =  discharge of the outflowing layers below the top n_terrain
+ground loss     G          =  infiltration of the bottom layer into the ground
 
-I = dS + O_terrain + E_piped
+I = dS + O_terrain + E_piped + G
 ```
+
+`G` is why the retention scalar is `X = 1 − O_terrain/I` and **not**
+`(dS + E_piped)/I` — see §4.3.
 
 Two **independent** surface effects, applied at different locations — they are
 NOT lumped into a single emission:
@@ -155,7 +159,7 @@ attenuation.
 ### 4.2 Where the correction enters
 
 - **Terrain re-emit** (top `n_terrain` layers): one scalar
-  `X = (dS + E_piped)/I` per NBS per step (§4.3), applied cell-by-cell as
+  `X = 1 − O_terrain/I` per NBS per step (§4.3), applied cell-by-cell as
   `c_in(c) = −X · Q_c` at each
   drainage endpoint `c`. `Q_c` is the oblivious NBS flow there, read straight
   from the field (the runoff at the footprint-side boundary cell — pure NBS,
