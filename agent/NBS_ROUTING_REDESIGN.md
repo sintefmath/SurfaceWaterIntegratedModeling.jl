@@ -1,60 +1,102 @@
 # NBS routing redesign — design notes
 
-Status: design settled, implementation in progress.
+Status: design settled. **Routing/correction layer not yet implemented** — the
+current solver still uses the older footprint-as-sink + positive re-emit path
+(`watercourses` sink overlay, `nbs_actual` delivery slots, `_nbs_exit_weights`,
+`nbs_into`); this note describes the target that replaces it.
+
 Scope: how Nature-Based Solution (NBS) installations couple to the dynamic
 surface-flow network. Supersedes the overlay-element approach in
-`NBS_OPTION1_OVERLAY_PLAN.md` for the routing/coupling layer (the NBS *layer
-model* primitives — `NBSSystem` / `NBSLayer` / `compute_outflow` — are retained).
+`NBS_OPTION1_OVERLAY_PLAN.md` for the routing/coupling layer. The NBS *layer
+model* primitives — `NBSSystem` / `NBSLayer` / `compute_outflow` in
+`nbs_elements.jl` — are retained unchanged.
 
-The new network-build entry point is `src/dynamics/build_network.jl`
-(`setup_network`); the flux/deduction/layer-routing consumer is being
-re-implemented separately in the solver / rateinfo layer.
+Network build entry point: `src/dynamics/build_network.jl` (`setup_network`).
+The correction consumer lives in the solver / rateinfo layer
+(`networksolver.jl`, `network_context.jl`).
 
 ---
 
 ## 1. Core idea
 
-An NBS is **invisible to the surface-flow network**. The fixed overland flow
-(the baseline that sets regular trap fill times) is routed across the NBS
-footprint exactly as if no NBS were present. The NBS then acts *only* as a
-correction:
+An NBS is **invisible to everything outside `dynamics/`**. `watercourses` /
+`_compute_initial_rateinfo` route the fixed overland flow across the NBS
+footprint exactly as if no NBS were present — the baseline that sets regular
+trap fill times is NBS-oblivious. The NBS then acts *only* as a **correction**
+to that baseline, applied entirely inside the dynamics layer:
 
-- it captures ("infiltrates") some water on its footprint,
-- stores it in its layered model (the `NBSSystem` ODE),
-- re-emits it at explicit **outlets**, from where ordinary flow paths carry it
+- it captures water on its footprint,
+- stores it in its layered `NBSSystem` ODE,
+- releases it — as terrain re-emit at the footprint's exit boundary and as
+  piped discharge at explicit outlets — from where ordinary flow paths carry it
   downstream.
 
-The practical effect of an NBS is therefore entirely a **deduction applied as a
-correction** to the fixed flow — negative flow where water is captured, positive
-flow (re-emission) at the outlets — never a rewrite of the surface network
-topology.
+The correction is a **signed flow** propagated along the existing network
+routing: negative where the NBS is currently holding water back, positive where
+its store is draining downstream faster than water is currently arriving. It is
+never a rewrite of the surface-network topology.
 
-This mirrors how dynamic flow paths already correct the fixed flow elsewhere: a
-static baseline, plus a dynamic correction where the network is active.
+This mirrors how the dynamic network already corrects the fixed flow elsewhere:
+a static baseline, plus a dynamic correction where the network is active.
 
 ## 2. Water balance
 
-For one NBS over a solve window:
+For one NBS at any instant, the layer ODE keeps its internal balance:
 
 ```
-capture  C  =  precip on footprint  +  inflow from inflow-cells
-storage  ΔS =  change in layer storage
-emission E  =  Σ outlet discharge (from the layer model)
+capture         I         =  precip on footprint  +  inflow across the footprint boundary
+storage         dS        =  d/dt of total layer storage
+terrain re-emit O_terrain  =  overflow of the top n_terrain layers, re-emitted at the
+                              footprint's natural drainage targets (see below)
+piped discharge E_piped    =  discharge of the outflowing layers below the top n_terrain
 
-C = ΔS + E                         (NBS internal balance)
+I = dS + O_terrain + E_piped
 ```
 
-The correction applied to the surface:
+Two **independent** surface effects, applied at different locations — they are
+NOT lumped into a single emission:
 
-- **deduct** the capture `C` from the fixed flow, spread over the NBS's
-  **outflow-boundary cells** and **internal-accumulation cells** (see §4);
-- **add** the emission `E` at the **outlet cells**, injected into the flow paths
-  that are seeded there.
+- **Terrain re-emit** — a signed correction applied at the footprint's
+  **natural drainage endpoints**: its **boundary exits** *and* its **internal
+  depressions** (footprint trap-bottom cells). Each endpoint `c` carries an
+  oblivious NBS flow `Q_c` (what the capture drained there in the no-NBS run;
+  `I = Σ_c Q_c`), and the correction there is simply
 
-Net water removed from the surface at any instant is `C − E = ΔS`, i.e. exactly
-what the NBS is currently holding. At steady state `ΔS = 0`, so deduction equals
-emission and mass closes. During filling, more is deducted than emitted (water
-held back); during draining, the reverse. Mass is conserved at all times.
+  ```
+  c_in(c) = −X · Q_c,   with the single scalar   X = (dS + E_piped)/I   (§4.3)
+  ```
+
+  No weight vector — `Q_c` *is* the split. Boundary corrections propagate
+  downstream along the seeded path; internal ones deduct from the **containing
+  trap** (§4.2). Summed over endpoints the total is `−X·I = O_terrain − I`, so
+  everything the top layer stored or passed to the piped layers is deducted here
+  — the only place the balance shows up.
+- **Outlets** — the piped discharge `E_piped`, injected **as-is** at the outlet
+  cells. `E_piped` is a direct output of the ODE (computed from the piped
+  layers' storage); it is *not* a fraction of anything and *not* affected by the
+  terrain balance. The water it carries was already deducted at the terrain
+  targets (inside the `−I`), so re-adding it at the pipe is correct double-entry,
+  not double-count.
+
+Net water removed from the surface = `Σ_c (−X·Q_c) + E_piped =
+(O_terrain − I) + E_piped = −dS`: exactly what the NBS is holding (negative while
+filling, positive while draining). At steady state `dS = 0` and both effects
+cancel the baseline back to correct. Mass closes at all times because
+`O_terrain`, `E_piped`, `I` all come from the ODE.
+
+The submergence coupling (the containing trap flooding the NBS when its water
+level rises above the footprint's lowest cell) is a **separate**, geometric
+interaction, not part of this balance.
+
+**`P = I` via the zero-infiltration contract.** The correction is applied
+against the oblivious pass-through `P` — the capture disposed of across **all**
+the footprint's drainage endpoints (boundary exits *and* internal depressions),
+`P = Σ_c Q_c`. For `P` to equal the capture `I`, the footprint must carry **zero
+terrain infiltration** — else the oblivious run infiltrates under the footprint
+*and* the layer model infiltrates, double-counting. This is the standing
+contract (currently a `# @@@` note in `build_network.jl`); it must be
+**enforced** at `setup_network`, not merely assumed. With it, oblivious `P = I`
+and the correction is well defined.
 
 ## 3. The four cell-sets (computed in `build_network.jl`)
 
@@ -62,158 +104,213 @@ held back); during draining, the reverse. Mass is conserved at all times.
 
 | Set | Definition | Role |
 |-----|-----------|------|
-| `footprint_inflow_cells`  | cells feeding *into* the footprint from outside (inverse-flow neighbours of footprint cells, minus the footprint itself) | where capture `C` is sourced |
-| `footprint_outflow_cells` | footprint cells whose downstream neighbour lies *outside* the footprint | a deduction location; also seeded (at the external `ds` cell) so re-routing continues downstream |
-| `internal_accumulation_cells` | footprint ∩ trap-bottoms | a deduction location; feeds any trap whose footprint intersects here |
-| `outlets` (user-supplied) | piped-discharge cells for the outflowing layers below the top `n_terrain` | where emission `E` re-enters the terrain |
+| `footprint_inflow_cells`  | cells feeding *into* the footprint from outside (inverse-flow neighbours of footprint cells, minus the footprint) | where capture `I` is sourced |
+| `footprint_outflow_cells` | footprint cells whose downstream neighbour lies *outside* the footprint | where the terrain re-emit correction is injected (at the external `ds` cell, which is seeded) |
+| `internal_accumulation_cells` | footprint ∩ trap-bottoms | internal terrain re-emit target — its correction share lands on the containing trap |
+| `outlets` (user-supplied) | piped-discharge cells for the outflowing layers below the top `n_terrain` | where piped emission re-enters the terrain (seeded) |
 
-Contract: **NBS footprints have zero infiltration** (see NOTES-TO-SELF in
-`build_network.jl`) so the footprint contributes no losses of its own and the
-only abstraction on it is the NBS capture.
+## 4. The signed correction — propagation
 
-## 4. The deduction (correction) — heuristic
+The NBS internals are not spatially modelled. The correction is a single signed
+scalar per exit, injected at that exit cell and propagated downstream through
+the **existing network routing** (paths, traps, spill paths) — not a bespoke
+walk. This replaces the earlier equal-split-plus-clamp heuristic: the routing
+below *is* the clamp, applied exactly per cell along the real flow route.
 
-The NBS internals are not spatially modelled, so the capture `C` is distributed
-back onto the surface by a simple heuristic:
+### 4.1 Per-cell propagation rule
 
-> Split the negative correction **equally** across the union of
-> (`footprint_outflow_cells` ∪ `internal_accumulation_cells`).
+`watercourses` already stores, per cell, the signed value we need: `runoff[c]`
+starts at `−infiltration_capacity` and accumulates upstream flow, so the final
+grid holds **positive = runoff actually emitted**, **negative = remaining
+infiltration capacity**. Call it `V_c`; the cell's emitted runoff is
+`max(V_c, 0)`.
 
-**Per-cell clamp is mandatory.** An equal share can exceed the baseline flow
-actually present at a thin-flow cell. Deducting more than is available there
-would drive negative surface flow and silently leak mass. So the distributor
-must:
+A signed correction `c_in` arriving at cell `c` propagates to `c`'s downstream
+neighbour as:
 
-1. first pass: assign each cell its equal share;
-2. clamp each deduction to the flow available at that cell;
-3. redistribute the un-deducted remainder across cells that still carry flow
-   (or carry it forward as unmet NBS storage).
+```
+c_out = max(V_c + c_in, 0) − max(V_c, 0)
+```
 
-This is the same rule the culvert/tributary router already obeys
-(`AGENTS.md` → Mass conservation): draw the *available* amount, never the
-*requested* amount.
+(and, if `V_c` is reused downstream, update `V_c ← max(V_c + c_in, −infil_c)`).
 
-- Deduction at an **outflow-boundary** cell reduces the flow leaving the
-  footprint there.
-- Deduction at an **internal-accumulation** cell reduces the inflow to the
-  **trap** that contains that cell (which may not be downstream of the NBS at
-  all — it simply shares footprint with it).
+One expression, both signs:
 
-## 5. Emission (re-emission at outlets)
+- **Retaining** (`c_in < 0`): while `|c_in| ≤ V_c` the full correction passes
+  (`c_out = c_in`); once it would push the cell's runoff below zero it
+  attenuates to `−max(V_c, 0)` (all the runoff there was) and dies — you cannot
+  remove water that was already infiltrating.
+- **Draining** (`c_in > 0`): the extra first refills any spare capacity
+  (`V_c < 0`); only the surplus above zero continues as new runoff. So a release
+  onto a segment that had run dry in the oblivious field is re-absorbed before
+  it reaches a trap.
 
-Outlets are added to the network as **seeds**. A path grown from an outlet cell
-is an ordinary flow path; the NBS discharge is injected at the outlet position
-and routed downstream to whatever trap the path leads into — no NBS-specific
-routing machinery beyond the injection.
+A naïve `c_out = c_in` (correction passes unchanged) is wrong: it over-subtracts
+where the cell's runoff can't absorb the full correction, and over-delivers a
+release where the terrain has spare capacity. The `max`/`max` form is the exact
+attenuation.
 
-**Outlet record shape.** A path records its NBS outlet as
-`DynFlowPath.nbs_outlets`. Default resolution for now: **all outflowing
-(non-runoff) layers discharge at the same single outlet point**, so the current
-2-tuple `(placement_ix, position)` suffices — the consumer sums all piped-layer
-discharge and injects it at that one position. When per-layer distinct outlets
-are needed later, extend to `(placement_ix, layer_ix, position)`. (Marked as a
-`# @@@` extension point at the field.)
+### 4.2 Where the correction enters
 
-## 6. NBS inflow — static baseline, dynamic correction
+- **Terrain re-emit** (top `n_terrain` layers): one scalar
+  `X = (dS + E_piped)/I` per NBS per step (§4.3), applied cell-by-cell as
+  `c_in(c) = −X · Q_c` at each
+  drainage endpoint `c`. `Q_c` is the oblivious NBS flow there, read straight
+  from the field (the runoff at the footprint-side boundary cell — pure NBS,
+  since the footprint holds the capture; `I = Σ_c Q_c`). No weight vector — `Q_c`
+  *is* the split. A **boundary** endpoint's `c_in` is injected at its external
+  `ds` cell and propagated along the seeded path by §4.1; an
+  **internal-depression** endpoint's `c_in` is deducted from the **containing
+  trap** (the `DynTrap` whose footprint contains the cell — resolved via the net,
+  not by re-deriving `regions[cell]`; build a cell→local-trap map once per solve,
+  this runs in the ODE hot path). This subsumes the old separate "internal
+  accumulation deduction" — it is just an internal drainage endpoint.
 
-Capture `C` sources from precipitation on the footprint plus inflow-cell
-contributions. An inflow cell is handled like any other terrain cell:
+  `−X·Q_c` needs no precomputed exit weights at all: it never over-deducts (a
+  fraction of the flow actually present, so no clamp/redistribute) and reflects
+  real inflow concentration. `build_network` still supplies *which* cells are the
+  endpoints (`footprint_outflow_cells` / `internal_accumulation_cells`), just not
+  their weights.
 
-- computed **statically** as a baseline (precip + static inflow-cell flow);
-- **corrected dynamically** when the inflow cell lies on an active flow path
-  (then its contribution is whatever the network delivers there).
+  **`I ≈ 0` fallback:** during pure drainage (dry period, store emptying) every
+  `Q_c = 0` and `X` is singular, so `−X·Q_c` is indeterminate yet
+  `O_terrain > 0` must still be placed. Split it **equally** among all the
+  endpoint cells — boundary exits and internal depressions alike. No weights, no
+  graph traversal.
+- **Piped outlets** (outflowing layers below the top `n_terrain`): `E_piped`,
+  a direct positive injection at each outlet cell — the ODE's piped-layer
+  discharge, injected as-is (§2), still propagated downstream by the §4.1 rule
+  (it just always starts positive). Not tied to the terrain balance.
 
-Whether a given inflow cell is "static" or "dynamic" is only knowable once the
-paths are built, so it is treated as static and corrected where a path passes
-through it — exactly the existing flow-path convention.
+Terrain correction + piped injection = `(O_terrain − I) + E_piped = −dS`. Mass
+conserved (§2).
+
+### 4.3 `X` is used unclamped
+
+`X` is a single scalar per NBS per step, used directly as the multiplier
+`c_in(c) = −X·Q_c`. From the balance `I = dS + O_terrain + E_piped`:
+
+```
+X = 1 − O_terrain/I = (dS + E_piped) / I
+```
+
+i.e. the fraction of capture *not* re-emitted over the terrain — what the store
+kept plus what the pipes diverted. Prefer the `(dS + E_piped)/I` form: it reads
+straight off the solver quantities (`dS` from the layer-state derivatives,
+`E_piped` from the piped layers). Do **not** clamp `X` to `[0,1]` — it
+legitimately leaves that range:
+
+- `X ≤ 1` always holds (`O_terrain ≥ 0`).
+- `X ≥ 0` **fails**: a store filled under heavy rain keeps overflowing after
+  inflow drops (`compute_outflow` depends on storage `S`, not on `I`), so
+  `O_terrain > I` and `X < 0` — a **positive** correction, the store releasing
+  downstream, which is physical. Concretely: reach steady state at `P = 100`
+  (storage high), then rain eases to `P = 10`; the store still overflows `≈ 100`,
+  so `X = (10 − 100)/10 = −9`. Fires on the first step of a lighter weather
+  period because `nbs_state` carries storage across periods.
+
+The product `−X·Q_c` stays **bounded** even at large-negative `X`, because
+`Q_c ≤ I`, so `|X·Q_c| ≤ |I − O_terrain|`. The only breakdown is `I = 0` (pure
+drainage): `X` is singular *and* every `Q_c = 0`, so `−X·Q_c` is `0·∞` — handled
+by the §4.2 equal-split fallback, not by clamping.
+
+Clamping `X` to `[0,1]` would zero the drainage release and destroy mass.
+**A brief comment at the correction site must record this** so no one
+"helpfully" re-adds a clamp. (The piped discharge `E_piped` needs none of this —
+it is `≥ 0` and injected as-is.)
+
+## 5. Woven into the dynamic router, not a one-shot pass
+
+`c_in(t)` is dynamic (the store saturates and drains) and interacts with the
+`V_c` caps nonlinearly, so it is evaluated inside the network's per-step routing,
+not precomputed. Crucially, a large enough retention can drop a downstream
+**full** trap's net inflow below its losses and flip it to `:unspill` — a
+topology event. So the correction is part of the trap inflow the ODE sees each
+step, routed through traps and their spill paths by the same topology
+`_route_flow` already handles. The extra input the router needs is the oblivious
+`V_c` per path cell — read straight off the `watercourses` `runoff` grid.
+
+## 6. NBS in series
+
+The oblivious field routes NBS-A's *full* pass-through into NBS-B's footprint, so
+B's oblivious capture over-counts. A's correction must land on B's footprint
+cells and lower B's actual `I`, which changes B's `O_terrain` and hence B's own
+correction. This is causal, resolved in topological order — the same coupling
+the old `nbs_into` slots encoded, now expressed as signed corrections landing on
+downstream footprints.
 
 ## 7. Division of labour
 
+**`watercourses` / `_compute_initial_rateinfo` (NBS-oblivious):**
+- compute the plain flow field; expose the `runoff` grid (`V_c`). No `nbs`
+  argument, no sink, no `nbs_inflow` return. This is a net deletion.
+
 **`build_network.jl` (topology):**
+- **enforce** zero infiltration on footprints (§2);
 - identify the four cell-sets per NBS;
-- add seeds for outlets, outflow-boundary (external `ds` cell), and
-  internal-accumulation cells;
-- grow the monolithic network, then split into connected components.
+- seed outlets, outflow-boundary external `ds` cells, and internal-accumulation
+  cells; grow the monolithic network; split into components.
 
-**Distributor / rate layer (flux — re-implementation in progress):**
-- compute capture `C`, storage, and emission `E` from the layer model;
-- apportion the negative correction over (outflow ∪ accumulation) cells with the
-  clamp+redistribute of §4;
-- land each share on its network element: an outflow-boundary share on the
-  seeded path, an accumulation share on the **containing trap**.
+**Solver / rate layer (flux):**
+- aggregate capture `I` from the oblivious field (`runoff` at
+  `footprint_inflow_cells` + footprint precip);
+- run the layer ODE to get `O_terrain(t)` and `E_piped(t)` separately;
+- inject the signed terrain correction and the piped discharge (§4.2) and
+  propagate them through the router by
+  the §4.1 rule, respecting downstream trap-state flips (§5) and NBS-series
+  ordering (§6).
 
-### Resolving an accumulation cell to its trap (solver-side)
+## 8. Component splitting
 
-No persisted cell→trap map is needed. The trap is already a `DynTrap` in the
-`DynNetwork` (the accumulation seed — a trap bottom, hence a flow-graph sink —
-traces to and registers it during build). At solve time the distributor:
+`split_network_into_connected_components` (in `network_utils.jl`) is unchanged:
+an NBS bridges otherwise-disjoint regions and must land its coupled elements in
+one component. Edges from terrain flow + merges, culvert inlet/outlet owners,
+and per NBS: emission paths (`nbs_outlets`), outflow-deduction paths (seeded at
+`footprint_outflow_cells`), and the accumulation trap (mapped via
+`regions[c] → supertraps_of`, asserted unique).
 
-- deducts from the `DynTrap` whose `footprint` **contains** the accumulation cell
-  (robust against sub/supertrap nesting — always the node actually in the net;
-  do **not** re-derive `regions[cell] → trap_ix` independently, it may pick a
-  different trap than the one build registered);
-- builds the cell→local-trap lookup **once per solve**, not `findfirst` per cell
-  per rate evaluation (this runs inside the ODE hot path — per-event overhead
-  matters).
+## 9. Cycle safety
 
-## 8. Cycle safety
+Piped outlets, like culverts, are not constrained to terrain flow direction; an
+outlet upstream of the NBS's own inflow could loop and break the
+"water flows downstream" invariant. Handled by **user contract**: outlets must
+not sit above the footprint elevation. No automatic detection (matches the
+deferred reverse-culvert handling).
 
-NBS piped outlets, like culverts, are not constrained to follow terrain flow
-direction, so an outlet placed upstream of the NBS's own inflow could form a
-loop and break the "water always flows downstream" invariant. Handled by
-**user contract**: outlets must not be placed at a higher elevation than the
-footprint. (No automatic detection for now — matches the deferred reverse-culvert
-handling.)
+## 10. What changes vs the current code
 
-## 9. Splitting into connected components
+**Deleted:**
+- the `nbs` argument, footprint-as-sink overlay, and `nbs_inflow` return in
+  `watercourses`;
+- the positive re-emit delivery-slot machinery in the solver (`nbs_actual`
+  slots as a separate positive delivery path, `nbs_into` as positive slots,
+  `nbs_path_events` / `nbs_trap_outlets` as the sole delivery mechanism);
+- `_nbs_exit_weights` entirely — the split is `Q_c` read from the field, and the
+  `I ≈ 0` fallback is a plain equal split over the endpoint cells (no weights, no
+  traversal).
 
-`split_network_into_connected_components(net, tstruct)` (public, in
-`src/dynamics/network_utils.jl`) builds an undirected graph over path nodes
-(`1:np`) and trap nodes (`np+1:np+nt`), takes `Graphs.connected_components`, and
-rebuilds each as a standalone `DynNetwork` with all cross-references remapped to
-local 1-based indices.
+**Kept (shrunk):**
+- the endpoint cell-sets (`footprint_outflow_cells` / `internal_accumulation_cells`)
+  — now used to locate where to read `Q_c`;
+- piped-outlet seeding and injection;
+- the layer ODE (`NBSSystem` / `compute_outflow`) and cross-period `nbs_state`
+  persistence.
 
-Connectivity must follow more than terrain flow — a culvert or an NBS bridges
-otherwise-disjoint regions and must land them in the *same* component (shared
-mass balance). Edges come from:
+**Added:**
+- `watercourses` `runoff` (`V_c`) exposed to the router;
+- signed-correction propagation `max(V+c,0) − max(V,0)` inside `_route_flow`;
+- zero-infiltration enforcement at `setup_network`.
 
-- `path → target_trap`, `trap → spill_path`, and `path` merges (terrain + tribs);
-- **culverts**: unite the path/trap owning the inlet with the one owning the
-  outlet;
-- **NBS**: unite each NBS's coupled elements —
-  - *emission*: paths carrying one of its outlets (`nbs_outlets`);
-  - *outflow deduction*: paths whose **first cell** is one of the NBS's
-    `footprint_outflow_cells` (the seed stores the external `ds` cell, so this is
-    a `net`-only test);
-  - *accumulation deduction*: the network trap holding its
-    `internal_accumulation_cells`. Accumulation seeds register a trap (a sink)
-    with no flow path, so they can't be matched cell-on-path; instead map each
-    cell to its lowest-level region (`tstruct.regions[c]`, deduped — absorbs
-    flat many-celled bottoms) and then to the one network trap in that region's
-    `supertraps_of` hierarchy (asserted unique). This is the only NBS link that
-    needs `tstruct`.
+## 11. Deferred / open
 
-### Deferred
-
-- Per-layer distinct outlets (§5) — single shared outlet for now.
-- The distributor / rate-layer re-implementation itself.
-
----
-
-## Relationship to the earlier implementation
-
-The earlier approach modelled the NBS as a `DynNBS` **overlay element** carried
-inside the `DynNetwork`, with its own layered state appended to the solver's
-state vector and re-emission derived at terrain-exit boundaries plus piped
-outlets. The redesign:
-
-- **drops `DynNBS`**; the `DynNetwork` carries `NBSPlacement` directly (NOTES:
-  possibly rename to `DynNBSPlacement` for consistency with `DynCulvert`), and
-  `NBSPlacement` is now mutable so its build-time cell-sets can be filled in;
-- reframes the NBS as a **pure correction to the fixed flow** rather than an
-  overlay node — capture as negative flow at boundary/accumulation cells,
-  emission as ordinary seeded flow paths at outlets;
-- builds the network **monolithically** (grow from all seeds into one
-  `DynNetwork`, dedup via a shared `pathmap`), then splits into connected
-  components, instead of tracing per-seed subnetworks and merging with offset
-  remapping.
+- Per-layer distinct outlets (single shared outlet for now; `nbs_outlets`
+  currently a 2-tuple `(placement_ix, position)`, extend to add `layer_ix`).
+- Evapotranspiration (explicit `0.0` placeholder in the layer loop today).
+- `watercourses`'s `used_infiltration` return is the *oblivious* total (computed
+  once from the no-NBS flow field); the NBS correction changes actual downstream
+  flow and hence true infiltration, so the two differ. Harmless today — the only
+  caller discards it (`flow.jl` `_`). Reconcile only if some future caller reads
+  it as an NBS-aware water budget.
+- Far-downstream *static* traps keep their oblivious (slightly-high) changetime
+  estimate until the frontier reaches them and they join the network — the same
+  approximation the network already makes.
