@@ -1057,9 +1057,9 @@ event, steady state, or `tmax`.  `state` is updated in place.
 |             | `full_traps`.  Set `state[child] = prevfloat(C_child)`.  Rebuild.   |
 | `:none`     | Steady state; no further event.                                       |
 
-FULL traps that were neither the event trigger nor changed topology may have tiny
-ODE-induced drift away from exact C.  The caller should clamp them to exactly C
-(consistent with its authoritative `full_traps` list) before the next call.
+A FULL trap that stays adequately fed keeps `dV == 0` exactly (the spill term cancels
+`inflow - loss`), so it remains at exactly C — no drift, nothing for the caller to clamp.
+A FULL trap whose inflow falls below its losses fires `:unspill` instead.
 """
 function solveDynNetwork!(state::AbstractVector{Float64},
                           tstruct::TrapStructure,
