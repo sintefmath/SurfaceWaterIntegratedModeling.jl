@@ -1,13 +1,28 @@
-# NOTES TO SELF
-# - [x] DynNBSPlacement moved to elements.jl (renamed from NBSPlacement).  DynNBS still present;
-#       remove it once the distributor re-impl no longer needs the placement_ix overlay handle
-#       (gate plan Phase B — agent/GATE_INTEGRATION_PLAN.md).
-# - [ ] Contract that all NBS footprints should have zero infiltration (to avoid special handling in fill_sequence)
-# - [x] Included in the module (after network_updating.jl); its `setup_network` coexists with the
-#       old elements.jl one by arity until the gate (Phase D) retires the old path.
-
+# Traces the dynamic network over the terrain: from each seed cell, follow the flow
+# path to the next trap and repeat, so seeds grow into a set of connected components.
+#
+# @@@ Contract: NBS footprints should have zero infiltration (avoids special-casing in
+#     fill_sequence).
 
 # ----------------------------------------------------------------------------
+"""
+        setup_network(tstruct, full_traps; dyn_coords, culverts, nbs)
+
+Trace the dynamic-flow network over the terrain and return it as a
+`Vector{DynNetwork}` (one per connected component).
+
+Seeds are the `dyn_coords`, both endpoints of every culvert, and the NBS outflow
+cells; from each seed the flow path is followed trap-to-trap until it leaves the
+domain or reaches a trap already in the network.
+
+# Arguments
+- `tstruct`: the `TrapStructure` holding terrain, flow graph, traps and spillpoints.
+- `full_traps`: indices of traps currently at capacity (they spill onward).
+- `dyn_coords`, `culverts`, `nbs`: the dynamic seeds to trace from.
+
+# Returns
+`Vector{DynNetwork}` — the traced network split into connected components.
+"""
 function setup_network(tstruct, full_traps;
                        dyn_coords::Vector{CartesianIndex{2}}=CartesianIndex{2}[],
                        culverts::Vector{DynCulvert}=DynCulvert[],
@@ -54,6 +69,7 @@ function setup_network(tstruct, full_traps;
 end
 
 # ----------------------------------------------------------------------------
+# Invert the flow graph: map each cell to the list of cells that drain into it.
 function _map_inverse_flow(flowgraph)
     inv_flow = Dict{Int, Vector{Int}}()
     for cell in 1:Graphs.nv(flowgraph)
@@ -67,6 +83,7 @@ function _map_inverse_flow(flowgraph)
 end
 
 # ----------------------------------------------------------------------------
+# Fill each placement's inflow / outflow / internal-accumulation cell lists from its footprint.
 function _compute_nbs_inflow_outflow_cells!(nbs, tstruct)
     inv_flow = _map_inverse_flow(tstruct.flowgraph)
     CI = CartesianIndices(tstruct.topography)
@@ -81,6 +98,10 @@ function _compute_nbs_inflow_outflow_cells!(nbs, tstruct)
 end
 
 # ----------------------------------------------------------------------------
+# Follow the flow path from `start_cell` to the trap it ends in; return
+# `(path, trap_ix)`, where `trap_ix == 0` means it exits the domain.  The end trap
+# is the highest full supertrap over the terminal region (or the lowest-level trap
+# if none are full); its footprint cells are stripped from `path`.
 function _trace_to_next_trap(tstruct, start_cell, full_traps)
 
     path = _trace_path(tstruct, start_cell)
@@ -191,6 +212,9 @@ end
 # (in network_updating.jl), the live-grow counterpart of `detach_spill!`.
 
 # ----------------------------------------------------------------------------
+# Register `path`'s cells in `pathmap` under `path_ix`, truncating it where it first
+# meets an already-claimed cell.  Returns `(isect_path, isect_cell)` of that meeting
+# point (both 0 if none).
 function _update_pathmap!(pathmap, path::Vector{Int}, path_ix)
     # check if path intersects with any existing NBS or culvert
     isect_path, isect_cell = 0, 0
@@ -211,6 +235,8 @@ function _update_pathmap!(pathmap, path::Vector{Int}, path_ix)
 end
 
 # ----------------------------------------------------------------------------
+# The culvert inlets/outlets and NBS outlets falling inside a trap `footprint`,
+# returned as bare id lists (a trap has no along-path position).
 function _intersecting_culverts_and_nbs_outlets(footprint, culverts, nbs)
     cv_in = Int[]
     cv_out = Int[]
@@ -255,8 +281,8 @@ function _intersecting_on_path(path, culverts, nbs)
 end
 
 # ----------------------------------------------------------------------------
+# Error if any culvert endpoint or dyn_coord lies inside an NBS footprint.
 function _validate_network_inputs(tstruct, dyn_coords, culverts, nbs)
-    # Check that no culvert or dyn_coord is inside an NBS footprint
     nbs_footprints = vcat([n.footprint for n in nbs]...)
     LI = LinearIndices(tstruct.topography)
     for culvert in culverts
@@ -272,6 +298,7 @@ function _validate_network_inputs(tstruct, dyn_coords, culverts, nbs)
 end
 
 # ----------------------------------------------------------------------------
+# External cells the footprint drains into (downstream neighbours outside it).
 function _footprint_outflow_cells(tstruct, footprint::Vector{Int})
     flowgraph = tstruct.flowgraph
     outflow_cells = Set{Int}()
@@ -291,6 +318,7 @@ function _footprint_outflow_cells(tstruct, footprint::Vector{Int})
 end
 
 # ----------------------------------------------------------------------------
+# External cells that drain into the footprint (upstream neighbours outside it).
 function _footprint_inflow_cells(inv_flow::Dict{Int, Vector{Int}},
                                  footprint::Vector{Int})
     all_inflow_cells = vcat([get(inv_flow, cell, Int[]) for cell in footprint]...)

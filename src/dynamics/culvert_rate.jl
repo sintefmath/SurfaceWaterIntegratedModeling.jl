@@ -1,9 +1,7 @@
 # Culvert flow-rate hydraulics.
 #
 # Computes the volumetric flow (m^3/s, SI) through a `DynCulvert` given the water
-# level at each end.  Simplified FHWA HDS-5 model (see
-# agent/reports/culvert_hydraulics_reference.md and the "Clarifications" heading in
-# agent/prompts/culvert_rate_implementation.org):
+# level at each end.  Simplified FHWA HDS-5 model:
 #
 #   * Inlet control: a hard switch on the upstream end's submergence -- weir below,
 #     orifice once submerged.  No weir<->orifice transition blend.

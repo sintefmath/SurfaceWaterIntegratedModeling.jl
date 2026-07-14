@@ -269,6 +269,5 @@ function compute_outflow(K, n, Smax, S; mollifier=0.0)
     return K * tmp^n
 end
 
-# DynNBSPlacement was moved to dynamics/elements.jl and renamed DynNBSPlacement (it is a
-# DynObject and needs to be defined alongside the other Dyn* network elements; this
-# file now holds only the layer-storage model, so it can be included before elements.jl).
+# This file holds only the layer-storage model, so it can be included before elements.jl;
+# the placement type (`DynNBSPlacement`) lives with the other Dyn* elements in elements.jl.

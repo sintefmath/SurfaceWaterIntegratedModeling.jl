@@ -2,7 +2,7 @@
 # empty during a solve, tracked by a reachability counter on traps (a trap is dynamic while
 # `in_count > 0`).  `grow_spill!` and `detach_spill!` are the two symmetric per-network
 # mutations; `apply_fill!` / `apply_unfill!` drive them across the live component set
-# (fusing components a grow couples together).  See agent/DYNAMIC_MEMBERSHIP_PLAN.md.
+# (fusing components a grow couples together).
 
 export init_in_counts!, detach_spill!, grow_spill!, apply_fill!, apply_unfill!, apply_empty!
 
@@ -185,9 +185,8 @@ migrate from static handling and seed their state.
 
 # Notes
 The trace stops at the first already-present trap (its downstream is already represented;
-only the connector is attached).  Growth crossing into a *different* component (fusion,
-PLAN §5) is **not** handled here.  Uses `_grow_network_from_seed!` from build_network.jl
-(not yet in the module include list), so this currently requires that file to be loaded.
+only the connector is attached).  Growth crossing into a *different* component (fusion) is
+**not** handled here — the caller (`apply_fill!`) detects the coupling and fuses.
 """
 function grow_spill!(net::DynNetwork, tstruct, full_traps, trap_id::Int)
     spoint = tstruct.spillpoints[net.traps[trap_id].trap_ix]

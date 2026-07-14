@@ -1,20 +1,20 @@
 import Graphs
 
-export DynObject, DynFlowPath, DynTrap, DynCulvert, DynNBS, DynNBSPlacement, DynNetwork, setup_network
+export DynObject, DynFlowPath, DynTrap, DynCulvert, DynNBSPlacement, DynNetwork, setup_network
 
 # Make generic baseclass for dynamic objects
 abstract type DynObject end
 
 """
-        DynFlowPath(cells, target_trap, culvert_inlets, culvert_outlets, merges)
+        DynFlowPath(cells, departure_point, target_trap, culvert_inlets, culvert_outlets, nbs_outlets, merges)
 
-Represent a flow path over the terrain, represented by a sequence of grid cells.
-The flow path may lead into a trap (target_trap), terminate in an intersecting
-flow path (target_trap=0), or flow out of the domain (target_trap=0).
+Represent a flow path over the terrain as a sequence of grid cells.  The path may
+lead into a trap (`target_trap > 0`), terminate in an intersecting flow path, or
+flow out of the domain (`target_trap == 0` for both).
 
-The flow path may also include culverts along the way.  Culvert inlets would
-subtract water from the flow path, whereas culvert outlets would add water to it.
-The infiltration capacity of each cell in the path is represented externally.
+Culverts and NBS outlets along the way subtract or add water; the infiltration
+capacity of each cell is represented externally.  Convenience constructors default
+`departure_point` to the head cell and the culvert/nbs/merge lists to empty.
 
 """
 struct DynFlowPath <: DynObject
@@ -146,8 +146,7 @@ function DynCulvert(tstruct, inlet::CartesianIndex{2}, outlet::CartesianIndex{2}
     # Manning friction as a dimensionless loss coefficient (HDS-5 eq. 3.5, SI):
     # Kf = Ku * n^2 * L / R^(4/3), with assembled friction constant Ku = 19.63
     # (SI; = 2g/km^2 with Manning unit coef km = 1) and hydraulic radius R = D/4
-    # for a full circular pipe.  (R-based form, not D-based -- see §3 of
-    # agent/reports/culvert_hydraulics_reference.md.)
+    # for a full circular pipe (R-based form, not D-based).
     # @@@ R = D/4, not D/2: hydraulic radius is A/P = pi*r^2 / (2*pi*r) = r/2 = D/4.
     R  = D / 4                          # hydraulic radius, full circular pipe
     Kf = 19.63 * n^2 * L / R^(4/3)

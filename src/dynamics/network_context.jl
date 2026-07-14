@@ -2,8 +2,6 @@
 # DynNetworkContext: drives one DynNetwork between topology changes inside
 # `fill_sequence` — the integration layer between the analytical fill-sequence
 # machinery and the multi-trap ODE solver `solveDynNetwork!`.
-# Design notes: agent/reports/integrate_networks_plan.md (§2 state, §3 lifecycle,
-# §4 external inflow, §5 bounded integration).
 # ============================================================================
 
 """
@@ -41,7 +39,7 @@ mutable struct DynNetworkContext
 end
 
 # ----------------------------------------------------------------------------
-# Per-node external inflow (plan §4): each node's sum of `trap_inflow` over its leaf
+# Per-node external inflow: each node's sum of `trap_inflow` over its leaf
 # descendants (`lowest_subtraps_for[t]`, == [t] for a leaf).  Summed from the leaves,
 # not `getinflow(node)` directly, because `_reconcile_spillgraph!` withdraws covered
 # children's flow from the parent's `trap_inflow`, leaving it stale — leaf values stay current.
@@ -77,9 +75,9 @@ end
 # The trap indices that are *nodes* of some active network.
 _net_trap_set(contexts) = Set{Int}(g for ctx in contexts for g in ctx.global_ix)
 
-# `net_trap_set` plus every descendant subsumed under a network parent node
-# (Design A): those subsumed children are full and static while their parent is a
-# node, so they must be excluded from the standard changetime machinery.
+# `net_trap_set` plus every descendant subsumed under a network parent node: those
+# subsumed children are full and static while their parent is a node, so they must be
+# excluded from the standard changetime machinery.
 function _net_covered_set(contexts, tstruct)
     s = Set{Int}()
     for ctx in contexts, g in ctx.global_ix
@@ -253,7 +251,7 @@ end
 # Overlay the boundary volumes of fired traps that did NOT just become full.  An :empty
 # parent drops to 0 and EXPOSES its immediate children — they go from full to transitory
 # (just below their own capacity), so they leave `full_traps` (the caller already flipped
-# them — §`_expand_empty_fill_updates`) and start at prevfloat(C_child).  An :unspill trap
+# them via `_expand_empty_fill_updates`) and start at prevfloat(C_child).  An :unspill trap
 # drops to prevfloat(C).
 function _apply_fired_boundaries!(committed, fired_kind, tstruct)
     for (ft, k) in fired_kind
@@ -270,7 +268,7 @@ function _apply_fired_boundaries!(committed, fired_kind, tstruct)
 end
 
 # ----------------------------------------------------------------------------
-# Weather-period boundary finalization (plan §10): advance every context to `endtime`
+# Weather-period boundary finalization: advance every context to `endtime`
 # under its cached external inflow and read the settled volumes.  Network traps follow the
 # multi-trap ODE, so they can't use the constant-rate `fill_trap_until` projection — and
 # these exact volumes are what the NEXT period rebuilds from.  The advance is event-free
@@ -320,7 +318,7 @@ function _expand_empty_fill_updates(fill_updates, net_contexts, tstruct)
     return isempty(extra) ? fill_updates : vcat(fill_updates, extra)
 end
 
-# Amount updates for network traps whose volume the network owns (§9): a node carries
+# Amount updates for network traps whose volume the network owns: a node carries
 # its committed ODE volume; a subsumed full descendant is at capacity; a trap that just
 # LEFT the networks (e.g. an emptied parent) takes its committed boundary value.
 # `affected` is the union of the pre- and post-touch covered sets.  Only traps whose

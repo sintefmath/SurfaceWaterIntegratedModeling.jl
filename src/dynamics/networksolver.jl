@@ -156,9 +156,8 @@ Infiltration loss rate of trap `g` holding stored volume `V`: the per-cell
 infiltration rate summed over only the currently-submerged footprint cells
 (those whose terrain bottom lies at or below the current water level).
 
-This realises the wetted-area dependence the prompt calls for: a partially-filled
-trap infiltrates only through its wetted footprint, while a full trap (`V >=
-capacity`, level `Inf`) infiltrates over its whole footprint.  Mirrors the
+A partially-filled trap infiltrates only through its wetted footprint, while a full
+trap (`V >= capacity`, level `Inf`) infiltrates over its whole footprint.  Mirrors the
 `infilfun(trap_bottom .<= z)` term in `_setup_dvdt`.
 """
 function wetted_infiltration(g::TrapGeometry, V::Real)
@@ -543,9 +542,9 @@ end
 # NBS terrain re-emit: the natural (no-NBS) exit split of a footprint.
 #
 # The top `n_terrain` layers of an NBS re-emit their overflow at the footprint's
-# lower-edge exit boundary, spread the way the terrain would naturally spread it
-# (see agent/NBS_OPTION1_OVERLAY_PLAN.md §3).  This computes that static split:
-# each footprint cell contributes a unit of drainage, followed downstream through
+# lower-edge exit boundary, spread the way the terrain would naturally spread it.
+# This computes that static split: each footprint cell contributes a unit of
+# drainage, followed downstream through
 # the terrain flow tree until it first leaves the footprint; the first outside
 # cell is that unit's exit.  A cell's weight is the fraction of footprint cells
 # whose drainage exits there, so a funnel footprint (all flow leaving one cell)
@@ -558,7 +557,7 @@ end
 # `watercourses` sweep resolves such a cell: a trap bottom (`regions > 0`) is an
 # internal pit — its water ponds inside the footprint and contributes no exit; a
 # cell with `regions <= 0` drains off the domain edge, which is a valid terrain
-# exit (plan §3, "ordinary off-domain case") represented by the sentinel cell 0.
+# exit (the ordinary off-domain case) represented by the sentinel cell 0.
 #
 # Returns the exit cells (linear indices, all *outside* the footprint so the sink
 # overlay in `watercourses` does not re-swallow the re-emit; the sentinel 0 marks
@@ -595,8 +594,8 @@ end
 # Network rate function.
 #
 # `dynNetworkRateFunction!` is the in-place ODE right-hand side over the trap-
-# volume state, analogous to `NBSNetworkRateFunction!` in SUrbArea's NBS.jl.  Its
-# parameters (`DynNetworkRateParams`) bundle everything that is static for a solve
+# volume state.  Its parameters (`DynNetworkRateParams`) bundle everything that is
+# static for a solve
 # -- geometry, the constant external inflow, the infiltration sums, and the
 # routing plan -- so the per-step work is just routing + a loop over traps.
 # ============================================================================
@@ -664,7 +663,7 @@ RouteScratch(nt::Int, np::Int, ncv::Int, nnbs::Int = 0) =
 # water leaves the domain).  Fluxes are power-law in the layer storage
 # (`compute_outflow`), computed in the mm units the model is defined in with the
 # mm<->m^3 conversion (`S_mm = V*1000/A`, `Q_m3 = Q_mm*1e-3`) done in the plan/rate
-# function.  See agent/NBS_OPTION1_OVERLAY_PLAN.md §3/§7/§7a.
+# function.
 struct NBSLayerParams
     Kout::Float64; nout::Float64; Smax_mm::Float64
     Kinf::Float64; ninf::Float64; Smin_mm::Float64
@@ -684,15 +683,15 @@ struct NBSPlan
     nbs_into        ::Vector{Vector{Int}}             # per NBS element: slots re-emitted onto its
                                                       # footprint by an upstream element (NBS→NBS
                                                       # capture, read as extra layer-1 inflow)
-    # --- submergence (plan §5) ---
+    # --- submergence ---
     n_terrain       ::Vector{Int}         # per NBS: size of the above-grade surface block (layers 1..n_terrain)
     containing_trap ::Vector{Int}         # per NBS: local trap covering the lowest footprint cell (0 = none)
     z_sub           ::Vector{Float64}     # per NBS: submergence threshold = lowest footprint elevation
     submerged       ::Vector{Bool}        # per NBS: current mode (surface block flooded / merged)
 end
 
-# Saturated-conduit intake of a (submerged) surface layer (plan §5b, resolved: saturated
-# conduit): once the surface is flooded, water is drawn down at the layer's infiltration
+# Saturated-conduit intake of a (submerged) surface layer: once the surface is flooded,
+# water is drawn down at the layer's infiltration
 # *capacity*, evaluated at its own Smax (capacity-limited, constant, reuses the calibrated
 # params in-range).  Returns m^3/time.  Isolated in one helper so switching to a
 # flood-head-driven form later is a single-line change.
@@ -783,7 +782,7 @@ function _build_nbs_plan(net::DynNetwork, tstruct,
         end
         push!(layer_slots, per_layer)
 
-        # Submergence geometry (plan §5): the surface floods when the containing trap's
+        # Submergence geometry: the surface floods when the containing trap's
         # water level reaches the lowest footprint cell.  The containing trap is the
         # network trap covering that lowest cell (0 if the footprint is not inside a
         # network trap — then submergence cannot arise).
@@ -862,9 +861,6 @@ function _build_rate_params(tstruct::TrapStructure,
                             infiltration::AbstractMatrix{<:Real},
                             external_inflow::AbstractVector{<:Real};
                             path_inflow = nothing,
-                            # @@@ nbs_placements is unused since B2 (net.nbs carries the
-                            #     DynNBSPlacements); kept until the old context stops passing it (gate C).
-                            nbs_placements::Vector{DynNBSPlacement} = DynNBSPlacement[],
                             nbs_inflow::AbstractVector{<:Real} = Float64[],
                             nbs_submerged::Dict{Int,Bool} = Dict{Int,Bool}(),
                             zvt = nothing)
@@ -922,7 +918,7 @@ and fills at its wetted-area rate
     dV = inflow - wetted_infiltration(V).
 
 `inflow` is the caller's constant inflow plus everything routed in from upstream
-full traps (see [`_route_flow`](@ref)).  Mirrors `NBSNetworkRateFunction!`.
+full traps (see [`_route_flow`](@ref)).
 """
 # The routed inflow into every trap at state `V`, plus which traps are full
 # (spilling).  Shared by the rate function and the :unspill event condition, which
@@ -957,7 +953,7 @@ function _routed_inflow(V, p::DynNetworkRateParams)
                          p.sorted_trib_info, p.order, p.merge_target,
                          p.cvplan, trap_level, p.path_events; scratch = sc,
                          nbs_actual = nbs_actual, nbs_trap_outlets = nbs_trap_outlets)
-    # Submerged NBS exchange with its containing trap (plan §5): the captured footprint
+    # Submerged NBS exchange with its containing trap: the captured footprint
     # runoff joins the flood and a saturated-conduit draw is taken back out.  Injected as
     # a trap-inflow adjustment (not a dV term) so the trap's own full/accumulating logic
     # handles it — a full flooding trap spills the surplus rather than over-filling.  The
@@ -1032,9 +1028,9 @@ function dynNetworkRateFunction!(dV, V, p::DynNetworkRateParams, t = 0.0)
                     S_mm = V[nt + base + l] * 1000.0 / lp.A
                     qo   = compute_outflow(lp.Kout, lp.nout, lp.Smax_mm, S_mm) * 1e-3
                     qi   = compute_outflow(lp.Kinf, lp.ninf, lp.Smin_mm, S_mm) * 1e-3
-                    # @@@ evapotranspiration deferred (plan §Deferred 4): ET is an explicit 0.0
-                    #     placeholder computed from EVCoeff/EVS11 here, so wiring it in is a
-                    #     one-line change per layer, not a restructuring.  Do not drop the term.
+                    # @@@ evapotranspiration deferred: ET is an explicit 0.0 placeholder, so
+                    #     wiring it in (from EVCoeff/EVS11) is a one-line change per layer, not
+                    #     a restructuring.  Do not drop the term.
                     ET = 0.0
                     dV[nt + base + l] = prev_qi - qo - qi - ET
                     # Physical floor: a layer cannot drain below empty.
@@ -1042,7 +1038,7 @@ function dynNetworkRateFunction!(dV, V, p::DynNetworkRateParams, t = 0.0)
                     prev_qi = qi
                 end
             else
-                # --- submerged (plan §5): the surface block (layers 1..n_terrain) is under
+                # --- submerged: the surface block (layers 1..n_terrain) is under
                 # the flood and merged into the containing trap — frozen, no re-emit.  The
                 # trap exchange (captured runoff in, saturated-conduit draw out) was applied
                 # to the trap inflow in `_routed_inflow`; here the subsurface consumes `draw`
@@ -1161,7 +1157,7 @@ function _event_conditions(p::DynNetworkRateParams,
     return conds
 end
 
-# Set each NBS element's submerged flag from the current trap levels (plan §5): submerged
+# Set each NBS element's submerged flag from the current trap levels: submerged
 # iff the containing trap's surface level has reached the footprint's flood threshold.
 # Derived (not persisted) so it is always self-consistent with the committed state at the
 # start of every solve; the in-solve :submerge event keeps it consistent across a window.
@@ -1348,10 +1344,9 @@ end
 #
 # Wires the pieces together: build the static rate parameters, identify the
 # evolving traps, integrate the trap-volume state forward as an `ODEProblem`, and
-# stop at the first event.  Mirrors `solveNBSNetwork` in SUrbArea's NBS.jl, but
-# the stop criterion is event-driven (a topology change) rather than a fixed time
-# horizon, so no `tspan` is taken: integration runs to the first event, or to
-# steady state (reported as an event time of `Inf`).
+# stop at the first event.  The stop criterion is event-driven (a topology change)
+# rather than a fixed time horizon, so no `tspan` is taken: integration runs to the
+# first event, or to steady state (reported as an event time of `Inf`).
 # ============================================================================
 
 # ----------------------------------------------------------------------------
@@ -1401,10 +1396,9 @@ function _validate_network(tstruct::TrapStructure,
             # a lowest-level trap may legitimately sit empty; nothing to check.
         else                                          # TRANSITORY
             # This branch also covers a *parent* node sitting at its floor (V == 0):
-            # under Design A a parent node subsumes its (full) children, so V == 0 is
-            # the parent's own-volume floor with the children submerged — a valid
-            # TRANSITORY state, not EMPTY.  It must, like any not-yet-full trap, have
-            # no downstream spill path.
+            # a parent node subsumes its (full) children, so V == 0 is the parent's
+            # own-volume floor with the children submerged — a valid TRANSITORY state,
+            # not EMPTY.  It must, like any not-yet-full trap, have no downstream spill path.
             trap.spill_path == 0 ||
                 error("solveDynNetwork!: TRANSITORY trap $(trap.trap_ix) has spill_path > 0. " *
                       "A trap that is not yet full should not have a downstream spill path. " *
@@ -1498,7 +1492,6 @@ function solveDynNetwork!(state::AbstractVector{Float64},
                           inflow::AbstractVector{<:Real};
                           tmax = Inf,
                           path_inflow = nothing,
-                          nbs_placements::Vector{DynNBSPlacement} = DynNBSPlacement[],
                           nbs_inflow::AbstractVector{<:Real} = Float64[],
                           # Loosened from 1e-8: physical accuracy needs only ~mL (abstol, m^3)
                           # and ~ms.  ~Halves the ODE step count on the culvert worst case;
@@ -1509,8 +1502,7 @@ function solveDynNetwork!(state::AbstractVector{Float64},
 
     nt = length(net.traps)
     p  = _build_rate_params(tstruct, net, infiltration, inflow;
-                            path_inflow=path_inflow, nbs_placements=nbs_placements,
-                            nbs_inflow=nbs_inflow, zvt=zvt)
+                            path_inflow=path_inflow, nbs_inflow=nbs_inflow, zvt=zvt)
     @assert length(state) == nt + _nbs_state_count(p) """
         state must have one entry per trap in net.traps plus one per NBS layer \
         ($(nt) traps + $(_nbs_state_count(p)) NBS layer states)"""
@@ -1518,8 +1510,8 @@ function solveDynNetwork!(state::AbstractVector{Float64},
 
     _validate_network(tstruct, net, V0, p.geom)
 
-    # Derive each NBS element's submerged regime from the current trap levels (plan §5),
-    # so the rate function starts consistent with the committed state regardless of the
+    # Derive each NBS element's submerged regime from the current trap levels, so the
+    # rate function starts consistent with the committed state regardless of the
     # dict passed in; the in-solve :submerge event keeps it consistent through the window.
     _reconcile_submergence!(p, V0)
 
