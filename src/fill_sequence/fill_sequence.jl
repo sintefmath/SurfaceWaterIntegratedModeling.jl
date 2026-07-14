@@ -37,32 +37,27 @@ function fill_sequence(tstruct::TrapStructure{<:Real},
             culverts::Vector{DynCulvert} = DynCulvert[],
             nbs::Vector{DynNBSPlacement} = DynNBSPlacement[],
             verbose::Bool=false)::Vector{SpillEvent}
-    @assert !isempty(weather_events)
 
-    num_traps = numtraps(tstruct)
-    (num_traps == 0) && return SpillEvent[] # no traps -> empty sequence (return
-                                            # type is Vector{SpillEvent})
+    @assert !isempty(weather_events)
+    (numtraps(tstruct) == 0) && return SpillEvent[] # no traps -> empty sequence
     
     # initialize infiltration map from user input
-    infiltration =
-        (typeof(infiltration) == Nothing) ? zeros(size(tstruct.topography)) :
-        (typeof(infiltration) <: Real)  ? ones(size(tstruct.topography)) * infiltration :
-                                          infiltration
-    # compute tables to support computation of trap water volume as function of
-    # water level
+    infiltration = (typeof(infiltration) == Nothing) ? zeros(size(tstruct.topography)) :
+                   (typeof(infiltration) <: Real)    ? ones(size(tstruct.topography)) * infiltration :
+                                                      copy(infiltration)
+    # ensuring no infiltration overlaps with NBS footprints
+    infiltration[vcat([n.footprint for n in nbs]...)] .= 0.0
+
+    # compute tables to support computation of trap water volume as function of water level
     z_vol_tables = _compute_z_vol_tables(tstruct)
 
     # set initial filled_traps, cur_amounts and spillgraph
     filled_traps = Vector{Bool}(tstruct.trapvolumes .== 0.0)
-    cur_amounts = fill(FilledAmount(0.0, weather_events[1].timestamp), num_traps)    
-    sgraph = compute_complete_spillgraph(tstruct, filled_traps) 
+    cur_amounts = fill(FilledAmount(0.0, weather_events[1].timestamp), numtraps(tstruct))    
+    sgraph = compute_complete_spillgraph(tstruct, filled_traps) # traps are nodes here
     
-    # start with empty sequence
+    # start with empty sequence.  `nbs_state` represents the persistent NBS layer storage
     seq = Vector{SpillEvent}()
-
-    # Persistent NBS layer storage, keyed by placement index — the single source of
-    # truth for each NBS's water content across events and weather periods (see
-    # network_context.jl's _nbs_layer_block / _store_nbs_state!).  Empty when no NBS.
     nbs_state = Dict{Int,Vector{Float64}}()
 
     # compute development within the duration of each weather event
@@ -75,7 +70,7 @@ function fill_sequence(tstruct::TrapStructure{<:Real},
 
         # compute inflow/runoff/infiltration rates corresponding to the fill
         # graph and new rain rate
-        rateinfo = compute_flow(sgraph, we.rain_rate, infiltration, tstruct, verbose; nbs=nbs)
+        rateinfo = compute_flow(sgraph, we.rain_rate, infiltration, tstruct, verbose)
 
         # build the dynamic networks for this weather period (§3) with the incremental
         # membership driver; empty when no dyn_traps/culverts/nbs are supplied, in which

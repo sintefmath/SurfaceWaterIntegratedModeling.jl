@@ -24,13 +24,6 @@ grid with the corresponding values.
 - `infiltration::Matrix{<:Real}`: A grid expressing the maximum infiltration rate
                                   per grid cell.  If left empty, it will be substituted
                                   by a grid filled with zeros.
-- `nbs::Vector{DynNBSPlacement}`: Nature-Based-Solution installations (empty by default).
-                  Each footprint cell acts as a sink in the accumulation sweep: it
-                  captures the runoff reaching it into the owning placement (returned as
-                  `nbs_inflow`) and does not forward it downstream, so downstream regions
-                  see the terrain with the NBS footprints removed as a flow throughway.
-                  Terrain infiltration under a footprint is dropped (the NBS layer model
-                  owns it).  See `agent/NBS_OPTION1_OVERLAY_PLAN.md` §1/§2.
 
 # Returns
 - `runoff::Matrix{Float64}`: Grid expressing infiltration excess runoff rate
@@ -46,15 +39,11 @@ grid with the corresponding values.
                           the sum of accumulation of its regions.
 - `offregion_runoff::Float64`: Total rate of water flowing off the domain
 - `used_infiltration::Float64`: Total infiltration rate across the terrain
-- `nbs_inflow::Vector{Float64}`: one entry per `nbs` placement — the total flow captured
-                          by that footprint (rain on the footprint + inflow across its
-                          boundary).  Empty when `nbs` is empty.
 """
 function watercourses(tstruct::TrapStructure{<:Real},
                       full_traps::Vector{Bool};
                       precipitation::Union{Matrix{<:Real}, Real} = 1.0,
-                      infiltration::Union{Matrix{<:Real}, Real} = 0.0,
-                      nbs::Vector{DynNBSPlacement} = DynNBSPlacement[])
+                      infiltration::Union{Matrix{<:Real}, Real} = 0.0)
 
     # expand `precipitation` and `infiltration` to matrices if necessary
     gridres = size(tstruct.topography)
@@ -66,19 +55,6 @@ function watercourses(tstruct::TrapStructure{<:Real},
     region_accum = zeros(Float64, max(maximum(tstruct.regions), 0))
     offregion_runoff = Ref(0.0)
 
-    # NBS footprint-as-sink overlay (agent/NBS_OPTION1_OVERLAY_PLAN.md §1/§2): each
-    # footprint cell terminates the accumulation sweep below and tallies its runoff into
-    # the owning placement.  This captures the NBS inflow (rain on the footprint + flow
-    # entering across its boundary) and stops that throughput from continuing downstream
-    # (so downstream traps do not double-count it).  Terrain infiltration under the
-    # footprint is dropped here — the NBS layer model owns infiltration there — so the
-    # footprint cells carry their gross precipitation into the tally.
-    nbs_inflow = zeros(Float64, length(nbs))
-    nbs_cell   = _nbs_sink_cells(nbs)          # linear cell -> placement index
-    for c in keys(nbs_cell)
-        runoff[c] = precipitation[c]
-    end
-
     # Compute basic flow field intensity, as if all traps were empty
     #g = compute_spillfield_graph(tstruct.spillfield)
     g = tstruct.flowgraph
@@ -87,12 +63,6 @@ function watercourses(tstruct::TrapStructure{<:Real},
     for cur_node in sortedg
 
         if runoff[cur_node] >= 0
-            # An NBS footprint cell is a sink: it captures the accumulated runoff into
-            # its placement and does NOT propagate it downstream.
-            if haskey(nbs_cell, cur_node)
-                nbs_inflow[nbs_cell[cur_node]] += runoff[cur_node]
-                continue
-            end
             # there is infiltration excess flow across this node.  Propagate downstream
             ds_node = Graphs.outneighbors(g, cur_node)
 
@@ -141,25 +111,8 @@ function watercourses(tstruct::TrapStructure{<:Real},
     end
     used_infiltration = sum(infiltration - remaining_infil_capacity)
 
-    return runoff, region_accum, offregion_runoff[], used_infiltration, nbs_inflow
+    return runoff, region_accum, offregion_runoff[], used_infiltration
 
-end
-
-# ----------------------------------------------------------------------------
-# Map each NBS footprint cell (linear index) to its placement index, for the
-# footprint-as-sink overlay in `watercourses`.  Overlapping footprints are rejected:
-# a cell can belong to at most one NBS (its captured flow has a single owner).
-function _nbs_sink_cells(nbs::Vector{DynNBSPlacement})
-    d = Dict{Int,Int}()
-    for (pi, p) in enumerate(nbs)
-        for c in p.footprint
-            haskey(d, c) &&
-                error("watercourses: NBS footprints overlap at cell $c " *
-                      "(placements $(d[c]) and $pi); footprints must be disjoint")
-            d[c] = pi
-        end
-    end
-    return d
 end
 
 # ----------------------------------------------------------------------------

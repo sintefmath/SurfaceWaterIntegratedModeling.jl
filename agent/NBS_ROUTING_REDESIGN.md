@@ -1,9 +1,10 @@
 # NBS routing redesign — design notes
 
-Status: design settled. **Routing/correction layer not yet implemented** — the
-current solver still uses the older footprint-as-sink + positive re-emit path
-(`watercourses` sink overlay, `nbs_actual` delivery slots, `_nbs_exit_weights`,
-`nbs_into`); this note describes the target that replaces it.
+Status: **implemented**. `watercourses` is NBS-oblivious; the correction lives in the
+network solver (`networksolver.jl`: `NBSElement`/`NBSPlan`, `_build_nbs_plan`,
+`_propagate_correction`, `_apply_nbs_corrections!`).  The old footprint-as-sink +
+positive re-emit path (sink overlay, `nbs_actual` slots, `_nbs_exit_weights`, `nbs_into`,
+submergence, `RouteScratch`) is deleted.  Deferred: submergence and NBS→NBS series (§11).
 
 Scope: how Nature-Based Solution (NBS) installations couple to the dynamic
 surface-flow network. Supersedes the overlay-element approach in
@@ -63,7 +64,7 @@ NOT lumped into a single emission:
   `I = Σ_c Q_c`), and the correction there is simply
 
   ```
-  c_in(c) = −X · Q_c,   with the single scalar   X = (dS + E_piped)/I   (§4.3)
+  c_in(c) = −X · Q_c,   with the single scalar   X = 1 − O_terrain/I   (§4.3)
   ```
 
   No weight vector — `Q_c` *is* the split. Boundary corrections propagate
@@ -188,17 +189,21 @@ conserved (§2).
 ### 4.3 `X` is used unclamped
 
 `X` is a single scalar per NBS per step, used directly as the multiplier
-`c_in(c) = −X·Q_c`. From the balance `I = dS + O_terrain + E_piped`:
+`c_in(c) = −X·Q_c`:
 
 ```
-X = 1 − O_terrain/I = (dS + E_piped) / I
+X = 1 − O_terrain/I
 ```
 
-i.e. the fraction of capture *not* re-emitted over the terrain — what the store
-kept plus what the pipes diverted. Prefer the `(dS + E_piped)/I` form: it reads
-straight off the solver quantities (`dS` from the layer-state derivatives,
-`E_piped` from the piped layers). Do **not** clamp `X` to `[0,1]` — it
-legitimately leaves that range:
+the fraction of capture *not* re-emitted over the terrain. `O_terrain` is the
+top-`n_terrain` layers' overflow, read directly from the layer state. **Use this
+form**, not `(dS + E_piped)/I` — the two are equal only when nothing infiltrates
+to ground. The layer model's bottom layer *does* infiltrate to ground (a fourth
+sink `G`), so the real balance is `I = dS + O_terrain + E_piped + G` and
+`(dS + E_piped)/I` understates retention by `G/I`, leaving ground-lost water
+wrongly flowing downstream (mass not conserved). `1 − O_terrain/I` is correct
+regardless of where the non-re-emitted capture went. Do **not** clamp `X` to
+`[0,1]` — it legitimately leaves that range:
 
 - `X ≤ 1` always holds (`O_terrain ≥ 0`).
 - `X ≥ 0` **fails**: a store filled under heavy rain keeps overflowing after
@@ -297,12 +302,20 @@ deferred reverse-culvert handling).
   persistence.
 
 **Added:**
-- `watercourses` `runoff` (`V_c`) exposed to the router;
-- signed-correction propagation `max(V+c,0) − max(V,0)` inside `_route_flow`;
-- zero-infiltration enforcement at `setup_network`.
+- the oblivious `runoff` grid threaded to the solver (`rateinfo.runoff` →
+  `DynNetworkContext.runoff` → `_build_nbs_plan`);
+- `_build_nbs_plan` (endpoints via `_nbs_endpoints`/`_walk_to_trap`, outlets via
+  `_nbs_outlets`), `_propagate_correction`, `_apply_nbs_corrections!`;
+- zero-infiltration on footprints (enforced in `fill_sequence`).
 
 ## 11. Deferred / open
 
+- **Submergence** — the containing trap flooding the footprint (surface block merges into
+  the flood, terrain re-emit stops).  Removed with the old overlay; re-add cleanly as a
+  separate geometric interaction if needed.
+- **NBS→NBS series** — an upstream element's correction landing on a downstream footprint
+  lowers its capture `I`.  Not modelled: each element's `I` is read from the oblivious
+  field, which over-counts an upstream element's full pass-through.
 - Per-layer distinct outlets (single shared outlet for now; `nbs_outlets`
   currently a 2-tuple `(placement_ix, position)`, extend to add `layer_ix`).
 - Evapotranspiration (explicit `0.0` placeholder in the layer loop today).

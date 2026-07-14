@@ -31,10 +31,8 @@ mutable struct DynNetworkContext
     inflow_sources  ::Set{Int}
     last_solve_time ::Float64
     extern_inflow   ::Vector{Float64}
-    extern_nbs_inflow::Vector{Float64}           # per-placement static footprint capture the
-                                                 # state evolves under (cached at the last touch,
-                                                 # like extern_inflow — keeps commit/predict
-                                                 # order-independent)
+    runoff          ::Matrix{Float64}            # the oblivious runoff grid (rateinfo.runoff), read
+                                                 # by the solver to build the NBS correction plan
     next_event      ::NamedTuple
 end
 
@@ -97,7 +95,7 @@ function _predict_network!(ctx::DynNetworkContext, tstruct, infiltration,
     res = solveDynNetwork!(copy(ctx.state), tstruct, ctx.net, infiltration,
                            ctx.extern_inflow;
                            tmax = endtime - ctx.last_solve_time, zvt = z_vol_tables,
-                           nbs_inflow = ctx.extern_nbs_inflow)
+                           runoff = ctx.runoff)
     ctx.next_event = (; time = res.time + ctx.last_solve_time,
                         trap = res.trap, kind = res.kind)
     return ctx.next_event
@@ -113,7 +111,7 @@ function _commit_network!(ctx::DynNetworkContext, tstruct, infiltration,
     res = solveDynNetwork!(ctx.state, tstruct, ctx.net, infiltration,
                            ctx.extern_inflow;
                            tmax = T_commit - ctx.last_solve_time, zvt = z_vol_tables,
-                           nbs_inflow = ctx.extern_nbs_inflow)
+                           runoff = ctx.runoff)
     ctx.last_solve_time = T_commit
     return res
 end
@@ -174,13 +172,12 @@ function _make_context(net::DynNetwork, tstruct, rateinfo, state0, cur_time,
     # storage carries across events and weather periods.
     state     = vcat(Float64[state0(g) for g in global_ix],
                      _nbs_layer_block(net, nbs_state))
-    # Cache the per-placement footprint capture the state evolves under (order-independent
-    # commit/predict, like extern_inflow).  `rateinfo.nbs_inflow` is empty when no NBS.
+    # Hold the oblivious runoff grid so the solver can build the NBS correction plan from it.
     return DynNetworkContext(net, state, global_ix,
                              _inflow_sources(net, tstruct),
                              cur_time,
                              _external_inflow(net, rateinfo, tstruct),
-                             copy(rateinfo.nbs_inflow),
+                             rateinfo.runoff,
                              (; time = Inf, trap = 0, kind = :none))
 end
 

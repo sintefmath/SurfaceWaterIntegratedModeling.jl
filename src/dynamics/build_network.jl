@@ -31,8 +31,8 @@ function setup_network(tstruct, full_traps;
     # Input validation (no culverts or dyn_coords inside NBS footprints)
     _validate_network_inputs(tstruct, dyn_coords, culverts, nbs)
 
-    # Stamp each placement's stable id = its position in this nbs vector, so the solver keys
-    # the static footprint capture (`nbs_inflow`, aligned to the same order) by `nb.id`.
+    # Stamp each placement's stable id = its position in this nbs vector, so its layer
+    # storage persists across events (keyed by `nb.id` in the driver's nbs_state store).
     for (i, nb) in enumerate(nbs); nb.id = i; end
 
     # Compute inflow and outflow cells for each NBS footprint

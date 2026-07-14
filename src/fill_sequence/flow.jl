@@ -23,14 +23,13 @@ function compute_flow(spillgraph::SpillGraph,
                       precipitation::Union{Real, Matrix{<:Real}},
                       infiltration::Union{Real, Matrix{<:Real}},
                       tstruct::TrapStructure{<:Real},
-                      verbose::Bool=false;
-                      nbs::Vector{DynNBSPlacement}=DynNBSPlacement[])
+                      verbose::Bool=false)
     num_traps = length(tstruct.spillpoints)
     num_regions = length(tstruct.supertraps_of)
 
     # compute initial spillfield with all traps empty
     println("compute initial rateinfo with all traps empty")
-    rateinfo = _compute_initial_rateinfo(precipitation, infiltration, tstruct; nbs=nbs)
+    rateinfo = _compute_initial_rateinfo(precipitation, infiltration, tstruct)
 
     # --- Add influence of traps spilling over ---
 
@@ -170,8 +169,7 @@ function _track_flow!(rateinfo, node, amount, tstruct)
 end
 
 # ----------------------------------------------------------------------------
-function _compute_initial_rateinfo(precipitation, infiltration, tstruct;
-                                   nbs::Vector{DynNBSPlacement}=DynNBSPlacement[])
+function _compute_initial_rateinfo(precipitation, infiltration, tstruct)
     if typeof(precipitation) <: Real
         precipitation = precipitation .* ones(size(tstruct.regions))
     end
@@ -179,15 +177,12 @@ function _compute_initial_rateinfo(precipitation, infiltration, tstruct;
         infiltration = infiltration .* ones(size(tstruct.regions))
     end
 
-    num_traps = length(tstruct.spillpoints)
-
-    # compute the basic runoff field with all traps empty; the NBS footprints act as
-    # sinks (their captured inflow returned in `nbs_inflow`, removed from downstream)
-    runoff, reg_accum, _, _, nbs_inflow =
+    # compute the basic runoff field with all traps empty (NBS-oblivious; the NBS effect
+    # is applied later as a signed correction inside the network solver)
+    runoff, reg_accum, _, _ =
         watercourses(tstruct, [false],
                      precipitation=precipitation,
-                     infiltration=infiltration,
-                     nbs=nbs)
+                     infiltration=infiltration)
 
     Smin = zeros(length(tstruct.footprints))
     Smax = zeros(length(tstruct.footprints))
@@ -195,7 +190,7 @@ function _compute_initial_rateinfo(precipitation, infiltration, tstruct;
     # all lowest-level traps are assigned the inflow from their region,
     # higher-level traps left at zero for now.
     trap_inflow = vcat(reg_accum, zeros(numtraps(tstruct) - numregions(tstruct)))
-    rateinfo = RateInfo(runoff, Smax, Smin, trap_inflow, nbs_inflow)
+    rateinfo = RateInfo(runoff, Smax, Smin, trap_inflow)
     _update_Smin_Smax!(rateinfo, tstruct, 1:length(tstruct.footprints))
 
     return rateinfo

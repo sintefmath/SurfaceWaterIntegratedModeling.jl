@@ -287,19 +287,16 @@ end
 # `(position, :trib|:cvin|:cvout, tributary-or-culvert index)`.  The list is static
 # for a solve (only the flow values it drives are dynamic), so it is built once and
 # reused every rate-function call instead of being rebuilt and re-sorted each time.
-function _path_event_templates(net::DynNetwork, nbsplan = nothing)
+function _path_event_templates(net::DynNetwork)
     return [begin
                 ev = Tuple{Int,Symbol,Int}[]
                 for (m, j)   in fp.merges;          push!(ev, (j,   :trib,  m));  end
                 for (ci, pos) in fp.culvert_inlets;  push!(ev, (pos, :cvin,  ci)); end
                 for (ci, pos) in fp.culvert_outlets; push!(ev, (pos, :cvout, ci)); end
-                if nbsplan !== nothing
-                    for (pos, slot) in nbsplan.nbs_path_events[p]; push!(ev, (pos, :nbsout, slot)); end
-                end
                 sort!(ev; by = first)
                 ev
             end
-            for (p, fp) in enumerate(net.flow_paths)]
+            for fp in net.flow_paths]
 end
 
 # Volumetric flow through culvert `ci` given the current trap water levels.  A flow-
@@ -372,7 +369,7 @@ end
 # precomputed `(pos, kind, idx)` stream (culvert-aware path) or `nothing`.  Mutates
 # `culvert_actual` to record what each culvert inlet on this path drew.
 function _path_delivered!(prefix, head_flow, tribs, events,
-                          trib_output, culvert_actual, nbs_actual, cvplan, net, trap_level)
+                          trib_output, culvert_actual, cvplan, net, trap_level)
     current  = head_flow
     prev_pfx = 0.0
     if events === nothing
@@ -388,8 +385,6 @@ function _path_delivered!(prefix, head_flow, tribs, events,
                 current += trib_output[idx]
             elseif kind === :cvout
                 current += culvert_actual[idx]                # deliver
-            elseif kind === :nbsout
-                current += nbs_actual[idx]                    # NBS layer overflow at its exit/outlet
             else                                              # :cvin
                 a = min(_culvert_flow(cvplan, net, idx, trap_level), current)
                 culvert_actual[idx] = a                       # drawn == delivered
@@ -406,8 +401,7 @@ end
 # spill its surplus into its spill path.  Mutates `trap_inflow`, `path_flow`, and
 # `culvert_actual`.
 function _route_trap_node!(i, net, trap_inflow, path_flow, footprint_infil,
-                           spilling, cvplan, trap_level, culvert_actual,
-                           nbs_actual, nbs_trap_outlets)
+                           spilling, cvplan, trap_level, culvert_actual)
     if cvplan !== nothing
         trap = net.traps[i]
         for ci in trap.culvert_outlets                # deliver (source drew earlier)
@@ -417,11 +411,6 @@ function _route_trap_node!(i, net, trap_inflow, path_flow, footprint_infil,
             q = _culvert_flow(cvplan, net, ci, trap_level)
             culvert_actual[ci] = q
             trap_inflow[i]    -= q
-        end
-    end
-    if nbs_trap_outlets !== nothing                   # deliver NBS overflow whose exit/outlet is this trap
-        for slot in nbs_trap_outlets[i]
-            trap_inflow[i] += nbs_actual[slot]
         end
     end
     if spilling[i]
@@ -449,10 +438,7 @@ function _route_flow(net::DynNetwork,
                      merge_target::AbstractVector{<:Integer},
                      cvplan = nothing,
                      trap_level = nothing,
-                     path_events = nothing;
-                     scratch = nothing,
-                     nbs_actual = Float64[],
-                     nbs_trap_outlets = nothing)
+                     path_events = nothing)
 
     np = length(net.flow_paths)
     nt = length(net.traps)
@@ -460,21 +446,12 @@ function _route_flow(net::DynNetwork,
     @assert length(path_infil_prefix) == length(merge_target) ==
             length(external_path_inflow) == length(sorted_trib_info) == np
 
-    # Working accumulators.  With a caller-supplied `scratch` (the hot per-solve path)
-    # they are reused in place; without one (the standalone/test path) they are freshly
-    # allocated.  Either way: `trap_inflow` seeded with external trap inflow, `path_flow`
-    # with per-path head inflow, `trib_output`/`culvert_actual` zeroed.
-    if scratch === nothing
-        trap_inflow = Float64.(external_inflow)
-        path_flow   = Float64.(external_path_inflow)
-        trib_output = zeros(Float64, np)
-        culvert_actual = cvplan === nothing ? Float64[] : zeros(Float64, length(net.culverts))
-    else
-        trap_inflow    = copyto!(scratch.trap_inflow, external_inflow)
-        path_flow      = copyto!(scratch.path_flow, external_path_inflow)
-        trib_output    = fill!(scratch.trib_output, 0.0)
-        culvert_actual = fill!(scratch.culvert_actual, 0.0)
-    end
+    # Working accumulators: `trap_inflow` seeded with external trap inflow, `path_flow` with
+    # per-path head inflow, `trib_output`/`culvert_actual` zeroed.
+    trap_inflow = Float64.(external_inflow)
+    path_flow   = Float64.(external_path_inflow)
+    trib_output = zeros(Float64, np)
+    culvert_actual = cvplan === nothing ? Float64[] : zeros(Float64, length(net.culverts))
 
     for node in order
         if node <= np                               # a flow path
@@ -482,7 +459,7 @@ function _route_flow(net::DynNetwork,
             events = path_events === nothing ? nothing : path_events[p]
             delivered = _path_delivered!(path_infil_prefix[p], path_flow[p],
                                          sorted_trib_info[p], events,
-                                         trib_output, culvert_actual, nbs_actual,
+                                         trib_output, culvert_actual,
                                          cvplan, net, trap_level)
             tt = net.flow_paths[p].target_trap
             if tt > 0
@@ -492,8 +469,7 @@ function _route_flow(net::DynNetwork,
             end                                      # else: exits the domain
         else                                        # a trap
             _route_trap_node!(node - np, net, trap_inflow, path_flow, footprint_infil,
-                              spilling, cvplan, trap_level, culvert_actual,
-                              nbs_actual, nbs_trap_outlets)
+                              spilling, cvplan, trap_level, culvert_actual)
         end
     end
     return trap_inflow
@@ -538,58 +514,6 @@ function _infil_prefix(cell_infil::AbstractVector{<:Real})
     return prefix
 end
 
-# ----------------------------------------------------------------------------
-# NBS terrain re-emit: the natural (no-NBS) exit split of a footprint.
-#
-# The top `n_terrain` layers of an NBS re-emit their overflow at the footprint's
-# lower-edge exit boundary, spread the way the terrain would naturally spread it.
-# This computes that static split: each footprint cell contributes a unit of
-# drainage, followed downstream through
-# the terrain flow tree until it first leaves the footprint; the first outside
-# cell is that unit's exit.  A cell's weight is the fraction of footprint cells
-# whose drainage exits there, so a funnel footprint (all flow leaving one cell)
-# collapses to a single target and a fan spreads across several.
-#
-# `tstruct.flowgraph` is a flow tree — every cell has at most one downstream
-# neighbour — so each unit's downstream walk is a simple chain with no branching
-# and (the graph being a DAG) is guaranteed to terminate.  A footprint cell whose
-# chain ends at a cell with no downstream neighbour is resolved the same way the
-# `watercourses` sweep resolves such a cell: a trap bottom (`regions > 0`) is an
-# internal pit — its water ponds inside the footprint and contributes no exit; a
-# cell with `regions <= 0` drains off the domain edge, which is a valid terrain
-# exit (the ordinary off-domain case) represented by the sentinel cell 0.
-#
-# Returns the exit cells (linear indices, all *outside* the footprint so the sink
-# overlay in `watercourses` does not re-swallow the re-emit; the sentinel 0 marks
-# the off-domain fraction) paired with weights summing to 1.  The off-domain
-# weight stays in the sum so mass is conserved when it is later dropped at
-# delivery.  Errors on a fully endorheic footprint (every cell ponds internally,
-# no terrain or off-domain exit) — such a placement must route via piped outlets.
-function _nbs_exit_weights(tstruct::TrapStructure, footprint::AbstractVector{<:Integer})
-    g       = tstruct.flowgraph
-    footset = Set{Int}(footprint)
-    exits   = Dict{Int,Float64}()                # exit cell (0 = off-domain) -> unit count
-    for c in footprint
-        cur = Int(c)
-        while cur in footset
-            ds = Graphs.outneighbors(g, cur)
-            isempty(ds) && break
-            cur = ds[1]
-        end
-        if cur in footset                        # chain ended at a no-downstream footprint cell
-            tstruct.regions[cur] > 0 && continue # trap bottom inside the footprint: ponds, no exit
-            exits[0] = get(exits, 0, 0.0) + 1.0  # regions <= 0: drains off the domain edge
-        else
-            exits[cur] = get(exits, cur, 0.0) + 1.0   # first cell outside the footprint
-        end
-    end
-    isempty(exits) &&
-        error("_nbs_exit_weights: footprint has no terrain exit (fully endorheic); " *
-              "its overflow cannot re-emit at terrain — use piped outlets instead")
-    total = sum(values(exits))
-    return sort!([(cell, w / total) for (cell, w) in exits]; by = first)
-end
-
 # ============================================================================
 # Network rate function.
 #
@@ -623,205 +547,186 @@ parameter.  Indexed network-locally (same order as `net.traps` / `net.flow_paths
   [`_merge_targets`](@ref))
 - `cvplan`, `path_events`: culvert routing data (or `nothing` when the net has no
   culverts)
-- `scratch`: reusable per-solve working buffers (`RouteScratch`), so the hot rate
-  function allocates nothing per call
 """
-# Reusable per-solve scratch buffers for `_routed_inflow`/`_route_flow`.  The rate
-# function is called very many times per solve (RK stages × many small steps), so
-# allocating its working arrays afresh each call dominated GC; these are allocated once
-# per solve (in `_build_rate_params`) and overwritten in place on every call.  Safe
-# because every caller consumes the result immediately, the solver is single-threaded,
-# and no call is re-entrant (see the callers of `_routed_inflow`).
-struct RouteScratch
-    spilling      ::Vector{Bool}
-    trap_level    ::Vector{Float64}
-    trap_inflow   ::Vector{Float64}
-    path_flow     ::Vector{Float64}
-    trib_output   ::Vector{Float64}
-    culvert_actual::Vector{Float64}
-    nbs_actual    ::Vector{Float64}    # per NBS overflow-delivery slot (like culvert_actual)
-end
-RouteScratch(nt::Int, np::Int, ncv::Int, nnbs::Int = 0) =
-    RouteScratch(Vector{Bool}(undef, nt), Vector{Float64}(undef, nt),
-                 Vector{Float64}(undef, nt), Vector{Float64}(undef, np),
-                 Vector{Float64}(undef, np), Vector{Float64}(undef, ncv),
-                 Vector{Float64}(undef, nnbs))
 
 # ============================================================================
-# NBS overlay routing plan.
+# NBS signed-correction model (see agent/NBS_ROUTING_REDESIGN.md).
 #
-# An NBS overlay element (a `DynNBSPlacement`) carries a vertical stack of storage layers
-# whose state lives in the solver's ODE vector, appended after the `nt` trap states.
-# Its topmost layer is fed by the static footprint capture (`nbs_inflow`, the sink-
-# overlay tally from `watercourses`); each lower layer is fed by the infiltration of
-# the layer above.  Each outflowing layer re-emits its overflow: the top `n_terrain`
-# layers spread it over the footprint's natural terrain exit boundary (weights from
-# `_nbs_exit_weights`), every outflowing layer below them through one explicit piped
-# outlet.  Each re-emit landing point owned by an in-network path/trap gets a
-# delivery slot in `nbs_actual` (filled from the layer storage each rate call, like
-# `culvert_actual`); landings off the network / off the domain are dropped (that
-# water leaves the domain).  Fluxes are power-law in the layer storage
-# (`compute_outflow`), computed in the mm units the model is defined in with the
-# mm<->m^3 conversion (`S_mm = V*1000/A`, `Q_m3 = Q_mm*1e-3`) done in the plan/rate
-# function.
+# `watercourses` is NBS-oblivious, so the baseline inflow already routes the full footprint
+# pass-through downstream.  An NBS installation is then a *correction* to that baseline.  Its
+# layered storage state (`DynNBSPlacement.system`) lives in the ODE vector, appended after the
+# `nt` trap states.  Its topmost layer is fed by the oblivious footprint capture `I`; each
+# lower layer by the infiltration of the layer above; the bottom layer's infiltration leaves
+# to ground.
+#
+# Per NBS the terrain re-emit correction at each footprint drainage endpoint `c` is
+# `-X*Q_c`, with the scalar `X = 1 - O_terrain/I` (`O_terrain` = the top `n_terrain` layers'
+# overflow, `Q_c` = the oblivious NBS drainage there read from the runoff grid).  It is
+# propagated to the endpoint's first downstream network trap with `max(V+c,0)-max(V,0)` per
+# cell (`_propagate_correction`) and added to that trap's inflow.  Piped outlets (outflowing
+# layers below the top `n_terrain`) inject their discharge `E` as a positive correction.
+# Fluxes are power-law in layer storage (`compute_outflow`), in mm, converted to m^3
+# (`S_mm = V*1000/A`, `Q_m3 = Q_mm*1e-3`).
+#
+# @@@ Deferred: submergence (the containing trap flooding the footprint) and NBS→NBS series
+#     coupling (an upstream element's correction landing on a downstream footprint).
 struct NBSLayerParams
     Kout::Float64; nout::Float64; Smax_mm::Float64
     Kinf::Float64; ninf::Float64; Smin_mm::Float64
     A::Float64                            # layer area (== footprint area, m^2)
 end
 
-struct NBSPlan
-    placement_ix    ::Vector{Int}         # per NBS: its DynNBSPlacement `id` (== position in the
-                                          # caller's vector); the key into `external_nbs_inflow`
-    state_base      ::Vector{Int}         # per NBS: 0-based offset of its layer block, after the nt trap states
-    layers          ::Vector{Vector{NBSLayerParams}}
-    layer_slots     ::Vector{Vector{Vector{Tuple{Int,Float64}}}}  # per NBS, per layer: (slot, weight) deliveries
-    nlayer_total    ::Int                 # total appended layer states
-    n_slots         ::Int                 # number of on-network overflow-delivery slots
-    nbs_path_events ::Vector{Vector{Tuple{Int,Int}}}  # per flow path: (cell position, slot)
-    nbs_trap_outlets::Vector{Vector{Int}}             # per trap: slots delivered into it
-    nbs_into        ::Vector{Vector{Int}}             # per NBS element: slots re-emitted onto its
-                                                      # footprint by an upstream element (NBS→NBS
-                                                      # capture, read as extra layer-1 inflow)
-    # --- submergence ---
-    n_terrain       ::Vector{Int}         # per NBS: size of the above-grade surface block (layers 1..n_terrain)
-    containing_trap ::Vector{Int}         # per NBS: local trap covering the lowest footprint cell (0 = none)
-    z_sub           ::Vector{Float64}     # per NBS: submergence threshold = lowest footprint elevation
-    submerged       ::Vector{Bool}        # per NBS: current mode (surface block flooded / merged)
+# Where a signed correction lands: the network-local trap it is added to (0 = it leaves the
+# network and is dropped), and the oblivious runoff `V` along the flow-path cells it travels
+# through to get there (empty for a correction deposited straight into a trap).
+struct NBSDelivery
+    trap  ::Int
+    path_V::Vector{Float64}
 end
 
-# Saturated-conduit intake of a (submerged) surface layer: once the surface is flooded,
-# water is drawn down at the layer's infiltration
-# *capacity*, evaluated at its own Smax (capacity-limited, constant, reuses the calibrated
-# params in-range).  Returns m^3/time.  Isolated in one helper so switching to a
-# flood-head-driven form later is a single-line change.
-_nbs_saturated_draw(lp::NBSLayerParams) =
-    compute_outflow(lp.Kinf, lp.ninf, lp.Smin_mm, lp.Smax_mm) * 1e-3
+# One NBS element's static routing data.
+struct NBSElement
+    layers    ::Vector{NBSLayerParams}
+    state_base::Int                            # 0-based offset of its layer block after the nt trap states
+    n_terrain ::Int                            # top layers re-emitting at terrain
+    capture   ::Float64                        # I: oblivious footprint capture (Σ Q over endpoints)
+    endpoints ::Vector{Tuple{Float64,NBSDelivery}}   # (Q_c, delivery) per terrain drainage endpoint
+    outlets   ::Vector{Tuple{Int,NBSDelivery}}       # (piped layer index, delivery) per piped outlet
+end
+
+struct NBSPlan
+    elems       ::Vector{NBSElement}
+    nlayer_total::Int
+end
+
+const _NBS_CAPTURE_EPS = 1e-12
 
 # Number of appended NBS layer states for a rate-params object (0 when no NBS).
 _nbs_state_count(p) = p.nbsplan === nothing ? 0 : p.nbsplan.nlayer_total
 
-# Build the NBS routing plan for `net` (nothing when it has no NBS elements).  Reads the
-# `DynNBSPlacement`s straight off `net.nbs` — each supplies its own layer model (`nb.system`)
-# and its stable inflow key (`nb.id`).  Each outflowing layer's overflow is delivered to
-# resolved landing cells: the terrain exit boundary (top `n_terrain` layers, weighted by
-# `_nbs_exit_weights`) or a piped outlet (lower layers, weight 1).  A landing owned by an
-# in-network path gets a `(position, slot)` event; one owned by a trap gets a trap-outlet
-# slot; a landing off the network or off the domain is dropped (its water exits).
-function _build_nbs_plan(net::DynNetwork, tstruct,
-                         submerged_of::Dict{Int,Bool} = Dict{Int,Bool}())
+# Attenuate a signed correction `c` along `path_V` (oblivious runoff per cell) with the rule
+# `max(V+c,0) - max(V,0)`: infiltration reduces the correction only where the baseline flow
+# was there to reduce, so a negative correction is not eaten by empty-cell clamping and a
+# positive one re-fills spare capacity first.  Empty `path_V` returns `c` unchanged.
+function _propagate_correction(c::Float64, path_V::Vector{Float64})
+    @inbounds for V in path_V
+        c = max(V + c, 0.0) - max(V, 0.0)
+    end
+    return c
+end
+
+# Walk the flowgraph downstream from `start`, collecting the oblivious runoff `V` at each
+# cell, until reaching a cell inside a network trap's footprint (the delivery target) or the
+# domain edge (target 0, correction dropped).  Returns `(target_trap, path_V)`.
+function _walk_to_trap(start::Int, tstruct, runoff, trap_of_cell::Dict{Int,Int})
+    g     = tstruct.flowgraph
+    pathV = Float64[]
+    cur   = start
+    while true
+        haskey(trap_of_cell, cur) && return trap_of_cell[cur], pathV
+        push!(pathV, Float64(runoff[cur]))
+        ds = Graphs.outneighbors(g, cur)
+        isempty(ds) && return 0, pathV
+        cur = ds[1]
+    end
+end
+
+# The footprint's terrain drainage endpoints, read from the oblivious runoff `runoff`.  A
+# footprint cell whose flow leaves the footprint is a boundary exit; a footprint trap-bottom
+# (flowgraph sink) is an internal depression.  Each yields `(Q_c, delivery)`: `Q_c` is the
+# oblivious NBS drainage there, `delivery` is where `-X*Q_c` lands — the first downstream
+# network trap (boundary, via `_walk_to_trap`) or the containing trap (internal, deposited
+# directly).  Interior cells (draining to another footprint cell) are not endpoints.
+function _nbs_endpoints(nb::DynNBSPlacement, tstruct, runoff, trap_of_cell::Dict{Int,Int})
+    g       = tstruct.flowgraph
+    footset = Set(nb.footprint)
+    endpoints = Tuple{Float64,NBSDelivery}[]
+    for f in nb.footprint
+        Qf = max(Float64(runoff[f]), 0.0)
+        Qf > 0.0 || continue
+        ds = Graphs.outneighbors(g, f)
+        if isempty(ds)                             # internal depression: ponds into its trap
+            push!(endpoints, (Qf, NBSDelivery(get(trap_of_cell, f, 0), Float64[])))
+        elseif ds[1] ∉ footset                     # boundary exit: flow crosses to ds[1]
+            trap, pathV = _walk_to_trap(ds[1], tstruct, runoff, trap_of_cell)
+            push!(endpoints, (Qf, NBSDelivery(trap, pathV)))
+        end
+    end
+    return endpoints
+end
+
+# Piped outlets: each outflowing layer below the top `n_terrain` discharges at one explicit
+# outlet cell.  Returns `(layer_index, delivery)` per outlet, the delivery walking from the
+# outlet cell to its first downstream network trap.
+function _nbs_outlets(nb::DynNBSPlacement, tstruct, runoff, trap_of_cell::Dict{Int,Int}, LI)
+    outlets = Tuple{Int,NBSDelivery}[]
+    piped = 0
+    for (l, L) in enumerate(nb.system.layers)
+        (l > nb.n_terrain && L.Kout > 0.0) || continue
+        piped += 1
+        trap, pathV = _walk_to_trap(LI[nb.outlets[piped]], tstruct, runoff, trap_of_cell)
+        push!(outlets, (l, NBSDelivery(trap, pathV)))
+    end
+    return outlets
+end
+
+# Build the NBS plan for `net` (nothing when it has no NBS), reading the oblivious `runoff`
+# grid to resolve each element's capture, drainage endpoints and outlet deliveries.  The
+# layer models and their ODE-state layout come straight off `net.nbs`.
+function _build_nbs_plan(net::DynNetwork, tstruct, runoff::AbstractMatrix{<:Real})
     isempty(net.nbs) && return nothing
     LI = LinearIndices(tstruct.topography)
-
-    nbs_cell = Dict{Int,Int}()                 # linear footprint cell -> local NBS element index
-    for (e, nb) in enumerate(net.nbs), k in nb.footprint
-        nbs_cell[k] = e
-    end
-    trap_cell = Dict{Int,Int}()                # linear cell -> local trap index
-    for (ti, t) in enumerate(net.traps), k in tstruct.footprints[t.trap_ix]
-        trap_cell[k] = ti
-    end
-    path_cell = Dict{Int,Tuple{Int,Int}}()     # linear cell -> (local path index, position)
-    for (pi, p) in enumerate(net.flow_paths), (pos, c) in enumerate(p.cells)
-        path_cell[LI[c]] = (pi, pos)
+    trap_of_cell = Dict{Int,Int}()             # linear cell -> local trap index
+    for (ti, t) in enumerate(net.traps), c in tstruct.footprints[t.trap_ix]
+        trap_of_cell[c] = ti
     end
 
-    np = length(net.flow_paths); ntr = length(net.traps); nnb = length(net.nbs)
-    placement_ix = Int[]; state_base = Int[]
-    layers       = Vector{NBSLayerParams}[]
-    layer_slots  = Vector{Vector{Tuple{Int,Float64}}}[]
-    nbs_path_events  = [Tuple{Int,Int}[] for _ in 1:np]
-    nbs_trap_outlets = [Int[]            for _ in 1:ntr]
-    nbs_into         = [Int[]            for _ in 1:nnb]
-    n_terrain        = Int[]; containing_trap = Int[]; z_sub = Float64[]; submerged = Bool[]
-    base = 0; slot = 0
-
-    # Assign a delivery slot for fraction `w` of a layer's overflow landing at linear
-    # cell `cell`; returns (slot, w) or nothing if the cell is off-network (discharge
-    # then exits the domain and is simply not delivered).  A landing on another element's
-    # footprint (NBS→NBS) is captured by that element: the slot is filled by this layer's
-    # overflow and read as extra inflow by the receiver (see the rate function).  Footprint
-    # capture wins over path/trap membership.
-    function assign!(cell::Int, w::Float64)
-        if haskey(nbs_cell, cell)
-            slot += 1; push!(nbs_into[nbs_cell[cell]], slot); return (slot, w)
-        elseif haskey(trap_cell, cell)
-            slot += 1; push!(nbs_trap_outlets[trap_cell[cell]], slot); return (slot, w)
-        elseif haskey(path_cell, cell)
-            slot += 1; (pi, pos) = path_cell[cell]; push!(nbs_path_events[pi], (pos, slot)); return (slot, w)
-        end
-        return nothing
-    end
-
+    elems = NBSElement[]
+    base  = 0
     for nb in net.nbs
         lyrs   = nb.system.layers
         A_foot = Float64(length(nb.footprint))   # @@@ 1 m^2/cell; use real cell area when available
-        push!(placement_ix, nb.id)               # nb.id is the key into external_nbs_inflow
-        push!(state_base, base)
-        push!(layers, NBSLayerParams[
+        layers = NBSLayerParams[
             NBSLayerParams(float(L.Kout), float(L.nout), float(L.Smax),
-                           float(L.Kinf), float(L.ninf), float(L.Smin), A_foot) for L in lyrs])
-
-        exitw = _nbs_exit_weights(tstruct, nb.footprint)   # [(cell, weight)], cell 0 = off-domain
-        per_layer = Vector{Tuple{Int,Float64}}[]
-        piped = 0
-        for (l, L) in enumerate(lyrs)
-            s = Tuple{Int,Float64}[]
-            if L.Kout > 0.0
-                if l <= nb.n_terrain
-                    for (cell, w) in exitw
-                        cell == 0 && continue                 # off-domain fraction: exits
-                        r = assign!(cell, w); r !== nothing && push!(s, r)
-                    end
-                else
-                    piped += 1
-                    r = assign!(LI[nb.outlets[piped]], 1.0); r !== nothing && push!(s, r)
-                end
-            end
-            push!(per_layer, s)
-        end
-        push!(layer_slots, per_layer)
-
-        # Submergence geometry: the surface floods when the containing trap's
-        # water level reaches the lowest footprint cell.  The containing trap is the
-        # network trap covering that lowest cell (0 if the footprint is not inside a
-        # network trap — then submergence cannot arise).
-        lowcell = nb.footprint[argmin(Float64[tstruct.topography[c] for c in nb.footprint])]
-        push!(n_terrain,       nb.n_terrain)
-        push!(containing_trap, get(trap_cell, lowcell, 0))
-        push!(z_sub,           Float64(tstruct.topography[lowcell]))
-        push!(submerged,       get(submerged_of, nb.id, false))
-
+                           float(L.Kinf), float(L.ninf), float(L.Smin), A_foot) for L in lyrs]
+        endpoints = _nbs_endpoints(nb, tstruct, runoff, trap_of_cell)
+        outlets   = _nbs_outlets(nb, tstruct, runoff, trap_of_cell, LI)
+        capture   = sum(Float64[Qc for (Qc, _) in endpoints]; init = 0.0)
+        push!(elems, NBSElement(layers, base, nb.n_terrain, capture, endpoints, outlets))
         base += length(lyrs)
     end
-    return NBSPlan(placement_ix, state_base, layers, layer_slots, base, slot,
-                   nbs_path_events, nbs_trap_outlets, nbs_into,
-                   n_terrain, containing_trap, z_sub, submerged)
+    return NBSPlan(elems, base)
 end
 
-# Fill `nbs_actual[slot]` with each on-network delivery's share of its layer's overflow
-# (m^3/time): `S_mm = V_layer*1000/A`, `Q_m3 = compute_outflow(...)*1e-3`, split across the
-# layer's slots by their static weights.  Slots are dense (1..n_slots), so any unfilled
-# (there are none: every slot belongs to exactly one (layer, landing)) would stay stale —
-# the caller zeroes the buffer first for safety.
-function _nbs_fill_actual!(nbs_actual, V, p, nt::Int)
-    plan = p.nbsplan
-    @inbounds for k in 1:length(plan.placement_ix)
-        base = plan.state_base[k]
-        for (l, lp) in enumerate(plan.layers[k])
-            slots = plan.layer_slots[k][l]
-            isempty(slots) && continue
-            # A submerged surface layer (1..n_terrain) is underwater and does not re-emit
-            # at terrain; its slots stay zero.  Subsurface (piped) layers keep discharging.
-            (plan.submerged[k] && l <= plan.n_terrain[k]) && continue
-            S_mm = V[nt + base + l] * 1000.0 / lp.A
-            qo   = compute_outflow(lp.Kout, lp.nout, lp.Smax_mm, S_mm) * 1e-3
-            for (slot, w) in slots
-                nbs_actual[slot] = qo * w
-            end
+# Add each NBS element's signed correction to the routed trap inflow.  The terrain re-emit
+# reduction `-X*Q_c` (`X = 1 - O_terrain/I`) is propagated to each endpoint's target trap;
+# the piped discharge is injected positively at each outlet's target.  `I = 0` (pure
+# drainage) falls back to an equal split of `O_terrain` over the endpoints.
+function _apply_nbs_corrections!(inflow, V, p, nt::Int)
+    for el in p.nbsplan.elems
+        base = el.state_base
+        O_terrain = 0.0
+        @inbounds for l in 1:el.n_terrain
+            lp = el.layers[l]
+            O_terrain += compute_outflow(lp.Kout, lp.nout, lp.Smax_mm,
+                                         V[nt + base + l] * 1000.0 / lp.A) * 1e-3
+        end
+        I    = el.capture
+        nend = length(el.endpoints)
+        for (Qc, del) in el.endpoints
+            del.trap == 0 && continue
+            c = I > _NBS_CAPTURE_EPS ? (O_terrain / I - 1.0) * Qc : O_terrain / nend
+            inflow[del.trap] += _propagate_correction(c, del.path_V)
+        end
+        for (l, del) in el.outlets
+            del.trap == 0 && continue
+            lp = el.layers[l]
+            e  = compute_outflow(lp.Kout, lp.nout, lp.Smax_mm,
+                                 V[nt + base + l] * 1000.0 / lp.A) * 1e-3
+            inflow[del.trap] += _propagate_correction(e, del.path_V)
         end
     end
-    return nothing
+    return inflow
 end
 
 # ----------------------------------------------------------------------------
@@ -837,9 +742,7 @@ struct DynNetworkRateParams
     merge_target::Vector{Int}
     cvplan::Union{CulvertPlan,Nothing}   # culvert routing data, or nothing if none
     path_events::Union{Vector{Vector{Tuple{Int,Symbol,Int}}},Nothing}  # per-path event templates
-    nbsplan::Union{NBSPlan,Nothing}      # NBS overlay routing data, or nothing if none
-    external_nbs_inflow::Vector{Float64} # per-NBS-placement static footprint capture (nbs_inflow)
-    scratch::RouteScratch                # reusable per-solve working buffers
+    nbsplan::Union{NBSPlan,Nothing}      # NBS signed-correction data, or nothing if none
 end
 
 # ----------------------------------------------------------------------------
@@ -855,14 +758,16 @@ cells).  Defaults to zeros if `nothing`.
 
 `zvt` is a pre-computed volume↔level table (see [`_build_trap_geometry`](@ref)).
 Pass a cached value when solving many networks over the same [`TrapStructure`](@ref).
+
+`runoff` is the oblivious runoff grid (`rateinfo.runoff`); it is read only to build the
+NBS correction plan and may be omitted when the net has no NBS.
 """
 function _build_rate_params(tstruct::TrapStructure,
                             net::DynNetwork,
                             infiltration::AbstractMatrix{<:Real},
                             external_inflow::AbstractVector{<:Real};
                             path_inflow = nothing,
-                            nbs_inflow::AbstractVector{<:Real} = Float64[],
-                            nbs_submerged::Dict{Int,Bool} = Dict{Int,Bool}(),
+                            runoff::Union{AbstractMatrix{<:Real},Nothing} = nothing,
                             zvt = nothing)
     nt = length(net.traps)
     np = length(net.flow_paths)
@@ -874,15 +779,18 @@ function _build_rate_params(tstruct::TrapStructure,
     prefix          = [_infil_prefix(ci) for ci in cell_infil]
     sorted_tribs    = [sort([(j, m) for (m, j) in fp.merges]) for fp in net.flow_paths]
     cvplan  = isempty(net.culverts) ? nothing : _build_culvert_plan(net, tstruct)
-    nbsplan = isempty(net.nbs)      ? nothing : _build_nbs_plan(net, tstruct, nbs_submerged)
+    if isempty(net.nbs)
+        nbsplan = nothing
+    else
+        runoff === nothing &&
+            error("_build_rate_params: net has NBS but no runoff grid was supplied")
+        nbsplan = _build_nbs_plan(net, tstruct, runoff)
+    end
     # The event-driven router path is needed only for culverts (inlet draw / outlet
-    # deliver at exact cell positions) or NBS overflow delivery at exit/outlet cells;
-    # a net with neither needs no path events.
-    events = (cvplan === nothing && nbsplan === nothing) ? nothing :
-             _path_event_templates(net, nbsplan)
+    # deliver at exact cell positions); a net with none needs no path events.
+    events = cvplan === nothing ? nothing : _path_event_templates(net)
     tgeom = _build_trap_geometry(tstruct, net, infiltration; zvt=zvt)
     footprint_infil = _footprint_infiltration(tgeom)
-    n_slots = nbsplan === nothing ? 0 : nbsplan.n_slots
     return DynNetworkRateParams(net,
                                 tgeom,
                                 Float64.(external_inflow),
@@ -894,9 +802,7 @@ function _build_rate_params(tstruct::TrapStructure,
                                 _merge_targets(net),
                                 cvplan,
                                 events,
-                                nbsplan,
-                                Float64.(nbs_inflow),
-                                RouteScratch(nt, np, length(net.culverts), n_slots))
+                                nbsplan)
 end
 
 # ----------------------------------------------------------------------------
@@ -926,60 +832,17 @@ full traps (see [`_route_flow`](@ref)).
 function _routed_inflow(V, p::DynNetworkRateParams)
     geom = p.geom
     nt   = length(geom)
-    sc   = p.scratch
-    spilling = sc.spilling
-    @inbounds for i in 1:nt
-        spilling[i] = V[i] >= geom[i].capacity
-    end
+    spilling = Bool[V[i] >= geom[i].capacity for i in 1:nt]
     # culverts need each trap's real water-surface elevation (not the Inf sentinel)
-    trap_level = nothing
-    if p.cvplan !== nothing
-        trap_level = sc.trap_level
-        @inbounds for i in 1:nt
-            trap_level[i] = _surface_level(geom[i], V[i])
-        end
-    end
-    # NBS overflow delivered at exit/outlet cells: fill the slot buffer from the layer
-    # storage (appended after the nt trap states), then route it in like culvert outlets.
-    nbs_actual = sc.nbs_actual
-    nbs_trap_outlets = nothing
-    if p.nbsplan !== nothing
-        fill!(nbs_actual, 0.0)
-        _nbs_fill_actual!(nbs_actual, V, p, nt)
-        nbs_trap_outlets = p.nbsplan.nbs_trap_outlets
-    end
+    trap_level = p.cvplan === nothing ? nothing :
+                 Float64[_surface_level(geom[i], V[i]) for i in 1:nt]
     inflow = _route_flow(p.net, p.external_inflow, spilling,
                          p.footprint_infil, p.path_infil_prefix, p.external_path_inflow,
                          p.sorted_trib_info, p.order, p.merge_target,
-                         p.cvplan, trap_level, p.path_events; scratch = sc,
-                         nbs_actual = nbs_actual, nbs_trap_outlets = nbs_trap_outlets)
-    # Submerged NBS exchange with its containing trap: the captured footprint
-    # runoff joins the flood and a saturated-conduit draw is taken back out.  Injected as
-    # a trap-inflow adjustment (not a dV term) so the trap's own full/accumulating logic
-    # handles it — a full flooding trap spills the surplus rather than over-filling.  The
-    # subsurface then consumes `draw` in the rate function's layer loop.
-    if p.nbsplan !== nothing
-        plan = p.nbsplan
-        @inbounds for k in 1:length(plan.placement_ix)
-            (plan.submerged[k] && plan.containing_trap[k] > 0) || continue
-            draw = plan.n_terrain[k] < length(plan.layers[k]) ?
-                   _nbs_saturated_draw(plan.layers[k][plan.n_terrain[k]]) : 0.0
-            inflow[plan.containing_trap[k]] += _nbs_captured(p, k) - draw
-        end
-    end
+                         p.cvplan, trap_level, p.path_events)
+    # NBS signed correction to the routed inflow (terrain re-emit reduction + piped discharge)
+    p.nbsplan === nothing || _apply_nbs_corrections!(inflow, V, p, nt)
     return inflow, spilling
-end
-
-# Captured footprint inflow of NBS element `k`: the static footprint capture
-# (`nbs_inflow`) plus any upstream element's overflow re-emitted onto this footprint
-# (NBS→NBS, from the already-filled `nbs_actual` slots).
-function _nbs_captured(p::DynNetworkRateParams, k::Int)
-    plan = p.nbsplan
-    c = p.external_nbs_inflow[plan.placement_ix[k]]
-    @inbounds for s in plan.nbs_into[k]
-        c += p.scratch.nbs_actual[s]
-    end
-    return c
 end
 
 function dynNetworkRateFunction!(dV, V, p::DynNetworkRateParams, t = 0.0)
@@ -1006,60 +869,26 @@ function dynNetworkRateFunction!(dV, V, p::DynNetworkRateParams, t = 0.0)
         V[i] <= 0.0 && dV[i] < 0.0 && (dV[i] = 0.0)
     end
 
-    # NBS layer-state derivatives (m^3/time).  Layer 1 (top) is fed by the static
-    # footprint capture (`nbs_inflow`); each lower layer by the layer above's
-    # infiltration; the bottom layer's infiltration leaves the system to ground.  Each
-    # layer loses its own overflow (delivered to its exit/outlet cells, already routed in
-    # `_routed_inflow`) and its infiltration.  Fluxes are power-law in the layer storage,
-    # in mm, converted to m^3 (`S_mm = V*1000/A`, `Q_m3 = Q_mm*1e-3`).
+    # NBS layer-state derivatives (m^3/time).  Layer 1 (top) is fed by the oblivious
+    # footprint capture `I`; each lower layer by the layer above's infiltration; the bottom
+    # layer's infiltration leaves the system to ground.  Each layer loses its own overflow
+    # and its infiltration.  Fluxes are power-law in the layer storage, in mm, converted to
+    # m^3 (`S_mm = V*1000/A`, `Q_m3 = Q_mm*1e-3`).
     if p.nbsplan !== nothing
-        plan       = p.nbsplan
-        nbs_actual = p.scratch.nbs_actual   # overflow slots, already filled in _routed_inflow
-        @inbounds for k in 1:length(plan.placement_ix)
-            base = plan.state_base[k]
-            lyrs = plan.layers[k]
-            nlyr = length(lyrs)
-
-            if !plan.submerged[k]
-                # --- dry: full cascade, top layer fed by the captured footprint inflow
-                # (static capture + any upstream NBS→NBS re-emit, storage-driven). ---
-                prev_qi = _nbs_captured(p, k)             # layer-1 inflow
-                for (l, lp) in enumerate(lyrs)
-                    S_mm = V[nt + base + l] * 1000.0 / lp.A
-                    qo   = compute_outflow(lp.Kout, lp.nout, lp.Smax_mm, S_mm) * 1e-3
-                    qi   = compute_outflow(lp.Kinf, lp.ninf, lp.Smin_mm, S_mm) * 1e-3
-                    # @@@ evapotranspiration deferred: ET is an explicit 0.0 placeholder, so
-                    #     wiring it in (from EVCoeff/EVS11) is a one-line change per layer, not
-                    #     a restructuring.  Do not drop the term.
-                    ET = 0.0
-                    dV[nt + base + l] = prev_qi - qo - qi - ET
-                    # Physical floor: a layer cannot drain below empty.
-                    V[nt + base + l] <= 0.0 && dV[nt + base + l] < 0.0 && (dV[nt + base + l] = 0.0)
-                    prev_qi = qi
-                end
-            else
-                # --- submerged: the surface block (layers 1..n_terrain) is under
-                # the flood and merged into the containing trap — frozen, no re-emit.  The
-                # trap exchange (captured runoff in, saturated-conduit draw out) was applied
-                # to the trap inflow in `_routed_inflow`; here the subsurface consumes `draw`
-                # and cascades, its piped outlets still discharging. ---
-                nte = plan.n_terrain[k]
-                for l in 1:nte
-                    dV[nt + base + l] = 0.0                # surface block frozen (merged)
-                end
-                if nte < nlyr
-                    prev_qi = _nbs_saturated_draw(lyrs[nte])   # flood -> subsurface intake
-                    for l in (nte + 1):nlyr
-                        lp   = lyrs[l]
-                        S_mm = V[nt + base + l] * 1000.0 / lp.A
-                        qo   = compute_outflow(lp.Kout, lp.nout, lp.Smax_mm, S_mm) * 1e-3
-                        qi   = compute_outflow(lp.Kinf, lp.ninf, lp.Smin_mm, S_mm) * 1e-3
-                        ET   = 0.0
-                        dV[nt + base + l] = prev_qi - qo - qi - ET
-                        V[nt + base + l] <= 0.0 && dV[nt + base + l] < 0.0 && (dV[nt + base + l] = 0.0)
-                        prev_qi = qi
-                    end
-                end
+        @inbounds for el in p.nbsplan.elems
+            base    = el.state_base
+            prev_qi = el.capture                          # layer-1 inflow = capture I
+            for (l, lp) in enumerate(el.layers)
+                S_mm = V[nt + base + l] * 1000.0 / lp.A
+                qo   = compute_outflow(lp.Kout, lp.nout, lp.Smax_mm, S_mm) * 1e-3
+                qi   = compute_outflow(lp.Kinf, lp.ninf, lp.Smin_mm, S_mm) * 1e-3
+                # @@@ evapotranspiration deferred: ET is an explicit 0.0 placeholder, so
+                #     wiring it in (from EVCoeff/EVS11) is a one-line change per layer.
+                ET = 0.0
+                dV[nt + base + l] = prev_qi - qo - qi - ET
+                # Physical floor: a layer cannot drain below empty.
+                V[nt + base + l] <= 0.0 && dV[nt + base + l] < 0.0 && (dV[nt + base + l] = 0.0)
+                prev_qi = qi
             end
         end
     end
@@ -1094,17 +923,11 @@ end
 #    skip (the VCB :fill event fires first in the CallbackSet ordering).
 # ============================================================================
 
-# One monitored event condition.  For a topology event (:fill/:empty/:unspill) `trap`
-# is the network-local trap and `nbs` is 0.  For an NBS submergence event (:submerge)
-# `nbs` is the local NBS element index and `trap` is its containing trap; such an event
-# does not terminate the solve — it flips the element's regime and merges the surface
-# into the flood in place, then integration continues (see `_apply_submergence!`).
+# One monitored topology event condition (:fill/:empty/:unspill) on a network-local `trap`.
 struct EventCondition
     kind::Symbol
     trap::Int
-    nbs::Int
 end
-EventCondition(kind, trap) = EventCondition(kind, trap, 0)
 
 """
     DynNetworkEvent
@@ -1144,64 +967,7 @@ function _event_conditions(p::DynNetworkRateParams,
         i in evolving_set && continue
         push!(conds, EventCondition(:unspill, i))
     end
-    # NBS submergence: one condition per element whose footprint sits in a network trap
-    # and has an above-grade surface block.  It fires (non-terminating) each time the
-    # containing trap's surface level crosses the footprint's flood threshold z_sub.
-    if p.nbsplan !== nothing
-        plan = p.nbsplan
-        for k in 1:length(plan.placement_ix)
-            (plan.containing_trap[k] > 0 && plan.n_terrain[k] >= 1) || continue
-            push!(conds, EventCondition(:submerge, plan.containing_trap[k], k))
-        end
-    end
     return conds
-end
-
-# Set each NBS element's submerged flag from the current trap levels: submerged
-# iff the containing trap's surface level has reached the footprint's flood threshold.
-# Derived (not persisted) so it is always self-consistent with the committed state at the
-# start of every solve; the in-solve :submerge event keeps it consistent across a window.
-function _reconcile_submergence!(p::DynNetworkRateParams, V::AbstractVector{<:Real})
-    p.nbsplan === nothing && return
-    plan = p.nbsplan
-    @inbounds for k in 1:length(plan.placement_ix)
-        ct = plan.containing_trap[k]
-        if ct > 0 && plan.n_terrain[k] >= 1
-            plan.submerged[k] = _surface_level(p.geom[ct], V[ct]) >= plan.z_sub[k]
-        else
-            plan.submerged[k] = false
-        end
-    end
-    return
-end
-
-# Apply an NBS submergence transition in place during the solve.  On submerge, the surface
-# block merges into the containing trap — as much of its stored water as the trap's headroom
-# allows moves into `u[ct]` (conserved; any residual stays frozen in the surface and is
-# released on emergence), and the block is deactivated.  On emerge the surface simply
-# re-activates from whatever storage it holds.  Non-terminating: integration continues.
-function _apply_submergence!(u::AbstractVector, plan::NBSPlan, k::Int, nt::Int,
-                             geom::Vector{TrapGeometry})
-    if !plan.submerged[k]
-        ct  = plan.containing_trap[k]
-        base = plan.state_base[k]; nte = plan.n_terrain[k]
-        St = 0.0
-        @inbounds for l in 1:nte
-            St += u[nt + base + l]
-        end
-        if St > 0.0
-            moved = min(St, max(geom[ct].capacity - u[ct], 0.0))
-            u[ct] += moved
-            scale  = (St - moved) / St
-            @inbounds for l in 1:nte
-                u[nt + base + l] *= scale
-            end
-        end
-        plan.submerged[k] = true
-    else
-        plan.submerged[k] = false
-    end
-    return
 end
 
 # ----------------------------------------------------------------------------
@@ -1309,13 +1075,6 @@ function _build_event_callback(p::DynNetworkRateParams,
                 out[k] = p.geom[ec.trap].capacity - V[ec.trap]
             elseif ec.kind == :empty
                 out[k] = V[ec.trap]
-            elseif ec.kind == :submerge
-                # crosses 0 downward at the transition, in whichever direction the current
-                # regime makes it approach: dry -> submerge as the level rises past z_sub,
-                # submerged -> emerge as it falls below.
-                lvl = _surface_level(p.geom[ec.trap], V[ec.trap])
-                out[k] = p.nbsplan.submerged[ec.nbs] ? (lvl - p.nbsplan.z_sub[ec.nbs]) :
-                                                       (p.nbsplan.z_sub[ec.nbs] - lvl)
             else   # :unspill: fire when the full trap's net inflow drops below its losses
                 out[k] = inflow[ec.trap] - p.footprint_infil[ec.trap]
             end
@@ -1325,11 +1084,6 @@ function _build_event_callback(p::DynNetworkRateParams,
     function affect!(integrator, ix)
         k  = isa(ix, AbstractVector) ? findfirst(!iszero, ix) : ix
         ec = conds[k]
-        if ec.kind == :submerge
-            # regime switch: flip + merge surface into the flood in place, keep integrating.
-            _apply_submergence!(integrator.u, p.nbsplan, ec.nbs, length(p.geom), p.geom)
-            return
-        end
         event.kind = ec.kind
         event.trap = ec.trap
         terminate!(integrator)
@@ -1492,7 +1246,7 @@ function solveDynNetwork!(state::AbstractVector{Float64},
                           inflow::AbstractVector{<:Real};
                           tmax = Inf,
                           path_inflow = nothing,
-                          nbs_inflow::AbstractVector{<:Real} = Float64[],
+                          runoff::Union{AbstractMatrix{<:Real},Nothing} = nothing,
                           # Loosened from 1e-8: physical accuracy needs only ~mL (abstol, m^3)
                           # and ~ms.  ~Halves the ODE step count on the culvert worst case;
                           # fill-time drift vs the analytic path is ~3e-5 (tens of µs, far under
@@ -1502,18 +1256,13 @@ function solveDynNetwork!(state::AbstractVector{Float64},
 
     nt = length(net.traps)
     p  = _build_rate_params(tstruct, net, infiltration, inflow;
-                            path_inflow=path_inflow, nbs_inflow=nbs_inflow, zvt=zvt)
+                            path_inflow=path_inflow, runoff=runoff, zvt=zvt)
     @assert length(state) == nt + _nbs_state_count(p) """
         state must have one entry per trap in net.traps plus one per NBS layer \
         ($(nt) traps + $(_nbs_state_count(p)) NBS layer states)"""
     V0 = copy(state)   # immutable snapshot; ODE evolves this, state is updated at the end
 
     _validate_network(tstruct, net, V0, p.geom)
-
-    # Derive each NBS element's submerged regime from the current trap levels, so the
-    # rate function starts consistent with the committed state regardless of the
-    # dict passed in; the in-solve :submerge event keeps it consistent through the window.
-    _reconcile_submergence!(p, V0)
 
     # Compute initial rates once: used for the t=0 fast-path checks.
     du0 = similar(V0, Float64)
