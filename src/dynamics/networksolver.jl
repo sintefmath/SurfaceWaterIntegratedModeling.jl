@@ -300,41 +300,32 @@ function _route_flow(net::DynNetwork,
                      cvplan = nothing, trap_level = nothing)
     order, _      = _network_order(net)
     prefix        = [_infil_prefix(ci) for ci in path_cell_infil]
-    sorted_tribs  = [sort([(j, m) for (m, j) in fp.merges]) for fp in net.flow_paths]
-    path_events   = cvplan === nothing ? nothing : _path_event_templates(net)
+    path_events   = _path_event_templates(net)
     return _route_flow(net, external_inflow, spilling, footprint_infil,
-                       prefix, path_inflow, sorted_tribs, order, _merge_targets(net),
-                       cvplan, trap_level, path_events)
+                       prefix, path_inflow, path_events, order, _merge_targets(net),
+                       cvplan, trap_level)
 end
 
 # Flow delivered at the end of a path: head flow travels the cells losing per-segment
-# infiltration; tributaries add their output at their junctions, culverts draw/add at their
-# cells.  `events` (culvert-aware) or `tribs` (culvert-free fast path) gives the in-order
-# stops.  Mutates `culvert_actual` with what each culvert inlet here drew.
-function _path_delivered!(prefix, head_flow, tribs, events,
+# infiltration; at each `events` stop a tributary adds its output, a culvert draws/adds at its
+# cell.  `events` is the in-order `(pos, kind, idx)` stream.  Mutates `culvert_actual` with what
+# each culvert inlet here drew.
+function _path_delivered!(prefix, head_flow, events,
                           trib_output, culvert_actual, cvplan, net, trap_level)
     current  = head_flow
     prev_pfx = 0.0
-    if events === nothing
-        for (junc, m) in tribs
-            current  = max(current - (prefix[junc] - prev_pfx), 0.0)
-            current += trib_output[m]
-            prev_pfx = prefix[junc]
+    for (pos, kind, idx) in events
+        current = max(current - (prefix[pos] - prev_pfx), 0.0)
+        if kind === :trib
+            current += trib_output[idx]
+        elseif kind === :cvout
+            current += culvert_actual[idx]                # deliver
+        else                                              # :cvin
+            a = min(_culvert_flow(cvplan, net, idx, trap_level), current)
+            culvert_actual[idx] = a                       # drawn == delivered
+            current -= a
         end
-    else
-        for (pos, kind, idx) in events
-            current = max(current - (prefix[pos] - prev_pfx), 0.0)
-            if kind === :trib
-                current += trib_output[idx]
-            elseif kind === :cvout
-                current += culvert_actual[idx]                # deliver
-            else                                              # :cvin
-                a = min(_culvert_flow(cvplan, net, idx, trap_level), current)
-                culvert_actual[idx] = a                       # drawn == delivered
-                current -= a
-            end
-            prev_pfx = prefix[pos]
-        end
+        prev_pfx = prefix[pos]
     end
     return max(current - (prefix[end] - prev_pfx), 0.0)
 end
@@ -373,18 +364,17 @@ function _route_flow(net::DynNetwork,
                      footprint_infil::AbstractVector{<:Real},
                      path_infil_prefix::AbstractVector{<:AbstractVector{<:Real}},
                      external_path_inflow::AbstractVector{<:Real},
-                     sorted_trib_info::AbstractVector{<:AbstractVector},
+                     path_events::AbstractVector{<:AbstractVector},
                      order::AbstractVector{<:Integer},
                      merge_target::AbstractVector{<:Integer},
                      cvplan = nothing,
-                     trap_level = nothing,
-                     path_events = nothing)
+                     trap_level = nothing)
 
     np = length(net.flow_paths)
     nt = length(net.traps)
     @assert length(external_inflow) == length(spilling) == length(footprint_infil) == nt
     @assert length(path_infil_prefix) == length(merge_target) ==
-            length(external_path_inflow) == length(sorted_trib_info) == np
+            length(external_path_inflow) == length(path_events) == np
 
     # Working accumulators: `trap_inflow` seeded with external trap inflow, `path_flow` with
     # per-path head inflow, `trib_output`/`culvert_actual` zeroed.
@@ -395,11 +385,9 @@ function _route_flow(net::DynNetwork,
 
     for node in order
         if node <= np                               # a flow path
-            p      = node
-            events = path_events === nothing ? nothing : path_events[p]
+            p = node
             delivered = _path_delivered!(path_infil_prefix[p], path_flow[p],
-                                         sorted_trib_info[p], events,
-                                         trib_output, culvert_actual,
+                                         path_events[p], trib_output, culvert_actual,
                                          cvplan, net, trap_level)
             tt = net.flow_paths[p].target_trap
             if tt > 0
@@ -473,9 +461,10 @@ network-locally (`net.traps` / `net.flow_paths` order).
 - `footprint_infil`: whole-footprint infiltration per trap
 - `path_infil_prefix`: per-path prefix sums of per-cell infiltration (`prefix[1]=0`,
   `prefix[end]`=total)
-- `sorted_trib_info`: per-path `(junction_cell, tributary_path)` sorted by junction
 - `order`, `merge_target`: the static routing plan ([`_network_order`](@ref), [`_merge_targets`](@ref))
-- `cvplan`, `path_events`: culvert routing data (`nothing` if no culverts)
+- `path_events`: per-path in-order `(cell_pos, kind, idx)` stops — tributary junctions, plus
+  culvert inlet/outlet positions when the net has culverts
+- `cvplan`: culvert routing data (`nothing` if no culverts)
 - `nbsplan`: NBS signed-correction data (`nothing` if no NBS)
 """
 
@@ -661,11 +650,10 @@ struct DynNetworkRateParams
     external_path_inflow::Vector{Float64} # constant inflow (rain) on flow path cells
     footprint_infil::Vector{Float64}      # total footprint infiltration per trap (full trap loss)   
     path_infil_prefix::Vector{Vector{Float64}} # `cumsum` of infiltration along each flow path's cells
-    sorted_trib_info::Vector{Vector{Tuple{Int,Int}}} # sorted tributaries per flow path
-    order::Vector{Int}                    # topological sort of the flowgraph 
+    order::Vector{Int}                    # topological sort of the flowgraph
     merge_target::Vector{Int}             # path that each tributary feeds into (0 if none)
     cvplan::Union{CulvertPlan,Nothing}    # key information per culvert for routing, or nothing if none
-    path_events::Union{Vector{Vector{Tuple{Int,Symbol,Int}}},Nothing}  # merges/culverts per path
+    path_events::Vector{Vector{Tuple{Int,Symbol,Int}}}  # in-order tributary/culvert stops per path
     nbsplan::Union{NBSPlan,Nothing}      # NBS signed-correction data, or nothing if none
 end
 
@@ -693,7 +681,6 @@ function _build_rate_params(tstruct::TrapStructure,
     order, _        = _network_order(net)
     cell_infil      = _path_cell_infiltration(net, infiltration)
     prefix          = [_infil_prefix(ci) for ci in cell_infil]
-    sorted_tribs    = [sort([(j, m) for (m, j) in fp.merges]) for fp in net.flow_paths]
     cvplan  = isempty(net.culverts) ? nothing : _build_culvert_plan(net, tstruct)
     if isempty(net.nbs)
         nbsplan = nothing
@@ -702,9 +689,8 @@ function _build_rate_params(tstruct::TrapStructure,
             error("_build_rate_params: net has NBS but no runoff grid was supplied")
         nbsplan = _build_nbs_plan(net, tstruct, runoff)
     end
-    # The event-driven router path is needed only for culverts (inlet draw / outlet
-    # deliver at exact cell positions); a net with none needs no path events.
-    events = cvplan === nothing ? nothing : _path_event_templates(net)
+    # in-order tributary/culvert stops per path (tributaries only when there are no culverts)
+    events = _path_event_templates(net)
     tgeom = _build_trap_geometry(tstruct, net, infiltration; zvt=zvt)
     footprint_infil = _footprint_infiltration(tgeom)
     return DynNetworkRateParams(net,
@@ -713,7 +699,6 @@ function _build_rate_params(tstruct::TrapStructure,
                                 path_inflow_vec,
                                 footprint_infil,
                                 prefix,
-                                sorted_tribs,
                                 order,
                                 _merge_targets(net),
                                 cvplan,
@@ -744,8 +729,8 @@ function _routed_inflow(V, p::DynNetworkRateParams)
                  Float64[_surface_level(geom[i], V[i]) for i in 1:nt]
     inflow = _route_flow(p.net, p.external_inflow, spilling,
                          p.footprint_infil, p.path_infil_prefix, p.external_path_inflow,
-                         p.sorted_trib_info, p.order, p.merge_target,
-                         p.cvplan, trap_level, p.path_events)
+                         p.path_events, p.order, p.merge_target,
+                         p.cvplan, trap_level)
     # NBS signed correction to the routed inflow (terrain re-emit reduction + piped discharge)
     p.nbsplan === nothing || _apply_nbs_corrections!(inflow, V, p, nt)
     return inflow, spilling
@@ -1139,7 +1124,7 @@ function solveDynNetwork!(state::AbstractVector{Float64},
     cb_ss = p.nbsplan === nothing ?
         _build_steadystate_callback(p, evolving, abstol, du0) :
         _build_steadystate_callback_nbs(p, ss_indices, abstol, du0)
-    if nt == 0
+    if nt == 0 # no traps
         event    = DynNetworkEvent()
         callback = cb_ss
     else
