@@ -4,7 +4,7 @@ Status: **implemented**. `watercourses` is NBS-oblivious; the correction lives i
 network solver (`networksolver.jl`: `NBSElement`/`NBSPlan`, `_build_nbs_plan`,
 `_propagate_correction`, `_apply_nbs_corrections!`).  The old footprint-as-sink +
 positive re-emit path (sink overlay, `nbs_actual` slots, `_nbs_exit_weights`, `nbs_into`,
-submergence, `RouteScratch`) is deleted.  Deferred: submergence and NBS→NBS series (§11).
+submergence, `RouteScratch`) is deleted.  Deferred: NBS→NBS series (§11).
 
 Scope: how Nature-Based Solution (NBS) installations couple to the dynamic
 surface-flow network. Supersedes the overlay-element approach in
@@ -85,9 +85,10 @@ filling, positive while draining). At steady state `dS = 0` and both effects
 cancel the baseline back to correct. Mass closes at all times because
 `O_terrain`, `E_piped`, `I` all come from the ODE.
 
-The submergence coupling (the containing trap flooding the NBS when its water
-level rises above the footprint's lowest cell) is a **separate**, geometric
-interaction, not part of this balance.
+No submergence special-case is needed. A footprint sitting inside a trap that later
+floods it is treated like any other footprint — it keeps capturing and re-emitting per
+the correction above. The old overlay froze/merged a flooded surface block into the
+trap; under the correction model that machinery is moot and was removed.
 
 **`P = I` via the zero-infiltration contract.** The correction is applied
 against the oblivious pass-through `P` — the capture disposed of across **all**
@@ -310,9 +311,6 @@ deferred reverse-culvert handling).
 
 ## 11. Deferred / open
 
-- **Submergence** — the containing trap flooding the footprint (surface block merges into
-  the flood, terrain re-emit stops).  Removed with the old overlay; re-add cleanly as a
-  separate geometric interaction if needed.
 - **NBS→NBS series** — an upstream element's correction landing on a downstream footprint
   lowers its capture `I`.  Not modelled: each element's `I` is read from the oblivious
   field, which over-counts an upstream element's full pass-through.

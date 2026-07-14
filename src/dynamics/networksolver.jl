@@ -568,8 +568,8 @@ parameter.  Indexed network-locally (same order as `net.traps` / `net.flow_paths
 # Fluxes are power-law in layer storage (`compute_outflow`), in mm, converted to m^3
 # (`S_mm = V*1000/A`, `Q_m3 = Q_mm*1e-3`).
 #
-# @@@ Deferred: submergence (the containing trap flooding the footprint) and NBS→NBS series
-#     coupling (an upstream element's correction landing on a downstream footprint).
+# @@@ Deferred: NBS→NBS series coupling (an upstream element's correction landing on a
+#     downstream footprint, lowering its capture).
 struct NBSLayerParams
     Kout::Float64; nout::Float64; Smax_mm::Float64
     Kinf::Float64; ninf::Float64; Smin_mm::Float64
