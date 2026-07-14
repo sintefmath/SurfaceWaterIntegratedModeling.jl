@@ -51,10 +51,11 @@ _node_leaf_regions(net::DynNetwork, tstruct) =
 _external_inflow(rateinfo, node_leaves) =
     Float64[sum(getinflow(rateinfo, leaf) for leaf in leaves) for leaves in node_leaves]
 
-# The base spill regions feeding this network's external inflow: the union of the nodes' leaf
-# regions (a leaf trap and its spill region share the same id).  Used for the touch test (a
-# network is touched when one of these appears in `getinflowupdates`).
-_inflow_regions(node_leaves) = reduce(union!, node_leaves; init = Set{Int}())
+# The base spill regions feeding this network's external inflow: the nodes' leaf regions
+# collected flat (a leaf trap and its spill region share the same id).  The nodes partition
+# their leaves — none is shared — so this is a plain flatten, not a merge.  Used for the touch
+# test (a network is touched when one of these appears in `getinflowupdates`).
+_inflow_regions(node_leaves) = Set{Int}(Iterators.flatten(node_leaves))
 
 # All (transitive) sub-traps of `t`, walking the agglomeration hierarchy downward.
 function _descendants(tstruct, t::Int)
