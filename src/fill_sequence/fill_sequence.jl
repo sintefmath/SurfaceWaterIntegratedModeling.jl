@@ -123,9 +123,6 @@ function _fill_sequence_for_weather_event!(seq, sgraph, rateinfo, changetimeest,
     net_trap_set    = _net_trap_set(net_contexts)
     net_covered_set = _net_covered_set(net_contexts, tstruct)
 
-    fill_updates = Vector{IncrementalUpdate{Bool}}()
-    graph_updates = Vector{IncrementalUpdate{Int}}()
-
     count = 0
     while cur_time < endtime
         verbose && (mod(count+=1, 10) == 0) && println("Fill sequence iteration: ", count)
@@ -138,84 +135,109 @@ function _fill_sequence_for_weather_event!(seq, sgraph, rateinfo, changetimeest,
 
         (cur_time > endtime || isempty(fill_updates)) && break # no more events to register
 
-        # an emptied network parent exposes its children as transitory traps; flush them too
+        # an emptied dynamic network parent exposes its children as transitory traps; flush
         fill_updates = _expand_empty_fill_updates(fill_updates, net_contexts, tstruct)
         for u in fill_updates
             filled_traps[u.index] = u.value
         end
+
         # network-covered traps route via the ODE, so keep them out of the spillgraph
         non_net_fill_updates = filter(u -> u.index ∉ net_covered_set, fill_updates)
         graph_updates = update_spillgraph!(sgraph, non_net_fill_updates, tstruct)
-
         setsavepoint!(rateinfo)
-        _update_flow!(rateinfo, graph_updates, tstruct, sgraph)
+        _update_flow!(rateinfo, graph_updates, tstruct, sgraph) # agnostic of dynamic networks
 
-        # Touch only the networks actually affected — a member trap fired, or external inflow
-        # changed.  Untouched networks keep exact cached state, so quiet events cost no ODE solves.
-        old_covered   = net_covered_set
-        net_committed = Dict{Int,Float64}()
-        network_touched = false
-        if !isempty(net_contexts)
-            inflow_updated = Set(u.index for u in getinflowupdates(rateinfo))
-            network_touched = any(net_contexts) do ctx
-                any(u.index ∈ ctx.global_ix for u in fill_updates) ||
-                    !isdisjoint(ctx.inflow_regions, inflow_updated)
-            end
-        end
-        if network_touched
-            net_contexts, net_trap_set, net_covered_set, net_committed =
-                _touch_networks_driver!(driver, changetimeest, sgraph, tstruct,
-                                        filled_traps, cur_amounts, rateinfo, z_vol_tables,
-                                        infiltration, fill_updates, old_covered,
+        net = _touch_affected_networks!(driver, changetimeest, sgraph, rateinfo, filled_traps,
+                                        cur_amounts, z_vol_tables, infiltration, fill_updates,
+                                        tstruct, net_contexts, net_trap_set, net_covered_set,
                                         cur_time, endtime)
-            # traps that LEFT the networks need a fresh constant-rate changetime estimate
-            for t in setdiff(old_covered, net_covered_set)
-                changetimeest[t] = _compute_changetime_estimate(t, cur_amounts, cur_time,
-                                                                rateinfo, filled_traps, tstruct)
-            end
-        end
+        net_contexts, net_trap_set, net_covered_set = net.contexts, net.trap_set, net.covered_set
 
-        # update amounts for traps about to change inflow or just filled; covered traps come
-        # from the network state instead
-        amount_updates = _update_affected_amounts(rateinfo, cur_amounts, filled_traps,
-                                                  tstruct, z_vol_tables, cur_time,
-                                                  net_covered_set)
-        append!(amount_updates,
-                [IncrementalUpdate(tix, FilledAmount(tstruct.trapvolumes[tix] -
-                    tstruct.subvolumes[tix], cur_time))
-                 for tix in [u.index for u in fill_updates]
-                 if tix ∉ net_covered_set && tix ∉ old_covered])
-        # network-trap amounts, only when touched — an untouched network's state isn't
-        # committed to cur_time, so its amounts interpolate between touch events
-        if network_touched && !(isempty(net_covered_set) && isempty(old_covered))
-            append!(amount_updates,
-                    _network_amount_updates(net_contexts, union(old_covered, net_covered_set),
-                                            net_committed, tstruct, cur_amounts, cur_time))
-        end
-
+        amount_updates = _collect_amount_updates(rateinfo, cur_amounts, filled_traps, tstruct,
+                                                 z_vol_tables, cur_time, fill_updates, net)
         _apply_updates!(cur_amounts, amount_updates)
 
         push!(seq, SpillEvent(cur_time, amount_updates, fill_updates,
-                              getinflowupdates(rateinfo), nothing,
-                              getrunoffupdates(rateinfo)))
+                              getinflowupdates(rateinfo), nothing, getrunoffupdates(rateinfo)))
     end
 
-    # settle every non-covered trap's amount exactly at endtime; covered traps follow the
-    # multi-trap ODE and are set by _finalize_networks! below
-    for (trap, cur_fill) ∈ enumerate(cur_amounts)
-        (trap ∈ net_covered_set) && continue
-        if cur_fill.time < endtime
-            cur_amounts[trap] =
-                FilledAmount(_compute_exact_fill(rateinfo, cur_amounts, trap,
-                                                 filled_traps, tstruct, endtime,
-                                                 z_vol_tables, false),
-                             min(cur_time, endtime))
-        end
-    end
-
+    _settle_noncovered_at_endtime!(cur_amounts, rateinfo, filled_traps, tstruct,
+                                   z_vol_tables, net_covered_set, cur_time, endtime)
     # advance every network to endtime; its settled ODE volumes seed the next weather period
     _finalize_networks!(cur_amounts, net_contexts, tstruct, infiltration,
                         z_vol_tables, cur_time, endtime, driver.nbs_state)
+end
+
+# ----------------------------------------------------------------------------
+# Touch the networks affected by this event and refresh the membership sets.  A network is
+# touched when one of its member traps fired or its external inflow changed; an untouched
+# network keeps its exact cached state, so quiet events cost no ODE solves.  On a touch,
+# commit/rebuild/re-predict via the driver and give every trap that left a network a fresh
+# constant-rate changetime estimate.  Returns the (possibly unchanged) membership together
+# with `old_covered`, the committed node volumes, and whether a touch occurred.
+function _touch_affected_networks!(driver, changetimeest, sgraph, rateinfo, filled_traps,
+                                   cur_amounts, z_vol_tables, infiltration, fill_updates,
+                                   tstruct, net_contexts, net_trap_set, net_covered_set,
+                                   cur_time, endtime)
+    old_covered   = net_covered_set
+    net_committed = Dict{Int,Float64}()
+    touched = false
+    if !isempty(net_contexts)
+        inflow_updated = Set(u.index for u in getinflowupdates(rateinfo))
+        touched = any(net_contexts) do ctx
+            any(u.index ∈ ctx.global_ix for u in fill_updates) ||
+                !isdisjoint(ctx.inflow_regions, inflow_updated)
+        end
+    end
+    if touched
+        net_contexts, net_trap_set, net_covered_set, net_committed =
+            _touch_networks_driver!(driver, changetimeest, sgraph, tstruct, filled_traps,
+                                    cur_amounts, rateinfo, z_vol_tables, infiltration,
+                                    fill_updates, old_covered, cur_time, endtime)
+        for t in setdiff(old_covered, net_covered_set)
+            changetimeest[t] = _compute_changetime_estimate(t, cur_amounts, cur_time,
+                                                            rateinfo, filled_traps, tstruct)
+        end
+    end
+    return (; contexts = net_contexts, trap_set = net_trap_set, covered_set = net_covered_set,
+              committed = net_committed, old_covered, touched)
+end
+
+# ----------------------------------------------------------------------------
+# Amount updates for this event: constant-rate traps whose inflow changed or that just filled,
+# plus network-owned trap amounts when a network was touched.  `net` is the membership tuple
+# from `_touch_affected_networks!`.
+function _collect_amount_updates(rateinfo, cur_amounts, filled_traps, tstruct, z_vol_tables,
+                                 cur_time, fill_updates, net)
+    amount_updates = _update_affected_amounts(rateinfo, cur_amounts, filled_traps, tstruct,
+                                              z_vol_tables, cur_time, net.covered_set)
+    append!(amount_updates,
+            [IncrementalUpdate(tix, FilledAmount(tstruct.trapvolumes[tix] -
+                tstruct.subvolumes[tix], cur_time))
+             for tix in [u.index for u in fill_updates]
+             if tix ∉ net.covered_set && tix ∉ net.old_covered])
+    if net.touched && !(isempty(net.covered_set) && isempty(net.old_covered))
+        append!(amount_updates,
+                _network_amount_updates(net.contexts, union(net.old_covered, net.covered_set),
+                                        net.committed, tstruct, cur_amounts, cur_time))
+    end
+    return amount_updates
+end
+
+# ----------------------------------------------------------------------------
+# Settle every non-covered trap's amount exactly at `endtime` (covered traps follow the ODE
+# and are handled by `_finalize_networks!`).
+function _settle_noncovered_at_endtime!(cur_amounts, rateinfo, filled_traps, tstruct,
+                                        z_vol_tables, net_covered_set, cur_time, endtime)
+    for (trap, cur_fill) in enumerate(cur_amounts)
+        (trap ∈ net_covered_set) && continue
+        cur_fill.time < endtime || continue
+        cur_amounts[trap] = FilledAmount(
+            _compute_exact_fill(rateinfo, cur_amounts, trap, filled_traps, tstruct,
+                                endtime, z_vol_tables, false),
+            min(cur_time, endtime))
+    end
+    return cur_amounts
 end
 
 # ----------------------------------------------------------------------------
@@ -242,6 +264,7 @@ function _apply_updates!(amounts, updates)
 end
 
 # ----------------------------------------------------------------------------
+# Note, this function remains completely unaffected by the presence of dynamic networks.
 function _compute_changetime_estimate(trap, cur_amounts, cur_time, rateinfo, filled_traps, tstruct)
 
     min_net_inflow = tr -> getinflow(rateinfo, tr) - getsmax(rateinfo, tr)
@@ -296,6 +319,8 @@ end
 
 
 # ----------------------------------------------------------------------------
+# Updates changetime estimates for all non-network traps whose inflow has changed.
+# Traps covered by dynamic networks are skipped.
 function _update_changetime_estimates!(changetimeest, cur_amounts, cur_time,
                                        rateinfo, filled_traps, tstruct,
                                        net_covered_set = nothing)
@@ -437,6 +462,10 @@ function _compute_exact_fill(rateinfo, cur_amounts, trap, filled_traps, tstruct,
 end
     
 # ----------------------------------------------------------------------------
+# This code is dynamic network-agnostic.  A network-covered trap arrives here
+# with min == max (set from the network prediction in _apply_network_changetimeest!),
+# so the guard below returns that exact changetime and none of the constant-rate
+# logic runs.
 function _compute_exact_changetime(trap, changetimes, cur_amounts, rateinfo,
                                    tstruct, filled_traps, z_vol_tables)
 
