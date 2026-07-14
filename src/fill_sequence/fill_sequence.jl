@@ -191,10 +191,13 @@ function _touch_affected_networks!(net_trap_set, net_covered_set, driver, change
     end
     touched || return false
 
-    _, nts, ncs, _ = _touch_networks_driver!(driver, changetimeest, sgraph, tstruct,
-                                             filled_traps, cur_amounts, rateinfo, z_vol_tables,
-                                             infiltration, fill_updates, old_covered,
-                                             cur_time, endtime)
+    nts, ncs = _touch_networks_driver!(driver, changetimeest, sgraph, tstruct,
+                                       filled_traps, cur_amounts, rateinfo, z_vol_tables,
+                                       infiltration, fill_updates, old_covered,
+                                       cur_time, endtime)
+
+    # for those traps that just left the dynamic networks, recompute their changetime estimates
+    # in the regular constant-rate way
     for t in setdiff(old_covered, ncs)
         changetimeest[t] = _compute_changetime_estimate(t, cur_amounts, cur_time,
                                                         rateinfo, filled_traps, tstruct)

@@ -42,13 +42,12 @@ function build_network_driver(tstruct, dyn_coords, culverts, full_traps, cur_amo
     return driver
 end
 
-# Returns the committed-volume seed rule for a node `g`, shared by build and every
-# post-event rebuild:
+# Returns a function giving the current water volume for a given trap `g`.
 #   * a full trap sits at its exact own capacity `C`;
-#   * a node already in `vol_by_trapix` takes its committed volume;
-#   * a newly-absorbed trap has a stale `cur_amounts` entry, so project it forward to
-#     `cur_time` under the saved inflow.
-# A non-full trap is a transitory frontier (`spill_path == 0`) that must hold `V < capacity`,
+#   * a node already in `vol_by_trapix` takes its already computed volume;
+#   * a newly-absorbed trap has a `cur_amounts` entry that generally was computed at some time
+#     in the past, so project it forward to `cur_time` under the saved inflow.
+# NB: A non-full trap is a transitory frontier (`spill_path == 0`) that must hold `V < capacity`,
 # so its seed is clamped to `prevfloat(C)`: when several traps reach `C` in the same instant,
 # only one fires per event and the rest stay transitory until their `:fill` fires on the next
 # predict (mass preserved to a ULP).
@@ -118,8 +117,8 @@ end
 # ----------------------------------------------------------------------------
 # Advance to the earliest predicted event, apply its structural transition to the live
 # components, hand off state, and rebuild the contexts on the mutated set.  `filled_traps`
-# is the caller's authoritative fill mask (mutated here to match the fired event);
-# `cur_amounts` seeds the projection for any newly-absorbed trap.  Returns the fired event
+# is the caller's authoritative fill mask (mutated here to match the  fired event);
+# `cur_amounts` seeds the projection for any newly-absorbed trap.  Returns the  fired event
 # as `(; time, trap, kind, migrated)` (with the migrated `trap_ix` set), or `nothing` when
 # no event falls before `endtime`.
 function step_network_driver!(driver::NetworkDriver, tstruct, rateinfo, infiltration,
@@ -139,7 +138,7 @@ function step_network_driver!(driver::NetworkDriver, tstruct, rateinfo, infiltra
     driver.last_time = T
     _harvest!(driver)
 
-    # Apply the fired transition: update `filled_traps`, clamp the committed volumes per the
+    # Apply the  fired transition: update `filled_traps`, clamp the committed volumes per the
     # solver protocol, and mutate the component topology via the incremental membership layer.
     trap     = ev.trap
     migrated = Int[]
@@ -181,34 +180,34 @@ finalize_network_driver!(driver::NetworkDriver, cur_amounts, tstruct, infiltrati
                         z_vol_tables, driver.last_time, endtime, driver.nbs_state)
 
 # ----------------------------------------------------------------------------
-# The `fill_sequence` touch entry: apply this event's fired transitions to the network.
+# The `fill_sequence` touch entry: apply this event's  fired transitions to the network.
 # Commit under the cached inflow, mutate topology via `apply_*`, reconcile the spillgraph to
 # the new coverage, then rebuild the contexts reading the reconciled inflow.  `filled_traps`
-# is ALREADY updated by the caller (fired traps flipped, `:empty` children exposed).  Returns
-# `(contexts, net_trap_set, net_covered_set, committed)`.
+# is ALREADY updated by the caller ( fired traps flipped, `:empty` children exposed).
+# Returns the refreshed `(net_trap_set, net_covered_set)`; the committed node volumes live in
+# `driver.vol_by_trapix` and the contexts in `driver.contexts`.
 function _touch_networks_driver!(driver::NetworkDriver, changetimeest, sgraph, tstruct,
                                  filled_traps, cur_amounts, rateinfo, z_vol_tables,
                                  infiltration, fill_updates, old_covered, cur_time, endtime)
-    isempty(driver.contexts) &&
-        return driver.contexts, Set{Int}(), Set{Int}(), Dict{Int,Float64}()
+    isempty(driver.contexts) && return Set{Int}(), Set{Int}()
 
-    # which node traps fired this event, and how (captured from predictions before mutation)
-    fired = _capture_fired_kinds(driver.contexts, fill_updates)
+    # which node traps  fired this event, and how (captured from predictions before mutation)
+     fired = _capture_fired_kinds(driver.contexts, fill_updates)
 
     # commit every context to cur_time under its cached inflow, harvest into the stores, then
-    # overlay the fired-trap boundary values (:unspill sets prevfloat(C); :empty sets parent 0
+    # overlay the  fired-trap boundary values (:unspill sets prevfloat(C); :empty sets parent 0
     # and children prevfloat(C); :fill sets C via the full-trap branch of the rebuild seed rule)
     for ctx in driver.contexts
         _commit_network!(ctx, tstruct, infiltration, z_vol_tables, cur_time)
     end
     driver.last_time = cur_time
     _harvest!(driver)
-    _apply_fired_boundaries!(driver.vol_by_trapix, fired, tstruct)
-    committed = copy(driver.vol_by_trapix)
+    # set traps that emptied/unfilled and their children to the exact values that the solver expects
+    _apply_fired_boundaries!(driver.vol_by_trapix,  fired, tstruct)
 
-    # apply each fired structural transition to the live components
+    # apply each  fired structural transition to the live components
     full_traps = findall(filled_traps)
-    for (ft, k) in fired
+    for (ft, k) in  fired
         k == :fill    ? apply_fill!(driver.comps, tstruct, full_traps, ft) :
         k == :unspill ? apply_unfill!(driver.comps, tstruct, ft)           :
         k == :empty   ? apply_empty!(driver.comps, tstruct, full_traps, ft) : nothing
@@ -225,5 +224,5 @@ function _touch_networks_driver!(driver::NetworkDriver, changetimeest, sgraph, t
     nts = _net_trap_set(driver.contexts)
     ncs = _net_covered_set(driver.contexts, tstruct)
     _apply_network_changetimeest!(changetimeest, driver.contexts, ncs)
-    return driver.contexts, nts, ncs, committed
+    return nts, ncs
 end
