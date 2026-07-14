@@ -42,13 +42,12 @@ end
 _node_leaf_regions(net::DynNetwork, tstruct) =
     [tstruct.lowest_subtraps_for[t.trap_ix] for t in net.traps]
 
-# Per-node external inflow.  Summed over leaves, not `getinflow(node)`: `_reconcile_spillgraph!`
-# leaves a parent node's own `trap_inflow` stale, whereas the leaf values stay current.
+# Per-node external inflow, summed over leaves rather than `getinflow(node)`, whose parent
+# entries `_reconcile_spillgraph!` leaves stale.
 _external_inflow(rateinfo, node_leaves) =
     Float64[sum(getinflow(rateinfo, leaf) for leaf in leaves) for leaves in node_leaves]
 
-# Flat set of the network's leaf regions, for the touch test.  Nodes partition their leaves,
-# so this is a flatten, not a merge.
+# Flat set of the network's leaf regions, for the touch test.
 _inflow_regions(node_leaves) = Set{Int}(Iterators.flatten(node_leaves))
 
 # All (transitive) sub-traps of `t`, walking the agglomeration hierarchy downward.
