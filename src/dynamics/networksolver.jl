@@ -7,42 +7,30 @@ export dynNetworkRateFunction!, solveDynNetwork!
 # ============================================================================
 # Geometry helpers for the dynamic network solver.
 #
-# A `DynNetwork` carries only topology; the geometry it refers to lives in the
-# `TrapStructure`.  These helpers precompute, once per solve, the per-trap
-# geometry the rate function needs: storage capacity, the footprint cells, their
-# terrain bottoms, the per-cell infiltration rate, and the stored-volume -> water-
-# level relationship.  From those we can answer the two questions the rate
-# function repeatedly asks of each trap:
-#
-#   * water_level(g, V)          -- the water surface elevation at stored volume V
-#   * wetted_infiltration(g, V)  -- the infiltration loss at stored volume V, i.e.
-#                                   the infiltration rate summed over only the
-#                                   currently-submerged footprint cells.
-#
-# This reuses the existing machinery: `_compute_z_vol_tables` for the volume<->
-# level tables and the `infilfun(trap_bottom .<= z)` wetted-area pattern from
-# `_setup_dvdt` / `fill_trap_until` in fill_sequence.jl.
+# A `DynNetwork` carries only topology; the geometry lives in the `TrapStructure`.
+# Precomputed once per solve, these answer the two questions the rate function asks
+# of each trap at a stored volume V:
+#   * water_level(g, V)         -- water surface elevation
+#   * wetted_infiltration(g, V) -- infiltration over the currently-submerged footprint
+# Reuses `_compute_z_vol_tables` (volume<->level) and the `infilfun(bottom .<= z)`
+# wetted-area pattern from fill_sequence.jl.
 # ============================================================================
 
 """
     TrapGeometry
 
-Precomputed geometry of a single trap participating in a [`DynNetwork`](@ref),
-used by the dynamic network rate function.
-
-Volumes are *net of subtraps* (the convention used throughout fill_sequence and
-by [`waterheight`](@ref)): `capacity` is the trap's own storage above its
-subtraps, and the stored-volume state `V` ranges over `0 .. capacity`.
+Precomputed geometry of one trap in a [`DynNetwork`](@ref), used by the rate function.
+Volumes are *net of subtraps*: `capacity` is the trap's own storage above its subtraps,
+and the state `V` ranges over `0 .. capacity`.
 
 # Fields
 - `trap_ix`: index of the trap in the [`TrapStructure`](@ref)
 - `capacity`: own storage volume, net of subtraps
-- `footprint`: linear indices of the trap's footprint cells
-- `bottom`: terrain bottom at each footprint cell.  For a parent trap the cells
-  lying over a subtrap are raised to the subtrap's spillpoint elevation, so that
-  a submerged subtrap reads as wetted (matching `_compute_z_vol_tables`).
-- `infil`: infiltration rate at each footprint cell (0 where impermeable)
-- `zmin`: lowest bottom elevation (water level of an empty trap)
+- `footprint`: linear indices of the footprint cells
+- `bottom`: terrain bottom per footprint cell; parent-trap cells over a subtrap are raised
+  to the subtrap's spillpoint so a submerged subtrap reads as wetted
+- `infil`: infiltration rate per footprint cell (0 where impermeable)
+- `zmin`: lowest bottom elevation (level of an empty trap)
 - `v2z`: stored-volume -> water-level interpolation (see [`water_level`](@ref))
 """
 struct TrapGeometry
@@ -59,24 +47,15 @@ end
 """
     _build_trap_geometry(tstruct, net, infiltration; zvt=nothing) -> Vector{TrapGeometry}
 
-Precompute a [`TrapGeometry`](@ref) for every trap in the [`DynNetwork`](@ref)
-`net`, in the same order as `net.traps` (i.e. indexed by the network-local trap
-index, not the global trap index).
-
-`infiltration` is a grid the same shape as `tstruct.topography`, giving a
-per-cell infiltration rate (0 for impermeable / fully saturated cells).
-
-`zvt` is the pre-computed volume↔level table from [`_compute_z_vol_tables`](@ref).
-If `nothing` (default) it is computed here; pass a cached value when calling
-repeatedly for the same [`TrapStructure`](@ref) to avoid redundant work.
+A [`TrapGeometry`](@ref) for every trap in `net`, in `net.traps` order.  `infiltration` is a
+per-cell rate grid (0 = impermeable).  `zvt` is the cached volume↔level table
+([`_compute_z_vol_tables`](@ref)); computed here if `nothing`.
 """
 function _build_trap_geometry(tstruct::TrapStructure,
                               net::DynNetwork,
                               infiltration::AbstractMatrix{<:Real};
                               zvt = nothing)
 
-    # Reuse the existing per-trap volume<->level tables.  These are computed for
-    # every trap in the structure; we only index the ones present in `net`.
     zvt === nothing && (zvt = _compute_z_vol_tables(tstruct))
     nreg = numregions(tstruct)
 
@@ -86,10 +65,8 @@ function _build_trap_geometry(tstruct::TrapStructure,
         footprint = tstruct.footprints[tix]
         bottom    = Float64.(tstruct.topography[footprint])
 
-        # Mirror fill_trap_until / _compute_z_vol_tables: for a parent trap the
-        # bottom is raised to the upper subtrap's spillpoint, and the capacity is
-        # the trap volume net of its subtraps.  A lowest-level trap (region) has
-        # no subtraps, so its capacity is just its trap volume.
+        # parent trap: raise the bottom to the upper subtrap's spillpoint, capacity net of
+        # subtraps.  leaf trap: no subtraps, capacity is the full trap volume.
         if tix > nreg
             children = subtrapsof(tstruct, tix)
             bottom   = max.(bottom, tstruct.spillpoints[children[1]].elevation)
@@ -100,8 +77,7 @@ function _build_trap_geometry(tstruct::TrapStructure,
 
         zmin    = minimum(bottom)
         zvtable = zvt[tix]
-        # Volume -> level map (mirrors _setup_dvdt).  A single-row table means a
-        # degenerate flat trap with no storage; level is then always the bottom.
+        # a single-row table is a degenerate flat trap with no storage: level is always zmin
         v2z = length(zvtable[2]) == 1 ?
             (_ -> zmin) :
             Interpolations.linear_interpolation(zvtable[2], zvtable[1],
@@ -109,11 +85,10 @@ function _build_trap_geometry(tstruct::TrapStructure,
 
         infil = Float64.(infiltration[footprint])
 
-        # Cells at/above the spillpoint never pond (water spills out instead), so they carry
-        # no trap infiltration.  Excluding them keeps the wetted-area loss continuous at
-        # V = capacity — otherwise a trap pinned at its spillpoint by a balancing through-flow
-        # (e.g. a culvert outlet in drought) chatters full<->not-full.  Same rule as
-        # `_ponding_infiltration` / `fill_trap_until`; test the actual terrain, not raised `bottom`.
+        # Cells at/above the spillpoint never pond, so drop their infiltration.  This keeps the
+        # wetted-area loss continuous at V = capacity — else a trap pinned at its spillpoint by a
+        # balancing through-flow chatters full<->not-full.  Test the actual terrain, not raised
+        # `bottom` (same rule as `_ponding_infiltration` / `fill_trap_until`).
         _sp = Float64(tstruct.spillpoints[tix].elevation)   # concrete: Spillpoint.elevation is ::Real
         @inbounds for k in eachindex(infil)
             tstruct.topography[footprint[k]] >= _sp && (infil[k] = 0.0)
@@ -128,12 +103,8 @@ end
 """
     water_level(g::TrapGeometry, V) -> Float64
 
-Water surface elevation of trap `g` holding stored volume `V` (net of subtraps).
-
-An empty trap (`V <= 0`) sits at its bottom `zmin`; a full trap (`V >= capacity`)
-is reported as `Inf` so that its entire footprint reads as submerged.  In between,
-the level is interpolated from the volume<->level table.  Mirrors the `z`
-computation in `_setup_dvdt`.
+Water surface elevation of trap `g` at stored volume `V`.  Empty (`V <= 0`) → `zmin`;
+full (`V >= capacity`) → `Inf` (whole footprint reads as submerged); else interpolated.
 """
 function water_level(g::TrapGeometry, V::Real)
     return V <= 0.0       ? g.zmin :
@@ -152,13 +123,9 @@ end
 """
     wetted_infiltration(g::TrapGeometry, V) -> Float64
 
-Infiltration loss rate of trap `g` holding stored volume `V`: the per-cell
-infiltration rate summed over only the currently-submerged footprint cells
-(those whose terrain bottom lies at or below the current water level).
-
-A partially-filled trap infiltrates only through its wetted footprint, while a full
-trap (`V >= capacity`, level `Inf`) infiltrates over its whole footprint.  Mirrors the
-`infilfun(trap_bottom .<= z)` term in `_setup_dvdt`.
+Infiltration loss of trap `g` at volume `V`: the per-cell rate summed over the
+currently-submerged footprint cells (bottom at or below the water level).  A full trap
+(level `Inf`) infiltrates over its whole footprint.
 """
 function wetted_infiltration(g::TrapGeometry, V::Real)
     z = water_level(g, V)
@@ -174,28 +141,17 @@ end
 # ============================================================================
 # Flow routing through the network (lossy paths).
 #
-# Flow paths are not stateful: they route water downstream instantaneously, but
-# they are lossy -- a path cell with an infiltration value removes water in
-# transit (capped by the flow actually passing through).  This mirrors the
-# throughput-capped logic of `_update_runoff!`, lifted from the grid to the
-# `DynNetwork` abstraction.
-#
-# A full (spilling) trap emits an output = inflow - footprint infiltration, which
-# is routed down its spill path; a not-yet-full (leaf / accumulating) trap keeps
-# its inflow and passes nothing on.  Tributaries (`DynFlowPath.merges`) deliver
-# their flow into the path they merge into.  The single quantity the rate
-# function needs out of all this is the total inflow arriving at each trap.
+# Flow paths are stateless: they route water downstream instantaneously but lossily —
+# a path cell with infiltration removes water in transit, capped by the flow passing.
+# A full trap emits `inflow - footprint infiltration` down its spill path; an
+# accumulating trap keeps its inflow.  Tributaries (`DynFlowPath.merges`) deliver into
+# the path they join.  The router's output is the total inflow arriving at each trap.
 # ============================================================================
 
-# Combined topological order over the network's path and trap nodes.  Nodes
-# 1:np are flow paths, np+1:np+nt are traps.  Edges follow the flow: a trap to
-# its spill path, a path to its target trap, and a tributary path to the path it
-# merges into.  Returns (order, np); `node <= np` is path `node`, otherwise it is
-# trap `node - np`.
-#
-# `net.traps` alone is ordered upstream->downstream, but that does not fix the
-# trap/path interleaving once tributaries are present (two traps feeding the same
-# path are unordered relative to each other), so we sort the combined graph.
+# Combined topological order over path nodes (1:np) and trap nodes (np+1:np+nt).  Edges follow
+# the flow (trap→spill path, path→target trap, tributary→joined path).  Returns (order, np).
+# `net.traps` order alone doesn't fix the path/trap interleaving once tributaries exist, so the
+# combined graph is sorted.
 function _network_order(net::DynNetwork)
     np = length(net.flow_paths)
     nt = length(net.traps)
@@ -216,10 +172,8 @@ function _network_order(net::DynNetwork)
 end
 
 # ----------------------------------------------------------------------------
-# Reverse of the `merges` lists: `merge_target[p]` is the path that tributary
-# path `p` feeds into, or 0 if `p` is not a tributary.  Each path is a tributary
-# of at most one other (paths truncated by `_resolve_cell_overlaps!`), so this is
-# well defined.
+# `merge_target[p]` = the path that tributary `p` feeds into, or 0 if `p` is not a
+# tributary.  Each path is a tributary of at most one other, so this is well defined.
 function _merge_targets(net::DynNetwork)
     merge_target = zeros(Int, length(net.flow_paths))
     for (a, path) in enumerate(net.flow_paths), (m, _) in path.merges
@@ -229,13 +183,9 @@ function _merge_targets(net::DynNetwork)
 end
 
 # ----------------------------------------------------------------------------
-# Culvert routing data and helpers.
-#
-# A culvert connects an inlet endpoint to an outlet endpoint, each owned by a flow
-# path or a trap (resolved at construction; see the DynFlowPath/DynTrap culvert
-# lists).  `CulvertPlan` precomputes, per culvert, which kind of element owns each
-# endpoint and its network-local index, plus the barrel diameter and a handle on the
-# topography for the invert-elevation lookups used by `culvert_rate`.
+# Culvert routing data.  Each culvert's inlet/outlet is owned by a flow path or a trap
+# (resolved at construction).  `CulvertPlan` precomputes, per culvert, which kind owns each
+# endpoint and its local index, the barrel diameter, and the topography for invert lookups.
 
 struct CulvertPlan
     topo::AbstractMatrix          # tstruct.topography (invert elevations)
@@ -282,11 +232,9 @@ function _add_culvert_edges!(g, net::DynNetwork, np::Int)
     return g
 end
 
-# Per-path in-order event template for the culvert-aware router: tributary junctions
-# and culvert inlet/outlet positions merged and sorted by cell position, as
-# `(position, :trib|:cvin|:cvout, tributary-or-culvert index)`.  The list is static
-# for a solve (only the flow values it drives are dynamic), so it is built once and
-# reused every rate-function call instead of being rebuilt and re-sorted each time.
+# Per-path event stream for the culvert-aware router: tributary junctions and culvert
+# inlet/outlet positions, sorted by cell position, as `(position, :trib|:cvin|:cvout, idx)`.
+# Static for a solve, so built once and reused every rate-function call.
 function _path_event_templates(net::DynNetwork)
     return [begin
                 ev = Tuple{Int,Symbol,Int}[]
@@ -328,23 +276,17 @@ end
 # ----------------------------------------------------------------------------
 """
     _route_flow(net, external_inflow, spilling, footprint_infil, path_cell_infil;
-                path_inflow=zeros(np)) -> Vector{Float64}
+                path_inflow=zeros(np), cvplan=nothing, trap_level=nothing) -> Vector{Float64}
 
-Total inflow arriving at each trap of `net` (in `net.traps` order): the caller-
-supplied `external_inflow` (per trap) and `path_inflow` (per path, entering at
-each path's inlet) plus everything routed in from upstream.
+Total inflow arriving at each trap of `net` (in `net.traps` order): `external_inflow`
+(per trap) and `path_inflow` (per path) plus everything routed in from upstream spills.
 
-Each *spilling* trap emits `max(inflow - footprint_infil[i], 0)` into its spill
-path.  Flow along a path is routed in segments between tributary junctions: the
-head flow (from trap spills and `path_inflow`) travels through the pre-junction
-cells losing infiltration, then each tributary's delivered flow is added at its
-exact junction position, and the combined flow continues through the remaining
-cells.  This gives each tributary the correct post-junction infiltration charge.
+A spilling trap emits `max(inflow - footprint_infil, 0)` into its spill path.  Path flow is
+routed in segments between tributary junctions so each tributary is charged only the
+infiltration of the cells it actually travels (see the core method below).
 
-`path_cell_infil[p]` is a vector of per-cell infiltration rates for path `p`
-(in cell order); both are passed in so this routine stays pure topology and
-is testable on a hand-built network.  See [`_path_cell_infiltration`](@ref)
-and [`_footprint_infiltration`](@ref) for computing them from a `TrapStructure`.
+This convenience form computes the static routing data on the fly (tests / hand-built nets);
+the solver uses the precomputed core method via [`DynNetworkRateParams`](@ref).
 """
 function _route_flow(net::DynNetwork,
                      external_inflow::AbstractVector{<:Real},
@@ -362,12 +304,10 @@ function _route_flow(net::DynNetwork,
                        cvplan, trap_level, path_events)
 end
 
-# Flow delivered at the end of a path: the head flow travels the path losing per-
-# segment infiltration, tributaries add their delivered output at their junctions,
-# and culvert inlets/outlets abstract/add at their cell positions.  `tribs` is the
-# sorted `(junction, tributary)` list (culvert-free fast path); `events` is the
-# precomputed `(pos, kind, idx)` stream (culvert-aware path) or `nothing`.  Mutates
-# `culvert_actual` to record what each culvert inlet on this path drew.
+# Flow delivered at the end of a path: head flow travels the cells losing per-segment
+# infiltration; tributaries add their output at their junctions, culverts draw/add at their
+# cells.  `events` (culvert-aware) or `tribs` (culvert-free fast path) gives the in-order
+# stops.  Mutates `culvert_actual` with what each culvert inlet here drew.
 function _path_delivered!(prefix, head_flow, tribs, events,
                           trib_output, culvert_actual, cvplan, net, trap_level)
     current  = head_flow
@@ -421,12 +361,9 @@ function _route_trap_node!(i, net, trap_inflow, path_flow, footprint_infil,
     return nothing
 end
 
-# Core router with all static routing data pre-supplied.  Tributaries are handled
-# via segmented routing: flow is charged infiltration only over the path cells it
-# actually travels through, so a tributary joining at junction j is not charged
-# the pre-junction infiltration of the main path.  With no tributaries the loop
-# over `sorted_tribs[p]` is empty and the result is identical to a simple lump
-# deduction — one code path for both cases.
+# Core router, all static routing data pre-supplied.  Segmented routing charges flow
+# infiltration only over the cells it travels, so a tributary joining at junction j isn't
+# charged the main path's pre-junction infiltration.  No tributaries → one lump deduction.
 function _route_flow(net::DynNetwork,
                      external_inflow::AbstractVector{<:Real},
                      spilling::AbstractVector{Bool},
@@ -479,11 +416,8 @@ end
 """
     _footprint_infiltration(geom) -> Vector{Float64}
 
-Whole-footprint infiltration rate of each trap: the infiltration summed over every
-cell of the trap's footprint (already net of the spillpoint-level cells excluded by
-[`_build_trap_geometry`]).  This is the loss a full, submerged trap incurs, used by
-[`_route_flow`](@ref).  Reads the per-cell `infil` from the precomputed geometry so it
-stays consistent with `wetted_infiltration`.
+Whole-footprint infiltration of each trap (the loss a full, submerged trap incurs): the
+per-cell `infil` summed over the footprint.  Used by [`_route_flow`](@ref).
 """
 function _footprint_infiltration(geom::Vector{TrapGeometry})
     return [sum(g.infil) for g in geom]
@@ -493,9 +427,8 @@ end
 """
     _path_cell_infiltration(net, infiltration) -> Vector{Vector{Float64}}
 
-Per-cell infiltration rate of each flow path in `net` (in `net.flow_paths` order):
-the infiltration grid evaluated at each cell along the path, preserving cell order.
-Used by [`_build_rate_params`](@ref) to compute prefix sums for [`_route_flow`](@ref).
+Per-cell infiltration of each flow path (in `net.flow_paths` order), the grid sampled along
+each path's cells.  [`_build_rate_params`](@ref) turns these into prefix sums for the router.
 """
 function _path_cell_infiltration(net::DynNetwork, infiltration::AbstractMatrix{<:Real})
     return [isempty(p.cells) ? Float64[] : Float64[infiltration[c] for c in p.cells]
@@ -517,59 +450,47 @@ end
 # ============================================================================
 # Network rate function.
 #
-# `dynNetworkRateFunction!` is the in-place ODE right-hand side over the trap-
-# volume state.  Its parameters (`DynNetworkRateParams`) bundle everything that is
-# static for a solve
-# -- geometry, the constant external inflow, the infiltration sums, and the
-# routing plan -- so the per-step work is just routing + a loop over traps.
+# `dynNetworkRateFunction!` is the in-place ODE RHS over the trap-volume state.  Its
+# `DynNetworkRateParams` bundle everything static for a solve (geometry, external inflow,
+# infiltration sums, routing plan), so per-step work is just routing + a loop over traps.
 # ============================================================================
 
 """
     DynNetworkRateParams
 
-Static, precomputed inputs to [`dynNetworkRateFunction!`](@ref) for one solve.
-Built once by [`_build_rate_params`](@ref) and passed as the `ODEProblem`
-parameter.  Indexed network-locally (same order as `net.traps` / `net.flow_paths`).
+Static precomputed inputs to [`dynNetworkRateFunction!`](@ref) for one solve, built by
+[`_build_rate_params`](@ref) and passed as the `ODEProblem` parameter.  Indexed
+network-locally (`net.traps` / `net.flow_paths` order).
 
 # Fields
 - `net`: the [`DynNetwork`](@ref) being solved
-- `geom`: per-trap [`TrapGeometry`](@ref) (capacity + wetted-area infiltration)
-- `external_inflow`: caller-supplied constant inflow per trap
-- `external_path_inflow`: caller-supplied constant inflow directly onto each flow
-  path (e.g. rainfall on path cells); added at the path head before infiltration
+- `geom`: per-trap [`TrapGeometry`](@ref)
+- `external_inflow`: constant inflow per trap
+- `external_path_inflow`: constant inflow onto each flow path (e.g. rain on path cells)
 - `footprint_infil`: whole-footprint infiltration per trap
-- `path_infil_prefix`: per-path prefix sums of per-cell infiltration
-  (`prefix[k]` = sum of cell infiltrations 1..k-1, so `prefix[1]=0` and
-  `prefix[end]` = total path infiltration)
-- `sorted_trib_info`: per-path list of `(junction_cell_index, tributary_path_index)`
-  sorted by junction position; empty for paths with no tributaries
-- `order`, `merge_target`: the static routing plan (see [`_network_order`](@ref),
-  [`_merge_targets`](@ref))
-- `cvplan`, `path_events`: culvert routing data (or `nothing` when the net has no
-  culverts)
+- `path_infil_prefix`: per-path prefix sums of per-cell infiltration (`prefix[1]=0`,
+  `prefix[end]`=total)
+- `sorted_trib_info`: per-path `(junction_cell, tributary_path)` sorted by junction
+- `order`, `merge_target`: the static routing plan ([`_network_order`](@ref), [`_merge_targets`](@ref))
+- `cvplan`, `path_events`: culvert routing data (`nothing` if no culverts)
+- `nbsplan`: NBS signed-correction data (`nothing` if no NBS)
 """
 
 # ============================================================================
 # NBS signed-correction model (see agent/NBS_ROUTING_REDESIGN.md).
 #
 # `watercourses` is NBS-oblivious, so the baseline inflow already routes the full footprint
-# pass-through downstream.  An NBS installation is then a *correction* to that baseline.  Its
-# layered storage state (`DynNBSPlacement.system`) lives in the ODE vector, appended after the
-# `nt` trap states.  Its topmost layer is fed by the oblivious footprint capture `I`; each
-# lower layer by the infiltration of the layer above; the bottom layer's infiltration leaves
-# to ground.
+# pass-through.  An NBS is a *correction* to that baseline.  Its layered storage lives in the
+# ODE state after the `nt` trap volumes: the top layer is fed by the oblivious capture `I`,
+# each lower layer by the one above's infiltration, the bottom layer's infiltration to ground.
 #
-# Per NBS the terrain re-emit correction at each footprint drainage endpoint `c` is
-# `-X*Q_c`, with the scalar `X = 1 - O_terrain/I` (`O_terrain` = the top `n_terrain` layers'
-# overflow, `Q_c` = the oblivious NBS drainage there read from the runoff grid).  It is
-# propagated to the endpoint's first downstream network trap with `max(V+c,0)-max(V,0)` per
-# cell (`_propagate_correction`) and added to that trap's inflow.  Piped outlets (outflowing
-# layers below the top `n_terrain`) inject their discharge `E` as a positive correction.
-# Fluxes are power-law in layer storage (`compute_outflow`), in mm, converted to m^3
-# (`S_mm = V*1000/A`, `Q_m3 = Q_mm*1e-3`).
+# Terrain re-emit correction at each footprint drainage endpoint `c`: `-X*Q_c`, with
+# `X = 1 - O_terrain/I` (`O_terrain` = top-`n_terrain` overflow, `Q_c` = oblivious drainage
+# there).  Propagated to the endpoint's first downstream trap (`_propagate_correction`) and
+# added to its inflow.  Piped outlets inject their discharge as a positive correction.  Fluxes
+# are power-law in layer storage (`compute_outflow`), mm↔m^3 via `S_mm = V*1000/A`.
 #
-# @@@ Deferred: NBS→NBS series coupling (an upstream element's correction landing on a
-#     downstream footprint, lowering its capture).
+# @@@ Deferred: NBS→NBS series coupling (upstream correction lowering a downstream capture).
 struct NBSLayerParams
     Kout::Float64; nout::Float64; Smax_mm::Float64
     Kinf::Float64; ninf::Float64; Smin_mm::Float64
@@ -750,17 +671,9 @@ end
     _build_rate_params(tstruct, net, infiltration, external_inflow;
                        path_inflow=nothing, zvt=nothing) -> DynNetworkRateParams
 
-Precompute the static [`DynNetworkRateParams`](@ref) for a solve: the per-trap
-geometry, the footprint/path infiltration sums, and the routing plan.
-
-`path_inflow` is the constant external inflow per flow path (e.g. rainfall on path
-cells).  Defaults to zeros if `nothing`.
-
-`zvt` is a pre-computed volume↔level table (see [`_build_trap_geometry`](@ref)).
-Pass a cached value when solving many networks over the same [`TrapStructure`](@ref).
-
-`runoff` is the oblivious runoff grid (`rateinfo.runoff`); it is read only to build the
-NBS correction plan and may be omitted when the net has no NBS.
+Precompute the static [`DynNetworkRateParams`](@ref) for a solve.  `path_inflow` is constant
+inflow per flow path (zeros if `nothing`); `zvt` a cached volume↔level table; `runoff` the
+oblivious runoff grid, read only for the NBS plan (omit when the net has no NBS).
 """
 function _build_rate_params(tstruct::TrapStructure,
                             net::DynNetwork,
@@ -809,26 +722,16 @@ end
 """
     dynNetworkRateFunction!(dV, V, p::DynNetworkRateParams, t=0.0)
 
-In-place ODE rate of the trap-volume state `V`, writing dV/dt into `dV`.
+In-place ODE rate of the trap-volume state `V` (plus appended NBS layer states).
 
-Each trap is either *full* (spilling) or *accumulating*.  A trap is taken to be
-full when `V[i] >= capacity`; it then passes its excess inflow downstream and its
-own volume is steady, so
-
-    dV = inflow - footprint_infiltration - spill,  spill = max(inflow - footprint_infiltration, 0)
-
-(which is 0 while the trap is adequately fed, and negative once its inflow drops
-below its losses -- the onset of draining).  An accumulating trap spills nothing
-and fills at its wetted-area rate
-
-    dV = inflow - wetted_infiltration(V).
-
-`inflow` is the caller's constant inflow plus everything routed in from upstream
-full traps (see [`_route_flow`](@ref)).
+A *full* trap (`V >= capacity`) passes excess downstream at steady volume:
+`dV = inflow - footprint_infil - max(inflow - footprint_infil, 0)` (0 while well fed, negative
+once inflow drops below its losses).  An *accumulating* trap fills at its wetted-area rate:
+`dV = inflow - wetted_infiltration(V)`.  `inflow` is the external inflow plus everything routed
+in from upstream (see [`_route_flow`](@ref)).
 """
-# The routed inflow into every trap at state `V`, plus which traps are full
-# (spilling).  Shared by the rate function and the :unspill event condition, which
-# needs the raw net (inflow - footprint loss) that the rate function clamps away.
+# Routed inflow into every trap at state `V`, plus which traps are full (spilling).  Shared by
+# the rate function and the :unspill condition (which needs the raw net the rate fn clamps).
 function _routed_inflow(V, p::DynNetworkRateParams)
     geom = p.geom
     nt   = length(geom)
@@ -896,31 +799,20 @@ function dynNetworkRateFunction!(dV, V, p::DynNetworkRateParams, t = 0.0)
 end
 
 # ============================================================================
-# Event detection.
+# Event detection.  Two callbacks stop the integration at the first event:
 #
-# Two callbacks stop the integration at the first event:
+# 1. cb_topo (VectorContinuousCallback, LeftRootFind): topology events on downward
+#    zero-crossings —
+#      :fill    capacity - V   trap fills, starts spilling
+#      :empty   V              trap empties, exposes its subtraps
+#      :unspill inflow - loss  a full trap's net inflow goes negative
+#    Evolving traps get :fill (parents also :empty); full traps get :unspill.  LeftRootFind lets
+#    conditions starting at 0 (full traps, zero initial net inflow) wait for a genuine crossing
+#    rather than firing degenerately.
 #
-# 1. VectorContinuousCallback (`cb_topo`): per-trap topology-changing events.
-#    Fires on downward zero-crossings (LeftRootFind) of:
-#
-#      :fill    capacity - V  -> 0   trap fills, starts spilling
-#      :empty   V            -> 0   trap empties, exposes its subtraps
-#      :unspill inflow - loss -> 0   a full trap's net inflow goes negative
-#
-#    Every *evolving* trap (V < capacity at solve start) gets :fill; parent
-#    evolving traps also get :empty.  Every *full* trap gets :unspill.
-#    LeftRootFind means conditions starting at exactly 0 (full traps with
-#    zero initial net inflow) do not cause degenerate root-finding — they
-#    wait silently for a genuine downward crossing (e.g. a culvert that later
-#    makes the inflow positive and then negative mid-integration).
-#
-# 2. DiscreteCallback (`cb_ss`): global steady-state detector.
-#    Fires at the first accepted ODE step where max(|dV/dt|) < abstol over
-#    all evolving traps.  Using a DiscreteCallback (not ContinuousCallback)
-#    is essential: wetted_infiltration is a step function of V, so evaluating
-#    the condition at interpolated states mid-step would detect spurious
-#    crossings.  Spilling-veto: if any evolving trap has V >= C at this step,
-#    skip (the VCB :fill event fires first in the CallbackSet ordering).
+# 2. cb_ss (DiscreteCallback): steady state — max|dV/dt| < abstol at an accepted step.  Discrete,
+#    not Continuous: wetted_infiltration is a step function of V, so interpolated mid-step states
+#    would give spurious crossings.  Vetoes when any evolving trap is at V >= C (:fill wins).
 # ============================================================================
 
 # One monitored topology event condition (:fill/:empty/:unspill) on a network-local `trap`.
@@ -943,16 +835,9 @@ end
 DynNetworkEvent() = DynNetworkEvent(:none, 0)
 
 # ----------------------------------------------------------------------------
-# Build the list of monitored conditions.
-#
-# Each non-FULL (evolving) trap gets :fill.  Only evolving *parent* traps
-# (trap_ix > nreg) get :empty — when a leaf trap reaches V=0 that is its physical
-# floor with no topology change, so the event is not interesting.
-# Every FULL (non-evolving) trap gets :unspill.  The VCB uses LeftRootFind so
-# conditions starting at zero (full traps with zero initial net inflow) do not
-# trigger degenerate root-finding; they wait silently for a genuine downward
-# crossing (e.g. a culvert that later makes the inflow positive then negative).
-# Steady-state termination is handled by a separate DiscreteCallback (`cb_ss`).
+# The monitored conditions: :fill per evolving trap, :empty per evolving parent (a leaf at V=0
+# is just its floor, no topology change), :unspill per full trap.  (LeftRootFind rationale: see
+# the section header.)
 function _event_conditions(p::DynNetworkRateParams,
                            evolving::AbstractVector{<:Integer},
                            nreg::Int)
@@ -971,21 +856,10 @@ function _event_conditions(p::DynNetworkRateParams,
 end
 
 # ----------------------------------------------------------------------------
-# Steady-state detector: DiscreteCallback that fires at the first accepted ODE
-# step where the global maximum |dV/dt| across all evolving traps drops below
-# abstol.
-#
-# A DiscreteCallback is the correct tool here because wetted_infiltration is a
-# step function of V.  A ContinuousCallback would evaluate its condition at dense-
-# output (polynomial) states that straddle cell-volume boundaries mid-step, and
-# would detect spurious "crossings" of the discontinuous condition before the
-# accepted step actually lands in the settled zone.  The DiscreteCallback only
-# evaluates at accepted step endpoints, where the ODE state is genuine.
-#
-# Spilling-veto: if any evolving trap is at V >= capacity at this accepted step
-# (the VCB :fill rootfinder is still narrowing down the crossing), fire only
-# after the VCB has had a chance to terminate first.  In practice the VCB fires
-# before this check, but the veto prevents a race at the exact crossing step.
+# Steady-state detector (NBS-free): fires at the first accepted step where max|dV/dt| across
+# the evolving traps drops below abstol.  Discrete because wetted_infiltration is a step
+# function of V (interpolated mid-step states give spurious crossings).  Vetoes if any evolving
+# trap is at V >= C (the :fill VCB terminates first).
 function _build_steadystate_callback(p::DynNetworkRateParams,
                                      evolving::AbstractVector{<:Integer},
                                      abstol::Real,
@@ -1015,12 +889,9 @@ function _build_steadystate_callback(p::DynNetworkRateParams,
     return DiscreteCallback(condition, terminate!; save_positions = (false, false))
 end
 
-# Steady-state callback for networks with NBS overlay elements.  The
-# `_routed_inflow`-based check above cannot express the NBS layer dynamics, so this
-# evaluates the full rate function and settles when |dV/dt| < abstol (or the rate has
-# crossed its starting sign) across every index in `ss_indices` — the evolving traps
-# plus all NBS layer states.  An evolving trap that is spilling still vetoes (its
-# :fill wins).  `dbuf` is reused across calls.
+# Steady-state detector with NBS: the `_routed_inflow` check can't express the layer dynamics,
+# so evaluate the full rate function and settle when |dV/dt| < abstol (or a sign flip) across
+# every `ss_indices` (evolving traps + NBS layer states).  A spilling trap still vetoes.
 function _build_steadystate_callback_nbs(p::DynNetworkRateParams,
                                          ss_indices::AbstractVector{<:Integer},
                                          abstol::Real,
@@ -1048,15 +919,9 @@ end
 """
     _build_event_callback(p, evolving, V0, nreg) -> (callback, event)
 
-Construct the `VectorContinuousCallback` (with `LeftRootFind`) that halts the
-integration at the first topology-changing event and the
-[`DynNetworkEvent`](@ref) it will record into.
-`evolving` lists the network-local indices of non-FULL traps; `nreg` is
-`numregions(tstruct)`, used to restrict `:empty` to parent traps.
-
-Steady-state termination is handled by a separate `DiscreteCallback` built by
-`_build_steadystate_callback`; the two are combined with `CallbackSet` in
-`solveDynNetwork!`.
+The `VectorContinuousCallback` (LeftRootFind) halting integration at the first
+topology-changing event, and the [`DynNetworkEvent`](@ref) it records into.  `evolving` lists
+the non-FULL traps; `nreg` restricts `:empty` to parent traps.
 """
 function _build_event_callback(p::DynNetworkRateParams,
                                evolving::AbstractVector{<:Integer},
@@ -1093,30 +958,9 @@ function _build_event_callback(p::DynNetworkRateParams,
                                     rootfind = SciMLBase.LeftRootFind), event
 end
 
-# ============================================================================
-# Driver: solveDynNetwork.
-#
-# Wires the pieces together: build the static rate parameters, identify the
-# evolving traps, integrate the trap-volume state forward as an `ODEProblem`, and
-# stop at the first event.  The stop criterion is event-driven (a topology change)
-# rather than a fixed time horizon, so no `tspan` is taken: integration runs to the
-# first event, or to steady state (reported as an event time of `Inf`).
-# ============================================================================
-
 # ----------------------------------------------------------------------------
-"""
-    _validate_network(tstruct, net, state, geom)
-
-Check the three-state caller contract before every [`solveDynNetwork!`](@ref) call.
-Throws an informative error on the first violation found.
-
-**Contract** (enforced here):
-- FULL (V == C): `spill_path != 0` — either `> 0` (spills into that in-network
-  path) or the sentinel `-1` (spills straight out of the domain).  If a parent
-  trap, all its in-network children must also be FULL.
-- TRANSITORY (0 < V < C): `spill_path == 0`.
-- EMPTY (V == 0): `trap_ix <= numregions(tstruct)` (only leaf traps may be EMPTY).
-"""
+# Enforce the three-state caller contract (see [`solveDynNetwork!`](@ref)) before a solve;
+# throws an informative error on the first violation.
 function _validate_network(tstruct::TrapStructure,
                            net::DynNetwork,
                            state::AbstractVector{<:Real},
@@ -1149,10 +993,8 @@ function _validate_network(tstruct::TrapStructure,
         elseif V == 0.0 && trap.trap_ix <= nreg       # EMPTY (leaf trap at its floor)
             # a lowest-level trap may legitimately sit empty; nothing to check.
         else                                          # TRANSITORY
-            # This branch also covers a *parent* node sitting at its floor (V == 0):
-            # a parent node subsumes its (full) children, so V == 0 is the parent's
-            # own-volume floor with the children submerged — a valid TRANSITORY state,
-            # not EMPTY.  It must, like any not-yet-full trap, have no downstream spill path.
+            # also covers a parent at its floor (V==0): it subsumes its full children, so V==0 is
+            # the parent's own-volume floor with children submerged — TRANSITORY, not EMPTY.
             trap.spill_path == 0 ||
                 error("solveDynNetwork!: TRANSITORY trap $(trap.trap_ix) has spill_path > 0. " *
                       "A trap that is not yet full should not have a downstream spill path. " *
@@ -1190,57 +1032,39 @@ end
 
 """
     solveDynNetwork!(state, tstruct, net, infiltration, inflow;
-                     tmax=Inf, path_inflow=nothing, abstol=1e-8, reltol=1e-8, zvt=nothing)
-        -> (; time, trap, kind)
+                     tmax=Inf, path_inflow=nothing, runoff=nothing,
+                     abstol=1e-6, reltol=1e-4, zvt=nothing) -> (; time, trap, kind)
 
-Evolve the water content of the lakes (traps) of a [`DynNetwork`](@ref) forward in
-time until the first *event* that changes the network topology, or until the
-elapsed time reaches `tmax`.  `state` is updated in-place with the trap volumes at
-the event time (or at `tmax` if no event fires first).
+Evolve the trap volumes of a [`DynNetwork`](@ref) forward until the first topology-changing
+event, steady state, or `tmax`.  `state` is updated in place.
 
 # Arguments
-- `state`: stored volume (net of subtraps) of each trap, indexed as `net.traps`.
-  **Mutated in place.**  Must satisfy the three-state contract (see below) on entry.
-- `tstruct`: the [`TrapStructure`](@ref) supplying the geometry `net` refers to
+- `state`: stored volume (net of subtraps) per trap, `net.traps` order.  **Mutated in place**;
+  must satisfy the three-state contract (below) on entry.
+- `tstruct`: the [`TrapStructure`](@ref) supplying `net`'s geometry
 - `net`: the network to solve
-- `infiltration`: grid (shape of `tstruct.topography`) of per-cell infiltration
-  rates; 0 for impermeable / fully saturated cells
-- `inflow`: constant inflow rate into each trap, indexed as `net.traps`
+- `infiltration`: per-cell infiltration-rate grid (0 = impermeable)
+- `inflow`: constant inflow per trap, `net.traps` order
 
 # Keyword arguments
-- `tmax`: integrate at most this far (elapsed time from the solve start).  When no
-  topology event fires before `tmax`, integration stops at `tmax` and the call
-  returns `(time = tmax, trap = 0, kind = :none)` with `state` at `tmax`.  This
-  lets a caller obtain the network volumes at an externally-determined time (e.g. a
-  globally-committed event time, or a weather-period boundary) rather than only at
-  the network's own next event.  Defaults to `Inf` (run to the first event or to
-  steady state — the original behaviour).
-- `path_inflow`: constant inflow rate directly onto each flow path (e.g. rainfall
-  on path cells), indexed as `net.flow_paths`.  Defaults to zeros if `nothing`.
-- `zvt`: pre-computed volume↔level tables from [`_compute_z_vol_tables`](@ref).
-  Pass a cached value when solving many networks over the same [`TrapStructure`](@ref).
-- `abstol`, `reltol`: ODE solver tolerances.  `abstol` also sets the |dV/dt|
-  threshold of the steady-state cutoff.
+- `tmax`: integrate at most this far (elapsed).  With no event by then, stop at `tmax` and
+  return `kind = :none` with `state` at `tmax` — lets a caller read the volumes at an
+  externally-fixed time.  Default `Inf` (run to the first event or steady state).
+- `path_inflow`: constant inflow onto each flow path (rain on path cells); zeros if `nothing`
+- `runoff`: oblivious runoff grid, needed only when `net` has NBS
+- `zvt`: cached volume↔level tables ([`_compute_z_vol_tables`](@ref))
+- `abstol`, `reltol`: ODE tolerances; `abstol` also sets the steady-state |dV/dt| threshold
 
 # Returns
-A named tuple (no `state` field — state is updated in place):
-- `time`: time of the event; `Inf` if steady state was reached; `tmax` if the
-  `tmax` window elapsed with no event.  `time` is elapsed from the solve start.
-- `trap`: global trap index (into `tstruct`) where the event occurred, or `0`
-- `kind`: `:fill`, `:empty`, `:unspill`, or `:none`
-
-`kind == :none` covers both steady state (`time == Inf`) and a `tmax` cutoff
-(`time == tmax`); they are distinguished by `time`.
+`(; time, trap, kind)` (state is in place): `time` the event time (`Inf` = steady state,
+`tmax` = window elapsed); `trap` the global trap index or 0; `kind` one of `:fill`, `:empty`,
+`:unspill`, `:none` (`:none` covers steady state and a `tmax` cutoff — tell apart by `time`).
 
 # Three-state contract (validated at entry)
-
-The caller must guarantee before every call:
-- **FULL** (V == C exactly): `DynTrap.spill_path != 0` — `> 0` to spill into an
-  in-network path, or the sentinel `-1` to spill out of the domain; if a parent
-  trap, all its in-network children are also FULL.
-- **TRANSITORY** (0 < V < C strictly): `DynTrap.spill_path == 0`.
-- **EMPTY** (V == 0 exactly): the trap is a lowest-level (leaf) trap
-  (`trap_ix <= numregions(tstruct)`).
+- **FULL** (V == C): `spill_path != 0` (`> 0` into an in-network path, `-1` out of domain); a
+  parent's in-network children are all FULL too.
+- **TRANSITORY** (0 < V < C): `spill_path == 0`.
+- **EMPTY** (V == 0): a leaf trap (`trap_ix <= numregions(tstruct)`).
 
 # Caller protocol after each event
 
