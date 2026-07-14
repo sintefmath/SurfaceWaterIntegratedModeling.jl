@@ -226,8 +226,9 @@ function _collect_amount_updates(rateinfo, cur_amounts, filled_traps, tstruct, z
              for tix in [u.index for u in fill_updates]
              if tix ∉ net_covered_set && tix ∉ old_covered])
 
-    # update amounts of network traps if a network was touched
-    if network_touched && !(isempty(net_covered_set) && isempty(old_covered))
+    # update amounts of network traps if a network was touched (a touched network always has
+    # at least one covered trap)
+    if network_touched
         append!(amount_updates,
                 _network_amount_updates(driver.contexts, union(old_covered, net_covered_set),
                                         driver.vol_by_trapix, tstruct, cur_amounts, cur_time))
