@@ -106,28 +106,33 @@ component coupling in `_nbs_coupled_nodes`, not for routing.
 
 ## Signed-diff attenuation
 
-A head-injected diff is a **signed** value carried along the carrier path to its target trap.
-At each cell it is attenuated against that cell's oblivious `runoff` value `V` by the single
-rule (`_attenuate_diff`, over `NBSRouting.path_runoff[p]`, read-only):
+**One rule for all router flow (commit `f22ce5e`).** Every flow the router carries — network
+trap spills, tributary/culvert additions, and the NBS output diff — is a **signed** value
+attenuated per cell against that cell's oblivious residual `runoff` value `V` by the single rule
+(`_attenuate_range` / `_attenuate_diff`, read-only):
 
 ```
-diff_out = max(V + diff, 0) − max(V, 0)
+out = max(V + d, 0) − max(V, 0)
 ```
 
-| diff | cell `V`        | effect                                                            |
+| `d`  | cell `V`        | effect                                                            |
 |------|-----------------|-------------------------------------------------------------------|
-| `+`  | `+` (flow)      | passes unchanged                                                  |
+| `+`  | `+` (flow)      | passes unchanged (background already saturated the cell — no re-charge) |
 | `+`  | `−` (capacity)  | remaining capacity `\|V\|` re-fills first, absorbing it            |
 | `−`  | `+` (flow)      | the flow absorbs it, capped at `−V` (can't remove more than is there) |
 | `−`  | `−` (no flow)   | moot → 0                                                          |
 
-Handled in `_route_flow` at the path node: `delivered += _attenuate_diff(path_runoff[p],
-path_diff[p])`, added to the path's `target_trap` inflow. Since the target is downstream
-(later in topo order), the normal trap spill carries it onward — closing the
-"doesn't cascade past the first trap" gap. This is **not** the router's positive-spill
-`max(current − infil, 0)` rule (which charges the infiltration *rate*); it is the
-runoff-relative rule above, which is why it needs the per-cell `runoff` reference. (All four
-sign cases verified against `agent/prompts/flowtracking_adjust.org`.)
+This is the **same** rule `_track_flow!` uses to build the oblivious grid (`flow.jl`); the
+router now mirrors it instead of the old infiltration-prefix (which charged network flow the
+full per-cell infiltration even on cells the background had saturated). `path_runoff` is the
+real grid where available, else `−infiltration` (cells at their capacity floor), which
+reproduces the prefix behaviour exactly for hand-built nets with no background.
+
+The NBS output diff is **head-injected** into the path's signed `current` (`head = path_flow[p]
++ path_diff[p]`) and rides this one accumulator to `target_trap`; the normal trap spill carries
+it onward, closing the "doesn't cascade past the first trap" gap. Because it shares `current`, a
+same-path downstream `:nbsin` also draws an upstream NBS's positive release. (All four sign cases
+verified against `agent/prompts/flowtracking_adjust.org`.)
 
 ## No double-count (option ii)
 
@@ -147,14 +152,15 @@ identity is what makes a true pass-through NBS emit `diff ≈ 0`.
   `piped_paths::[(carrier_path, layer)]`.
 - `NBSPlan` — `elems`, `nlayer_total`.
 - `NBSRouting` — per-step scratch: `path_diff`, `trap_extra` (internal-depression deposits),
-  `path_runoff` (read-only), `nbs_draw` (router output = `:nbsin` captures).
+  `nbs_draw` (router output = `:nbsin` captures).
 - `_build_nbs_plan` — endpoint walk → `O_0`, `O_0_total`, `ratio_e`, carrier paths.
 - `_nbs_routing` — per-step output diffs from the live layer state → a fresh `NBSRouting`.
-- `_attenuate_diff`, `_path_cell_runoff`, `DynNetworkRateParams.path_runoff`.
-- `_path_event_templates` emits `:nbsin`; `_path_delivered!` handles the `:nbsin` draw;
-  `_route_flow` seeds `trap_extra`, head-injects + attenuates each `path_diff`; `_routed_inflow`
-  builds the `NBSRouting` and returns `nbs_draw`; the rate function drives layer-1 with
-  `O_0_total + nbs_draw`.
+- `_attenuate_range` (the one rule) / `_attenuate_diff` (whole-path), `_path_cell_runoff`,
+  `DynNetworkRateParams.path_runoff` (always present — real grid or `−infiltration`).
+- `_path_event_templates` emits `:nbsin`; `_path_delivered!` walks cells against `path_runoff`
+  and handles the `:nbsin` draw; `_route_flow` seeds `trap_extra` and head-injects `path_diff`
+  into the signed `current`; `_routed_inflow` builds the `NBSRouting` and returns `nbs_draw`;
+  the rate function drives layer-1 with `O_0_total + nbs_draw`.
 - **Deleted:** `NBSDelivery`, `_walk_to_trap`, `_apply_nbs_corrections!`,
   `_propagate_correction`, the output-side static `capture`, `NBSLayerParams`.
 
@@ -185,10 +191,12 @@ relies on.
   (`terrain_traps`), so in pass-through an internal sink still ponds its oblivious share
   (matches the old model). Physically a storage NBS arguably captures internal ponding and
   re-emits it at the boundary; reconsider together with submergence.
-- **NBS → NBS on the same path with no trap between** — the signed diff is carried to the
-  carrier path's target trap, not drawn by a downstream `:nbsin` on the *same* path segment
-  (a downstream NBS captures an upstream one only through an intervening trap's spill).
-  Acceptable for now (no trap between two footprints on one path is rare).
+- **NBS → NBS on the same path, fully signed** — mostly resolved by the router unification
+  (commit `f22ce5e`): the NBS output diff now rides the single signed `current`, so a same-path
+  downstream `:nbsin` draws an upstream NBS's *positive* release. The remaining gap is only the
+  *negative*-diff case (an upstream NBS storing): a negative `current` is not drawn by `:nbsin`
+  (`max(current,0)`), so it passes to the trap rather than reducing the downstream NBS's input.
+  Rare and second-order; revisit if it matters.
 - **Per-layer distinct outlets**, **evapotranspiration** (currently a `0.0` placeholder in the
   layer ODE), and **real cell area** (`A` = footprint cell count; `@@@ 1 m²/cell`).
 - **Integration tests** — the terrain **cascade / network-inflow / upstream-outlet** tests are
