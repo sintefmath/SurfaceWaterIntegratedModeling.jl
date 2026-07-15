@@ -242,7 +242,7 @@ end
 # Overlay the boundary volumes of fired traps that did NOT just become full.  An :empty
 # parent drops to 0 and EXPOSES its immediate children — they go from full to transitory
 # (just below their own capacity), so they leave `full_traps` (the caller already flipped
-# them via `_expand_empty_fill_updates`) and start at prevfloat(C_child).  An :unspill trap
+# them via `_expand_empty_network_fill_updates`) and start at prevfloat(C_child).  An :unspill trap
 # drops to prevfloat(C).
 function _apply_fired_boundaries!(committed, fired_kind, tstruct)
     for (ft, k) in fired_kind
@@ -290,7 +290,7 @@ end
 # them under the parent at V == 0, and the parent re-fires :empty at the same instant
 # forever.  Returns `fill_updates` augmented with a `(child, false)` entry per exposed
 # child (the caller then flips `filled_traps` for them like any other update).
-function _expand_empty_fill_updates(fill_updates, net_contexts, tstruct)
+function _expand_empty_network_fill_updates(fill_updates, net_contexts, tstruct)
     kind_of = Dict{Int,Symbol}()
     for ctx in net_contexts
         ev = ctx.next_event

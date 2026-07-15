@@ -59,6 +59,7 @@ function compute_flow(spillgraph::SpillGraph,
             # track flow downstream until trap, sink or domain boundary is encountered
             signed_flow = getinflow(rateinfo, sourcenode) - getsmax(rateinfo, sourcenode)
             outflow = max(signed_flow, 0.0) # outflow is always positive
+            # changes the runoff values of the affected cells, and the inflow and Smin/Smax of affected traps
             _track_flow!(rateinfo, sourcenode, outflow, tstruct) # update 'rateinfo'
         end
     end
