@@ -1,185 +1,207 @@
-# Plan: NBS as a signed-diff router element (culvert-style `:nbsin`/`:nbsout`)
+# NBS as a signed-diff router element — as-built design
 
-> **Status: IMPLEMENTED** (commits `2ff9f6a` add `DynFlowPath.nbs_inlets`; `fa21568` the
-> router rewrite). Output is realized as **head injection on the carrier path departing from
-> each output cell** (both output cells are seeds), not a mid-path `:nbsout` event — an
-> equivalent, lighter carrier than the plan's `:nbsout` (no `nbs_outlets` events needed; the
-> `nbs_outlets` field is retained only for component coupling in `_nbs_coupled_nodes`). Input
-> is `:nbsin` draws as planned. Background input is seeded with `O_0_total` (the oblivious
-> throughput = inflow + on-footprint rain by zero-infil mass balance), which subsumes the
-> plan's separate `I_bg` inflow-cell sum. Deferred (see Verification): the terrain cascade /
-> network-inflow / upstream-outlet integration tests — the retention + pass-through + unit-rule
-> tests pass; the cascade path is generic router behavior covered by the driver suite.
+> **Status: IMPLEMENTED** on branch `nbs-dynamic-core` (commits `2ff9f6a` — add
+> `DynFlowPath.nbs_inlets`; `fa21568` — the router rewrite; `c4bb889` — this doc).
+> This file now documents what was *built*, not a forward plan. Where the built code
+> diverged from the original plan, the divergence is called out inline (**BUILT:**).
 
-## Context
+## Core idea
 
-The current NBS handling is an oblivious-correction model whose correction is
-computed from the *static* oblivious runoff, so it (a) cannot abstract
-network-sourced inflow crossing the footprint, (b) does not cascade past the
-first trap (applied after `_route_flow`), and (c) carries a pile of bespoke
-machinery (`NBSLayerParams` [removed], `NBSDelivery`, `_walk_to_trap`,
-`_apply_nbs_corrections!`, `_propagate_correction`, precomputed `capture`).
+`watercourses` stays **NBS-oblivious**: NBS installations cannot own watersheds, they
+intersect existing ones. So the oblivious overland flow still passes through the footprint
+and is already routed downstream by the ordinary machinery. The NBS is a **router element**
+layered on top of that baseline:
 
-**Constraint (settled):** `watercourses` must stay **NBS-oblivious** — NBS
-elements cannot own watersheds; they intersect existing ones. So the oblivious
-overland flow still passes through the footprint and is already routed downstream.
+1. It captures its **live total input** `I_1` (oblivious background throughput + any network
+   flow crossing the footprint), runs the layered-storage ODE (`NBSSystem`), and
+2. emits only the **diff** `O_1 − O_0` of its live output over what the oblivious routing
+   already delivered. The diff rides the ordinary flow router (extended to signed values),
+   attenuated against the read-only oblivious `runoff` grid, and lands in the downstream trap
+   inflow — where it cascades onward via the normal trap spill.
 
-**Design (settled):** the NBS is intercepted at **`:nbsin`/`:nbsout` cell events on
-the paths crossing it** (approach B — like culverts; paths not terminated,
-`target_trap` unchanged). It captures its live total input `I_1` at the input cells,
-runs the layer ODE, and emits only the **diff** `O_1 − O_0` from what oblivious
-routing already delivered — carried downstream by the **regular flow tracker
-extended to signed values**, attenuated against the read-only `runoff` grid. Net
-downstream = `O_0 + diff = O_1`; `watercourses` untouched; no double-count.
+Net downstream `= O_0 (baseline) + diff = O_1`. `watercourses` untouched; no double-count.
 
-- `I_1` — live total input: `Σ runoff[input_cell]` (background, grid) **+** the
-  `:nbsin` draws (network spills + upstream outlet discharge, from the router) **+**
-  precip. Grid and router are complementary (grid excludes the network), no
-  double-count. Drives the layer ODE.
-- `O_0` — oblivious (background) output: `Σ runoff` at the footprint's drainage
-  endpoints (terrain exits + internal depressions). Static, precomputed. (Piped
-  outlets have no `O_0`.)
-- `O_1 = O_terrain(V) + E(V)` — live layer output. The emitted diff `O_1 − O_0` can
-  be **negative**, which is why the flow tracker needs signed support.
+## The oblivious runoff grid (`rateinfo.runoff`) is the reference
 
-See the Design section for the exact `I_1`, diff-split, and signed-tracking rules.
-
-## Design
-
-**Chosen realization = approach (B): culvert-style cell events on paths, NOT path
-termination.** The NBS is intercepted at `:nbsin` / `:nbsout` cell events on the
-paths that cross it (exactly like `:cvin` / `:cvout`). Paths are **not** terminated
-and `target_trap` is **not** changed — no ripple into `build_network`'s trace, the
-membership layer, or `network_utils`. Tradeoff (accepted): the network structure
-won't *show* the NBS as a node; interception lives in the events. Mitigate with
-explicit event kinds + comments.
-
-### The oblivious runoff grid (`rateinfo.runoff`) is the reference
 `compute_flow` runs on the `FULL ∧ ¬COVERED` spillgraph, so `runoff` is
-**network/NBS-oblivious**: per-cell **net overland flow (positive)** or **remaining
-infiltration capacity (negative)**, static within a solve (see `RateInfo` docstring).
-It is threaded into `_route_flow` (from `ctx.runoff`) and read **read-only** — never
-mutated, no per-step copy.
+**network/NBS-oblivious**: per cell, **net overland flow (positive)** or **remaining
+infiltration capacity (negative)**, static within a solve (see `RateInfo` docstring). The
+grid and the network router are therefore *complementary* — the grid excludes network traps,
+the router carries only network flow — so quantities read from each can be summed without
+double-counting. `runoff` is threaded into the solver and read **read-only** (never mutated,
+no per-step copy): as `path_runoff` (per-path cell values, for diff attenuation) and to
+precompute each NBS element's endpoint sums.
 
-### Input `I_1` (drives the layer ODE) — captured at `:nbsin`
+## Input `I_1` (drives the layer ODE)
+
 ```
-I_1 = Σ runoff[input_cell]         # background (grid, non-network)  — precomputed I_bg
-    + Σ :nbsin draws               # network spills + upstream outlet discharge (dynamic)
-    + precip_on_footprint
+I_1  =  O_0_total            # oblivious background throughput (static; = inflow + on-footprint rain)
+      + Σ :nbsin draws       # network flow crossing the footprint (dynamic, from the router)
 ```
-- `:nbsin` at each input cell **consumes** the passing router flow: `I_1[nbs] += current;
-  current = 0`. Paths pass *through* the footprint carrying 0 afterward (footprint has
-  zero infiltration by contract, so the interior cells do nothing). `I_1` is accumulated
-  during `_route_flow` and returned for the layer-ODE block.
-- Grid and router are **complementary** (grid excludes the network), so summing the
-  precomputed `I_bg` and the dynamic draws does **not** double-count.
-- Measuring at the input cells (not output-side `Q_c`) avoids double-charging the
-  footprint's own infiltration.
 
-### Output diff (fully dynamic) — emitted at `:nbsout`
-`O_1 = O_terrain(V) + E(V)` from the live layer state. The NBS emits only the **diff**
-from what oblivious routing already delivered (`O_0`):
-- **terrain**: `diff_e = (O_terrain(V) − O_0) · ratio_e`, `ratio_e = O_0[e]/O_0_total`.
-  Guard `O_0_total ≈ 0` → even split across the terrain endpoints. Internal-depression
-  endpoints deposit their share straight into the accumulation trap (no path).
-- **piped**: `+E[l](V)` at each outlet `l`, direct.
-Totals to `O_1 − O_0`. Terrain split math equals today's `−X·Q_c` (`Q_c = O_0[e]`);
-what changed is the dynamic input-side `I_1` and that the diff now rides the router.
+Layer-1 (top) inflow in the rate function is `el.O_0_total + nbs_draw[k]`.
 
-### Signed diff tracking = "the regular flow tracker, modified for negatives"
-The diff emitted at `:nbsout` is a **signed** value carried by the router along the
-path to the target trap. At each cell it is attenuated against that cell's
-`runoff` value `V` (read-only), by the single rule
+**Why `O_0_total`, and not a separate `Σ runoff[inflow_cell] + precip` sum** — this is the
+key subtlety. The footprint has **zero infiltration** (the contract), so by mass balance
+every drop entering (boundary inflow + rain falling on the footprint) must leave at a
+boundary exit or pond at an internal sink:
+
+```
+inflow + on-footprint rain  =  Σ(boundary-exit flow)  +  Σ(internal-sink ponding)  =  O_0_total
+```
+
+`_build_nbs_plan` sums `runoff` over **every** footprint drainage endpoint — boundary exits
+(`ds[1] ∉ footprint`) *and* internal depressions (flowgraph sinks) — skipping interior cells
+that drain to another footprint cell. So each drop is counted once, at its exit/sink, with
+its full accumulated flow, and `O_0_total` equals the **total live background input**. It only
+*looks* like an output name.
+
+- **Precipitation is included** — folded into `O_0_total` via the `runoff` grid (`compute_flow`
+  accumulates rain), *not* as a separate `+precip` term. A separate term would double-count
+  the on-footprint rain that is already in the endpoint runoff.
+- `:nbsin` draws are the *network* flow (upstream network spills, upstream outlet discharge)
+  arriving on `DynFlowPath`s. The oblivious grid excludes these, so `O_0_total + draws` does
+  not double-count.
+
+**BUILT vs plan:** the plan proposed `I_bg = Σ runoff[footprint_inflow_cells]` (boundary
+inflow only) plus a separate precip term. That omits on-footprint rain and broke pass-through
+(see *History* below). Replaced by `O_0_total`, which is mass-consistent with the output
+baseline.
+
+### `:nbsin` capture
+
+`DynFlowPath.nbs_inlets` marks the footprint-inflow boundary cells a path crosses. In
+`_path_delivered!`, a `:nbsin` event **consumes** the passing router flow:
+`nbs_draw[idx] += current; current = 0`. The path then continues through the footprint
+carrying 0 (interior cells have zero infiltration, so they do nothing). `nbs_draw` comes back
+from `_route_flow` and feeds the layer ODE.
+
+## Output diff
+
+`O_1 = O_terrain(V) + E(V)` from the live layer state (`O_terrain` = overflow of the top
+`n_terrain` layers; `E` = piped-layer discharge). The NBS emits only the diff from the
+oblivious baseline `O_0`, distributed across the same endpoints the oblivious flow used:
+
+- **terrain endpoint** `e`: `diff_e = (O_terrain(V) − O_0_total) · ratio_e`,
+  `ratio_e = O_0[e] / O_0_total` (guard `O_0_total ≈ 0` → even split over endpoints). New total
+  at `e` `= O_0[e] + diff_e = O_terrain · ratio_e`.
+  - *boundary exit*: head-injected on the carrier path departing from the exit cell.
+  - *internal depression*: deposited straight into the accumulation trap (no path).
+- **piped outlet** `l`: `+E_l(V)`, head-injected on the carrier path departing from the
+  outlet cell.
+
+The diffs total `O_1 − O_0_total`. The terrain split math equals the old model's `−X·Q_c`
+(`Q_c = O_0[e]`); what changed is the dynamic, mass-consistent input `I_1` and that the diff
+now rides the router.
+
+**BUILT vs plan — head injection, not `:nbsout` events.** The plan emitted the output diff as
+a mid-path `:nbsout` event (a path crossing the output cell, culvert-outlet style). But every
+NBS output cell — terrain exit cells (`footprint_outflow_cells`) and piped outlet cells — is
+**already a seed** in `build_network`, so a `DynFlowPath` departs *from* it (`departure_point ==
+that cell`) and already runs to the target trap. The diff is therefore injected at the **head**
+of that seed path (`NBSRouting.path_diff[carrier]`), which is equivalent and needs no `:nbsout`
+event kind and no output-side tracking. `_build_nbs_plan` maps each endpoint to its carrier via
+a `departure_point → path` dict. The `DynFlowPath.nbs_outlets` field is retained only for
+component coupling in `_nbs_coupled_nodes`, not for routing.
+
+## Signed-diff attenuation
+
+A head-injected diff is a **signed** value carried along the carrier path to its target trap.
+At each cell it is attenuated against that cell's oblivious `runoff` value `V` by the single
+rule (`_attenuate_diff`, over `NBSRouting.path_runoff[p]`, read-only):
+
 ```
 diff_out = max(V + diff, 0) − max(V, 0)
 ```
-equivalently, per the sign cases (all four verified against the illustration in
-`agent/prompts/flowtracking_adjust.org`):
 
-| diff | cell `V`        | effect                                             |
-|------|-----------------|----------------------------------------------------|
-| `+`  | `+` (flow)      | passes unchanged (`c`)                             |
-| `+`  | `−` (capacity)  | remaining capacity `\|V\|` consumes it until it vanishes |
+| diff | cell `V`        | effect                                                            |
+|------|-----------------|-------------------------------------------------------------------|
+| `+`  | `+` (flow)      | passes unchanged                                                  |
+| `+`  | `−` (capacity)  | remaining capacity `\|V\|` re-fills first, absorbing it            |
 | `−`  | `+` (flow)      | the flow absorbs it, capped at `−V` (can't remove more than is there) |
-| `−`  | `−` (no flow)   | moot → 0                                           |
+| `−`  | `−` (no flow)   | moot → 0                                                          |
 
-The attenuated diff is delivered to the path's **target trap**; since the target is
-downstream (later in topo order), the trap cascade carries it — closing the
-"doesn't cascade past the first trap" gap. This is *not* the router's positive-spill
+Handled in `_route_flow` at the path node: `delivered += _attenuate_diff(path_runoff[p],
+path_diff[p])`, added to the path's `target_trap` inflow. Since the target is downstream
+(later in topo order), the normal trap spill carries it onward — closing the
+"doesn't cascade past the first trap" gap. This is **not** the router's positive-spill
 `max(current − infil, 0)` rule (which charges the infiltration *rate*); it is the
-runoff-relative rule above, which requires the per-cell `runoff` reference.
+runoff-relative rule above, which is why it needs the per-cell `runoff` reference. (All four
+sign cases verified against `agent/prompts/flowtracking_adjust.org`.)
 
-### No double-count (option ii)
-`external_inflow[trap]` keeps the oblivious baseline — `O_0`'s contribution as it
-reached the trap. The diff-tracker delivers only the **attenuated diff** (the change),
-so the trap ends at `O_0 + diff = O_1`. Track the diff, not the total; `runoff` stays a
-read-only reference.
+## No double-count (option ii)
 
-### Structs
-- Type `NBSLayer` fields `Float64` → delete `NBSLayerParams`
-  (`NBSSystem.layers::Vector{NBSLayer}` already concrete). **[done]**
-- `NBSElement` references `NBSSystem` + footprint `A`. **[done]**
-- Delete `NBSDelivery`, `_walk_to_trap`, `_apply_nbs_corrections!`, and
-  `_propagate_correction` — the diff work now lives in the router's `:nbsout`
-  signed-tracking step.
-- `NBSElement`/`NBSPlan` hold the per-placement plan: `system`, `A`, `state_base`,
-  `n_terrain`, precomputed **`I_bg`** = `Σ runoff[input_cell]`, and the output routes
-  with precomputed `O_0` per endpoint and `ratio_e`.
+`external_inflow[trap]` keeps the oblivious baseline — `O_0`'s contribution as it reached the
+trap. The router delivers only the **attenuated diff** (the change), so the trap ends at
+`O_0 + diff = O_1`. Track the diff, not the total; `runoff` stays a read-only reference.
 
-### `DynFlowPath` + `build_network` (additive only — no termination)
-- Add `DynFlowPath.nbs_inlets::Vector{Tuple{Int,Int}}` (nbs index, cell position),
-  populated by `build_network` via `_intersecting_on_path` on `footprint_inflow_cells`
-  — the same additive bookkeeping already used for `nbs_outlets`.
-- `_path_event_templates` emits `:nbsin` (from `nbs_inlets`) and `:nbsout` (from
-  `nbs_outlets`) alongside `:cvin`/`:cvout`.
-- **No** `target_trap`/NBS-target change, **no** path termination, **no** `_network_order`
-  node — the membership/trace machinery is untouched.
+Because the oblivious total-in equals total-out-or-ponded, the number used as the ODE input
+baseline and as the diff's output baseline is the **same** `O_0_total` — the mass-balance
+identity is what makes a true pass-through NBS emit `diff ≈ 0`.
 
-### Threading `runoff` into `_route_flow`
-- `_route_flow` / `_path_delivered!` gain the per-cell `runoff` for each path (from
-  `ctx.runoff`, read-only) and a signed diff accumulator handled by the rule above.
-- `_routed_inflow` computes per-NBS `O_terrain(V)` / `E(V)` and the per-route diffs up
-  front, passes them + `runoff` into `_route_flow`, and gets back `I_1` (the `:nbsin`
-  draws + `I_bg`) for the layer-ODE block.
+## Code map (as built)
 
-## Open implementation questions (small)
-- Exact carrier for the signed diff through `_path_delivered!` — a second signed
-  accumulator advanced per cell by `max(V+diff,0)−max(V,0)` alongside the positive
-  `current`, delivered to `target_trap`. (`current` uses the existing infil-prefix
-  rule; the diff uses the runoff-relative rule — they are separate quantities.)
-- How `runoff` is passed per path: precompute per-path cell-runoff vectors from
-  `ctx.runoff` (mirrors `path_infil_prefix`), read-only.
+`src/dynamics/networksolver.jl`:
+- `NBSElement` — `system`, `A`, `state_base`, `n_terrain`, `O_0_total`, and the output routes:
+  `terrain_paths::[(carrier_path, ratio_e)]`, `terrain_traps::[(acc_trap, ratio_e)]`,
+  `piped_paths::[(carrier_path, layer)]`.
+- `NBSPlan` — `elems`, `nlayer_total`.
+- `NBSRouting` — per-step scratch: `path_diff`, `trap_extra` (internal-depression deposits),
+  `path_runoff` (read-only), `nbs_draw` (router output = `:nbsin` captures).
+- `_build_nbs_plan` — endpoint walk → `O_0`, `O_0_total`, `ratio_e`, carrier paths.
+- `_nbs_routing` — per-step output diffs from the live layer state → a fresh `NBSRouting`.
+- `_attenuate_diff`, `_path_cell_runoff`, `DynNetworkRateParams.path_runoff`.
+- `_path_event_templates` emits `:nbsin`; `_path_delivered!` handles the `:nbsin` draw;
+  `_route_flow` seeds `trap_extra`, head-injects + attenuates each `path_diff`; `_routed_inflow`
+  builds the `NBSRouting` and returns `nbs_draw`; the rate function drives layer-1 with
+  `O_0_total + nbs_draw`.
+- **Deleted:** `NBSDelivery`, `_walk_to_trap`, `_apply_nbs_corrections!`,
+  `_propagate_correction`, the output-side static `capture`, `NBSLayerParams`.
 
-## Critical files
-- `src/dynamics/networksolver.jl` — `_route_flow` / `_path_delivered!`
-  (`:nbsin` draw → `I_1`; `:nbsout` emit the diff into the signed accumulator; per-cell
-  `runoff` reference), `_path_event_templates` (`:nbsin`/`:nbsout`), `_routed_inflow`
-  (compute `O_terrain`/`E`/diffs up front, thread `runoff`, return `I_1`), the NBS
-  plan, and the rate-function NBS block (layer ODE driven by `I_1`); **delete**
-  `NBSDelivery`, `_walk_to_trap`, `_apply_nbs_corrections!`, `_propagate_correction`.
-- `src/dynamics/elements.jl` — add `DynFlowPath.nbs_inlets` (additive; **no**
-  `target_trap` change). `src/dynamics/build_network.jl` — populate `nbs_inlets` via
-  `_intersecting_on_path` on `footprint_inflow_cells` (like `nbs_outlets`); **no**
-  path termination.
-- `src/dynamics/nbs_elements.jl` — `NBSLayer` typed (**done**).
-- Reuse: `DynNBSPlacement` cell lists (elements.jl); `DynFlowPath.nbs_outlets` +
-  `_add_accumulation_traps!` region→trap map (network_utils.jl). `watercourses.jl`,
-  `_network_order`, `network_updating.jl`, and the membership layer are **untouched**.
+`src/dynamics/elements.jl` — `DynFlowPath.nbs_inlets::Vector{Tuple{Int,Int}}` (additive; no
+`target_trap` change, no path termination). `build_network.jl` — populated via
+`_intersecting_on_path` on `footprint_inflow_cells`; threaded through the membership/localize
+reconstructions (`network_updating.jl`, `network_utils.jl`). `nbs_elements.jl` — `NBSLayer`
+numeric fields typed `Float64`.
+
+Untouched: `watercourses.jl`, `_network_order`, the membership/trace machinery.
+
+## History — the spurious negative diff (fixed)
+
+The first cut followed the plan literally: `I_bg = Σ runoff[footprint_inflow_cells]`, i.e. only
+flow crossing the **upstream boundary**, omitting rain on the footprint. But the output
+baseline `O_0_total` includes that rain, so `O_0_total > I_bg`. A fast pass-through NBS
+(`O_1 = O_terrain ≈ I_1 ≈ I_bg`) then produced `diff ≈ I_bg − O_0_total = −(on-footprint rain)
+< 0` — the NBS spuriously subtracted the footprint's own rain, filling the downstream pit ~20%
+late. Root cause: input and output baseline were measured over *different water*. Fix: feed the
+layer the full throughput `O_0_total`, restoring the `input = output` identity that pass-through
+relies on.
+
+## Deferred work
+
+- **Submergence** — a containing trap flooding the footprint from below is **not** modeled; the
+  footprint is treated like any terrain. To be revisited later (leaving it lie for now).
+- **Internal-depression re-emit** — the output diff is distributed to internal sinks too
+  (`terrain_traps`), so in pass-through an internal sink still ponds its oblivious share
+  (matches the old model). Physically a storage NBS arguably captures internal ponding and
+  re-emits it at the boundary; reconsider together with submergence.
+- **NBS → NBS on the same path with no trap between** — the signed diff is carried to the
+  carrier path's target trap, not drawn by a downstream `:nbsin` on the *same* path segment
+  (a downstream NBS captures an upstream one only through an intervening trap's spill).
+  Acceptable for now (no trap between two footprints on one path is rare).
+- **Per-layer distinct outlets**, **evapotranspiration** (currently a `0.0` placeholder in the
+  layer ODE), and **real cell area** (`A` = footprint cell count; `@@@ 1 m²/cell`).
+- **Integration tests** — the terrain **cascade / network-inflow / upstream-outlet** tests are
+  not yet written: hard to isolate on rain-flooded terrain (every pit fills from its own
+  catchment before the cascade arrives), and the cascade path is generic router behavior
+  already exercised by the driver suite. See *Verification*.
 
 ## Verification
-- `test/nbs_routing_test.jl` — retention/pass-through must still hold
-  qualitatively; values will change (dynamic `I_1` vs oblivious). Verify physically
-  and update pinned numbers with justification.
-- New **cascade** test: NBS feeding a full trap that spills into a second trap —
-  the delta must reach the second trap.
-- New **network-inflow** test: NBS fed mainly by an upstream network spill (small
-  background) — it must abstract that flow (old model would not).
-- New **upstream-outlet** test: a culvert/NBS outlet upstream whose discharge reaches
-  the footprint via a `DynFlowPath` — the NBS must capture it (grid-only read would
-  miss it; the router delivery must reach the NBS node).
-- Signed-tracking unit test: the V-relative rule on a hand path (mirrors the
-  existing `_propagate_correction` test).
-- Mass conservation: net surface water removed over a step = layer storage change
-  (`−dS`); assert it.
-- Run `dynamics_test.jl`, `dynamic_membership_test.jl`, `network_driver_test.jl`,
-  the `Sequencing` set; package loads clean.
+
+Green: `test/nbs_routing_test.jl` (12 — the `_attenuate_diff` V-rule unit test + retention +
+pass-through integration), `dynamics_test.jl` (729), `dynamic_membership_test.jl` (280),
+`network_driver_test.jl` (31), the `Sequencing` clean cases (5). Package loads clean. Only the
+pre-existing bay-grid drift / `raise_buildings!` cases fail (unrelated).
+
+Not yet written (deferred, above): cascade, network-inflow, upstream-outlet, and an explicit
+per-step mass-conservation assertion (`net surface water removed = −dS`).
