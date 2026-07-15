@@ -21,6 +21,24 @@ const SWIM = SurfaceWaterIntegratedModeling
     @test P([60.0, 20.0], -30.0)    ≈ -20.0   # chain: attenuates to the smaller downstream runoff
 end
 
+@testset "NBS: :nbsin intercepts the whole signed flow" begin
+    # A footprint-inflow cell intercepts ALL passing network flow into its live input I_1 (nbs_draw),
+    # positive or negative — so an upstream NBS storing (a negative diff riding `current`) shows up as
+    # a deficit in a downstream NBS's input, not as flow that bypasses it to the trap.
+    D = SWIM._path_delivered!
+    net = SWIM.DynNetwork()                          # unused (no culvert events)
+    run3 = [10.0, 10.0, 10.0]                        # saturated cells: signed flow passes unattenuated
+    ev   = [(2, :nbsin, 1)]                          # one :nbsin at cell 2
+
+    nd = [0.0]                                       # positive release from upstream
+    d  = D(run3, 5.0, ev, Float64[], Float64[], nothing, net, nothing, nd)
+    @test nd[1] ≈ 5.0 && d ≈ 0.0                     # fully captured, nothing passes on
+
+    nd = [0.0]                                       # negative: upstream NBS storing (deficit)
+    d  = D(run3, -3.0, ev, Float64[], Float64[], nothing, net, nothing, nd)
+    @test nd[1] ≈ -3.0 && d ≈ 0.0                    # deficit captured (not dropped onto the trap)
+end
+
 # A west-flowing plane (rising east) with one pit near the west edge; an NBS footprint sits
 # upstream on the flow path into the pit.
 function _plane_with_pit(N = 30)

@@ -304,8 +304,8 @@ end
 # Flow delivered at the end of a path.  A signed `head_flow` travels the cells, attenuated per
 # cell against the oblivious residual `path_runoff` (spare capacity infiltrates it, saturated
 # cells pass it, symmetric in sign — see `_attenuate_range`).  At each `events` stop a tributary
-# adds its (signed) output, a culvert draws/adds at its cell, an NBS inlet draws the passing
-# positive flow into `nbs_draw`.  Cell `k`'s residual is charged on the segment leaving `k`,
+# adds its (signed) output, a culvert draws/adds at its cell, an NBS inlet intercepts the whole
+# passing flow into `nbs_draw`.  Cell `k`'s residual is charged on the segment leaving `k`,
 # matching the old infiltration-prefix convention.  Mutates `culvert_actual` and `nbs_draw`.
 function _path_delivered!(path_runoff, head_flow, events,
                           trib_output, culvert_actual, cvplan, net, trap_level, nbs_draw)
@@ -321,10 +321,9 @@ function _path_delivered!(path_runoff, head_flow, events,
             a = min(_culvert_flow(cvplan, net, idx, trap_level), max(current, 0.0))
             culvert_actual[idx] = a                       # drawn == delivered
             current -= a
-        else                                              # :nbsin — draw the passing positive flow
-            d = max(current, 0.0)
-            nbs_draw[idx] += d
-            current -= d
+        else                                              # :nbsin — intercept ALL passing flow,
+            nbs_draw[idx] += current                      # signed: an upstream NBS storing shows up
+            current = 0.0                                 # as a deficit in this NBS's live input I_1
         end
         lo = pos
     end

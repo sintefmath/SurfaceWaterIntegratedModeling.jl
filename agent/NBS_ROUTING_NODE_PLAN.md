@@ -131,8 +131,10 @@ reproduces the prefix behaviour exactly for hand-built nets with no background.
 The NBS output diff is **head-injected** into the path's signed `current` (`head = path_flow[p]
 + path_diff[p]`) and rides this one accumulator to `target_trap`; the normal trap spill carries
 it onward, closing the "doesn't cascade past the first trap" gap. Because it shares `current`, a
-same-path downstream `:nbsin` also draws an upstream NBS's positive release. (All four sign cases
-verified against `agent/prompts/flowtracking_adjust.org`.)
+same-path downstream `:nbsin` intercepts the whole signed flow (`nbs_draw += current; current =
+0`) — an upstream NBS's positive release *or* negative storing deficit both fold into the
+downstream NBS's input `I_1`. (All four sign cases verified against
+`agent/prompts/flowtracking_adjust.org`.)
 
 ## No double-count (option ii)
 
@@ -191,12 +193,12 @@ relies on.
   (`terrain_traps`), so in pass-through an internal sink still ponds its oblivious share
   (matches the old model). Physically a storage NBS arguably captures internal ponding and
   re-emits it at the boundary; reconsider together with submergence.
-- **NBS → NBS on the same path, fully signed** — mostly resolved by the router unification
-  (commit `f22ce5e`): the NBS output diff now rides the single signed `current`, so a same-path
-  downstream `:nbsin` draws an upstream NBS's *positive* release. The remaining gap is only the
-  *negative*-diff case (an upstream NBS storing): a negative `current` is not drawn by `:nbsin`
-  (`max(current,0)`), so it passes to the trap rather than reducing the downstream NBS's input.
-  Rare and second-order; revisit if it matters.
+- ~~NBS → NBS on the same path~~ **resolved** (router unification `f22ce5e` + signed `:nbsin`):
+  the NBS output diff rides the single signed `current`, and a same-path downstream `:nbsin`
+  intercepts the *whole* signed flow into its input — a positive release *and* a negative deficit
+  (upstream NBS storing) both land in the downstream NBS's `I_1 = O_0_total + nbs_draw`, correct
+  and non-negative (attenuation caps a deficit at the flow actually present, which is part of the
+  downstream `O_0_total`). Unit-tested (`:nbsin intercepts the whole signed flow`).
 - **Per-layer distinct outlets**, **evapotranspiration** (currently a `0.0` placeholder in the
   layer ODE), and **real cell area** (`A` = footprint cell count; `@@@ 1 m²/cell`).
 - **Integration tests** — the terrain **cascade / network-inflow / upstream-outlet** tests are
