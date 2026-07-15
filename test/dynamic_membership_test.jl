@@ -13,8 +13,8 @@ ci(i, j) = CartesianIndex(i, j)
 
 # a full flow path with explicit departure point
 fp(cells, dep, tt; cin = Tuple{Int,Int}[], cout = Tuple{Int,Int}[],
-                    nbs = Tuple{Int,Int}[], mg = Tuple{Int,Int}[]) =
-    DynFlowPath(cells, dep, tt, cin, cout, nbs, mg)
+                    nbs_in = Tuple{Int,Int}[], nbs = Tuple{Int,Int}[], mg = Tuple{Int,Int}[]) =
+    DynFlowPath(cells, dep, tt, cin, cout, nbs_in, nbs, mg)
 
 # in_count of every trap equals a from-scratch recompute
 counts_consistent(net) =

@@ -6,13 +6,13 @@ export DynObject, DynFlowPath, DynTrap, DynCulvert, DynNBSPlacement, DynNetwork,
 abstract type DynObject end
 
 """
-        DynFlowPath(cells, departure_point, target_trap, culvert_inlets, culvert_outlets, nbs_outlets, merges)
+        DynFlowPath(cells, departure_point, target_trap, culvert_inlets, culvert_outlets, nbs_inlets, nbs_outlets, merges)
 
 Represent a flow path over the terrain as a sequence of grid cells.  The path may
 lead into a trap (`target_trap > 0`), terminate in an intersecting flow path, or
 flow out of the domain (`target_trap == 0` for both).
 
-Culverts and NBS outlets along the way subtract or add water; the infiltration
+Culverts and NBS in/outlets along the way subtract or add water; the infiltration
 capacity of each cell is represented externally.  Convenience constructors default
 `departure_point` to the head cell and the culvert/nbs/merge lists to empty.
 
@@ -34,7 +34,10 @@ struct DynFlowPath <: DynObject
     culvert_inlets::Vector{Tuple{Int,Int}}
     culvert_outlets::Vector{Tuple{Int,Int}}
 
-    # nbs outlets represent other external sources
+    # NBS interception points on this path, each (nbs_index, cell_position).  An inlet cell
+    # is a footprint-inflow boundary cell where the passing flow is drawn into the NBS input
+    # I_1; an outlet cell is where the NBS re-emits its signed output diff (O_1 - O_0).
+    nbs_inlets::Vector{Tuple{Int,Int}}
     nbs_outlets::Vector{Tuple{Int,Int}}
 
     # tributary paths that merge into this one: (tributary_path_index, junction_cell_index)
@@ -44,8 +47,9 @@ end
 
 # content-first form: departure_point defaults to the head cell (requires non-empty cells;
 # a zero-length connector uses the full constructor with an explicit departure_point).
-DynFlowPath(cells, target_trap, cin, cout, nbs, mg) =
-    DynFlowPath(cells, first(cells), target_trap, cin, cout, nbs, mg)
+# nbs_inlets defaults empty — build_network populates it on the full form.
+DynFlowPath(cells, target_trap, cin, cout, nbs_out, mg) =
+    DynFlowPath(cells, first(cells), target_trap, cin, cout, Tuple{Int,Int}[], nbs_out, mg)
 DynFlowPath(cells, target_trap) =
     DynFlowPath(cells, target_trap, Tuple{Int,Int}[], Tuple{Int,Int}[], Tuple{Int,Int}[], Tuple{Int,Int}[])
 DynFlowPath(cells) =

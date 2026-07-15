@@ -170,10 +170,10 @@ function _grow_network_from_seed!(network, pathmap, seed::CartesianIndex{2},
         isect_path, isect_cell =
             _update_pathmap!(pathmap, path, length(network.flow_paths)+1) # may empty path
 
-        cv_in, cv_out, nbs_out = _intersecting_on_path(CI[path], network.culverts, network.nbs)
+        cv_in, cv_out, nbs_in, nbs_out = _intersecting_on_path(CI[path], network.culverts, network.nbs)
         target_trap = isect_path > 0 ? 0 : trap_local
         push!(network.flow_paths,
-              DynFlowPath(CI[path], seed, target_trap, cv_in, cv_out, nbs_out, Tuple{Int,Int}[]))
+              DynFlowPath(CI[path], seed, target_trap, cv_in, cv_out, nbs_in, nbs_out, Tuple{Int,Int}[]))
         new_ix = length(network.flow_paths)
 
         (departing_trap_ix > 0) && (network.traps[departing_trap_ix].spill_path = new_ix)
@@ -259,25 +259,31 @@ function _intersecting_culverts_and_nbs_outlets(footprint, culverts, nbs)
 end
 
 # ----------------------------------------------------------------------------
-# For a flow path, the culvert inlets/outlets and NBS outlets that fall on it, each
+# For a flow path, the culvert inlets/outlets and NBS in/outlets that fall on it, each
 # paired with the 1-based position of the matching cell within `path` (routing charges
-# infiltration up to that cell, like a `merges` junction).  The trap form above stores
-# bare ids since a trap has no along-path position.
+# infiltration up to that cell, like a `merges` junction).  NBS inlets are the
+# footprint-inflow boundary cells crossed by the path (every crossing is registered; the
+# first draws the flow, later ones then see zero).  The trap form above stores bare ids
+# since a trap has no along-path position.
 function _intersecting_on_path(path, culverts, nbs)
     cv_in   = Tuple{Int,Int}[]
     cv_out  = Tuple{Int,Int}[]
+    nbs_in  = Tuple{Int,Int}[]
     nbs_out = Tuple{Int,Int}[]
     for (ix, culvert) in enumerate(culverts)
         p = findfirst(==(culvert.inlet),  path); p !== nothing && push!(cv_in,  (ix, p))
         p = findfirst(==(culvert.outlet), path); p !== nothing && push!(cv_out, (ix, p))
     end
     for (ix, n) in enumerate(nbs)
+        for (pos, cell) in enumerate(path)
+            cell in n.footprint_inflow_cells && push!(nbs_in, (ix, pos))
+        end
         for outlet in n.outlets
             p = findfirst(==(outlet), path)
             p !== nothing && (push!(nbs_out, (ix, p)); break)
         end
     end
-    return cv_in, cv_out, nbs_out
+    return cv_in, cv_out, nbs_in, nbs_out
 end
 
 # ----------------------------------------------------------------------------

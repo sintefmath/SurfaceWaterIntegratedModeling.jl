@@ -11,7 +11,7 @@ mk_network(ts, coords, full; kw...) = setup_network(ts, full; dyn_coords = coord
 # constructor needs an explicit departure_point since there is no `first(cells)` to take.
 srcpath(target) = DynFlowPath(CartesianIndex{2}[], CartesianIndex(1, 1), target,
                               Tuple{Int,Int}[], Tuple{Int,Int}[], Tuple{Int,Int}[],
-                              Tuple{Int,Int}[])
+                              Tuple{Int,Int}[], Tuple{Int,Int}[])
 
 # Tolerance for the network-ODE fill/drain times reproducing the analytic (plain) path.
 # The dynamic solver runs at abstol=1e-6 (m^3, ~mL) / reltol=1e-4 — accuracy calibrated to

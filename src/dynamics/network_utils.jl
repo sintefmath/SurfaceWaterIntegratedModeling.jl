@@ -131,6 +131,7 @@ function _localize_path(fp::DynFlowPath, tmap, cvmap, nbsmap, pmap)
                 _relabel(fp.target_trap, tmap),
                 [(cvmap[c],  pos) for (c, pos) in fp.culvert_inlets],
                 [(cvmap[c],  pos) for (c, pos) in fp.culvert_outlets],
+                [(nbsmap[n], pos) for (n, pos) in fp.nbs_inlets],
                 [(nbsmap[n], pos) for (n, pos) in fp.nbs_outlets],
                 [(pmap[m],   j)   for (m, j)   in fp.merges])
 end
