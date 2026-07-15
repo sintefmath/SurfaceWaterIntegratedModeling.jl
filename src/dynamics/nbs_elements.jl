@@ -25,15 +25,15 @@ linearly with storage up to the threshold `EVS11`, and at full rate above it.
 - `layer_name`: display name used in printing
 """
 mutable struct NBSLayer
-    Smin    # minimum capacity limit
-    Smax    # maximum capacity limit
-    Kout    # outflow rate coefficient
-    Kinf    # infiltration rate coefficient
-    nout    # outflow exponent
-    ninf    # infiltration exponent
-    EVCoeff # evapotranspiration coefficient
-    EVS11   # soil moisture threshold
-    A       # area of the layer
+    Smin::Float64    # minimum capacity limit
+    Smax::Float64    # maximum capacity limit
+    Kout::Float64    # outflow rate coefficient
+    Kinf::Float64    # infiltration rate coefficient
+    nout::Float64    # outflow exponent
+    ninf::Float64    # infiltration exponent
+    EVCoeff          # evapotranspiration coefficient (scalar or Function(t)) — left untyped
+    EVS11::Float64   # soil moisture threshold
+    A::Float64       # area of the layer
     layer_name::String
 end
 
