@@ -84,3 +84,48 @@ end
 
     @test isapprox(fT, f0; rtol = 0.05)
 end
+
+# Build the network rate params for an NBS placement on `ts`, the way fill_sequence does.
+function _nbs_rate_params(ts, nbs; rain = 1.0e-3)
+    infil = zeros(size(ts.topography))                    # (footprints are forced to zero anyway)
+    zvt   = SWIM._compute_z_vol_tables(ts)
+    filled = Vector{Bool}(ts.trapvolumes .== 0.0)
+    cur    = fill(SWIM.FilledAmount(0.0, 0.0), numtraps(ts))
+    sgraph = SWIM.compute_complete_spillgraph(ts, filled)
+    rate   = compute_flow(sgraph, rain, infil, ts)
+    driver = SWIM.build_network_driver(ts,
+                 SWIM._dyn_seeds(ts, CartesianIndex{2}[], SWIM.DynCulvert[]),
+                 SWIM.DynCulvert[], findall(filled), cur, rate, infil, zvt, 0.0, Inf;
+                 nbs_placements = nbs, nbs_state = Dict{Int,Vector{Float64}}())
+    ctx = only(c for c in driver.contexts if !isempty(c.net.nbs))
+    return SWIM._build_rate_params(ts, ctx.net, infil, ctx.extern_inflow; runoff = ctx.runoff, zvt = zvt)
+end
+
+@testset "NBS: layer cascade conserves mass" begin
+    ts  = _plane_with_pit()
+    fp  = _upstream_footprint(ts)
+    # a puddle that both overflows AND infiltrates to ground, so every mass term is live
+    nbs = [SWIM.DynNBSPlacement(SWIM.puddle(1.0; kOUT = 0.5, kINF = 0.1), fp, CartesianIndex{2}[])]
+    p   = _nbs_rate_params(ts, nbs)
+
+    nt     = length(p.geom)
+    nlayer = p.nbsplan.nlayer_total
+    V  = zeros(nt + nlayer)
+    for i in (nt + 1):(nt + nlayer); V[i] = 5.0; end      # positive storage → no V<=0 floor fires
+    dV = similar(V)
+    SWIM.dynNetworkRateFunction!(dV, V, p)
+
+    el = p.nbsplan.elems[1]
+    I_1 = el.O_0_total                                    # traps empty ⇒ no spills ⇒ nbs_draw == 0
+    @test I_1 > 0.0                                       # the footprint really does receive flow
+    O_surface = 0.0; ground = 0.0; sum_dV = 0.0
+    for (l, L) in enumerate(el.system.layers)
+        S_mm = V[nt + el.state_base + l] * 1000.0 / el.A
+        O_surface += SWIM.compute_outflow(L.Kout, L.nout, L.Smax, S_mm) * 1e-3   # every layer's overflow leaves
+        (l == length(el.system.layers)) &&                                      # only the bottom infiltrates to ground
+            (ground = SWIM.compute_outflow(L.Kinf, L.ninf, L.Smin, S_mm) * 1e-3)
+        sum_dV += dV[nt + el.state_base + l]
+    end
+    # storage rate = in − out − to-ground: no mass created or lost in the cascade
+    @test isapprox(sum_dV, I_1 - O_surface - ground; atol = 1e-12, rtol = 1e-9)
+end

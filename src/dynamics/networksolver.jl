@@ -571,10 +571,16 @@ function _build_nbs_plan(net::DynNetwork, tstruct, runoff::AbstractMatrix{<:Real
             Qf = max(Float64(runoff[f]), 0.0)
             Qf > 0.0 || continue
             ds = Graphs.outneighbors(g, f)
-            if isempty(ds)                         # internal depression: ponds into its trap
-                push!(endpoints, (Qf, :trap, get(trap_of_cell, f, 0)))
+            if isempty(ds)                         # sink: internal depression, or a domain-exit sink
+                tr = get(trap_of_cell, f, 0)       # tr == 0 is legitimate only for a domain-exit sink
+                @assert tr != 0 || tstruct.regions[f] <= 0 "NBS internal-depression cell $f " *
+                    "(region $(tstruct.regions[f])) is covered by no network trap — coupling invariant broken"
+                push!(endpoints, (Qf, :trap, tr))
             elseif ds[1] ∉ footset                 # boundary exit: flow crosses to ds[1]
-                push!(endpoints, (Qf, :path, get(dep_path, CI[ds[1]], 0)))
+                carrier = get(dep_path, CI[ds[1]], 0)   # the exit cell is a seed, so a path must depart it
+                @assert carrier != 0 "NBS boundary-exit cell $(CI[ds[1]]) has no carrier path " *
+                    "(expected it to be a network seed)"
+                push!(endpoints, (Qf, :path, carrier))
             end
         end
         O_0_total = sum(Float64[Q for (Q, _, _) in endpoints]; init = 0.0)
@@ -584,7 +590,7 @@ function _build_nbs_plan(net::DynNetwork, tstruct, runoff::AbstractMatrix{<:Real
         terrain_paths = Tuple{Int,Float64}[]
         terrain_traps = Tuple{Int,Float64}[]
         for (Q, kind, tgt) in endpoints
-            tgt == 0 && continue                   # leaves the domain / no carrier: diff dropped
+            tgt == 0 && continue                   # domain-exit sink: its share leaves the domain (dropped)
             kind === :path ? push!(terrain_paths, (tgt, ratio(Q))) :
                              push!(terrain_traps, (tgt, ratio(Q)))
         end
@@ -594,8 +600,10 @@ function _build_nbs_plan(net::DynNetwork, tstruct, runoff::AbstractMatrix{<:Real
         for (l, L) in enumerate(nb.system.layers)
             (l > nb.n_terrain && L.Kout > 0.0) || continue
             piped += 1
-            carrier = get(dep_path, nb.outlets[piped], 0)
-            carrier == 0 || push!(piped_paths, (carrier, l))
+            carrier = get(dep_path, nb.outlets[piped], 0)   # the outlet cell is a seed too
+            @assert carrier != 0 "NBS piped outlet $(nb.outlets[piped]) has no carrier path " *
+                "(expected it to be a network seed)"
+            push!(piped_paths, (carrier, l))
         end
 
         push!(elems, NBSElement(nb.system, A_foot, base, nb.n_terrain, O_0_total,
@@ -769,7 +777,10 @@ function dynNetworkRateFunction!(dV, V, p::DynNetworkRateParams, t = 0.0)
     if p.nbsplan !== nothing
         @inbounds for (k, el) in enumerate(p.nbsplan.elems)
             base    = el.state_base
-            prev_qi = el.O_0_total + nbs_draw[k]          # layer-1 inflow = live input I_1
+            # layer-1 inflow = live input I_1 = O_0_total + the :nbsin draws.  Physically >= 0
+            # (a negative draw is an upstream NBS's deficit, capped by attenuation at the flow
+            # present, which is part of this footprint's own O_0_total); max() guards float noise.
+            prev_qi = max(el.O_0_total + nbs_draw[k], 0.0)
             for (l, L) in enumerate(el.system.layers)
                 S_mm = V[nt + base + l] * 1000.0 / el.A
                 qo   = compute_outflow(L.Kout, L.nout, L.Smax, S_mm) * 1e-3

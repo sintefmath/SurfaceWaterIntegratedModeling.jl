@@ -200,18 +200,35 @@ relies on.
   and non-negative (attenuation caps a deficit at the flow actually present, which is part of the
   downstream `O_0_total`). Unit-tested (`:nbsin intercepts the whole signed flow`).
 - **Per-layer distinct outlets**, **evapotranspiration** (currently a `0.0` placeholder in the
-  layer ODE), and **real cell area** (`A` = footprint cell count; `@@@ 1 m²/cell`).
+  layer ODE), and **real cell area** (`A` = footprint cell count; `@@@ 1 m²/cell`) — the last is
+  the biggest quantitative approximation (needs a resolution value threaded from the grid).
+- **Output split by static oblivious ratio** (`ratio_e = O_0[e]/O_0_total`) rather than the live
+  drainage split — an approximation while the distribution is stable.
 - **Integration tests** — the terrain **cascade / network-inflow / upstream-outlet** tests are
   not yet written: hard to isolate on rain-flooded terrain (every pit fills from its own
   catchment before the cascade arrives), and the cascade path is generic router behavior
-  already exercised by the driver suite. See *Verification*.
+  already exercised by the driver suite.
+
+## Hardening (done)
+
+- **Silent-drop fallbacks → asserts.** A boundary-exit / piped-outlet carrier path and a
+  trap-bottom internal-depression trap are all guaranteed by construction (output cells are
+  seeds; accumulation regions map to exactly one net trap). `_build_nbs_plan` now asserts these
+  instead of defaulting a missing lookup to `0` (which would silently leak mass). A domain-exit
+  sink (`regions[f] <= 0`) is still a legitimate `0`-drop (its share leaves the domain).
+- **`I_1` floor.** Layer-1 inflow is `max(O_0_total + nbs_draw, 0)` — physically `≥ 0` (a deficit
+  is capped by attenuation at the flow present, part of the footprint's own `O_0_total`); the
+  `max` only guards float noise.
 
 ## Verification
 
-Green: `test/nbs_routing_test.jl` (12 — the `_attenuate_diff` V-rule unit test + retention +
-pass-through integration), `dynamics_test.jl` (729), `dynamic_membership_test.jl` (280),
-`network_driver_test.jl` (31), the `Sequencing` clean cases (5). Package loads clean. Only the
-pre-existing bay-grid drift / `raise_buildings!` cases fail (unrelated).
+Green: `test/nbs_routing_test.jl` (16 — the `_attenuate_diff` V-rule unit test, signed `:nbsin`
+interception (both signs), retention + pass-through integration, **layer-cascade mass
+conservation** `Σ dV_layer = I_1 − O_surface − ground`), `dynamics_test.jl` (729),
+`dynamic_membership_test.jl` (280), `network_driver_test.jl` (31), the `Sequencing` clean cases
+(5). Package loads clean. Only the pre-existing bay-grid drift / `raise_buildings!` cases fail
+(unrelated).
 
-Not yet written (deferred, above): cascade, network-inflow, upstream-outlet, and an explicit
-per-step mass-conservation assertion (`net surface water removed = −dS`).
+The mass-conservation test drives the real rate function post-solve (off the ODE hot path).
+Still not written: cascade / network-inflow / upstream-outlet terrain integration tests, and a
+routing-side ledger (delivered diff + en-route infiltration = emitted diff).
