@@ -3,20 +3,22 @@ using Test, SurfaceWaterIntegratedModeling, LazyArtifacts
 const SWIM = SurfaceWaterIntegratedModeling
 
 # ---------------------------------------------------------------------------
-# NBS signed-correction routing (agent/NBS_ROUTING_REDESIGN.md).  `watercourses` is
-# NBS-oblivious; an NBS is a signed correction to that baseline, propagated along the flow
-# paths with `max(V+c,0) - max(V,0)` per cell and delivered to the downstream trap inflow.
+# NBS as a signed-diff router element (agent/NBS_ROUTING_NODE_PLAN.md).  `watercourses` is
+# NBS-oblivious; the NBS captures its live input `I_1` at the footprint-inflow cells and emits
+# only the diff `O_1 - O_0` of its live output over the oblivious baseline, attenuated along
+# the carrier path's oblivious runoff by `max(V+d,0) - max(V,0)` per cell and delivered to the
+# downstream trap inflow.
 # ---------------------------------------------------------------------------
 
-@testset "NBS: _propagate_correction per-cell rule" begin
-    P = SWIM._propagate_correction
-    @test P(-3.0, Float64[])        ≈ -3.0    # empty path: unchanged
-    @test P(-3.0, [100.0])          ≈ -3.0    # throughput-rich cell: full pass
-    @test P(-5.0, [2.0])            ≈ -2.0    # runoff can't absorb it all: clamps to -runoff
-    @test P(-5.0, [-8.0])           ≈  0.0    # cell already infiltrating (V<0): correction dies
-    @test P( 5.0, [-8.0])           ≈  0.0    # positive correction, spare capacity swallows it
-    @test P( 5.0, [-3.0])           ≈  2.0    # spare capacity refilled first, surplus continues
-    @test P(-30.0, [60.0, 20.0])    ≈ -20.0   # chain: attenuates to the smaller downstream runoff
+@testset "NBS: _attenuate_diff per-cell rule" begin
+    P = SWIM._attenuate_diff
+    @test P(Float64[], -3.0)        ≈ -3.0    # empty path: unchanged
+    @test P([100.0], -3.0)          ≈ -3.0    # throughput-rich cell: full pass
+    @test P([2.0], -5.0)            ≈ -2.0    # runoff can't absorb it all: clamps to -runoff
+    @test P([-8.0], -5.0)           ≈  0.0    # cell already infiltrating (V<0): diff dies
+    @test P([-8.0],  5.0)           ≈  0.0    # positive diff, spare capacity swallows it
+    @test P([-3.0],  5.0)           ≈  2.0    # spare capacity refilled first, surplus continues
+    @test P([60.0, 20.0], -30.0)    ≈ -20.0   # chain: attenuates to the smaller downstream runoff
 end
 
 # A west-flowing plane (rising east) with one pit near the west edge; an NBS footprint sits

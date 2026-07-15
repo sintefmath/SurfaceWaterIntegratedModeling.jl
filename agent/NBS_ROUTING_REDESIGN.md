@@ -1,18 +1,16 @@
 # NBS routing redesign — design notes
 
-> **⚠ SUPERSEDED (once the successor lands).** This documents the *currently
-> implemented* signed-correction model. It has known flaws found later — capture is
-> measured output-side and static (not the live input `I_1`), the correction does not
-> cascade past the first trap, and network-sourced inflow crossing a footprint is left
-> un-abstracted. The replacement design is **`agent/NBS_ROUTING_NODE_PLAN.md`**
-> (approach B: `:nbsin`/`:nbsout` cell events + signed-diff flow tracking). Keep this
-> note only as long as the old code exists; retire it when the node plan is implemented.
+> **⚠ RETIRED — successor landed.** This documented the old signed-*correction* model,
+> whose code (`_propagate_correction`, `_apply_nbs_corrections!`, `NBSDelivery`,
+> `_walk_to_trap`, the output-side static `capture`) has been **removed**. The live design
+> is **`agent/NBS_ROUTING_NODE_PLAN.md`** (approach B: `:nbsin` draws + head-injected
+> signed-diff output, attenuated by `_attenuate_diff` along the carrier path's oblivious
+> runoff). Kept only as historical background; safe to delete.
 
-Status: **implemented (being replaced — see banner above)**. `watercourses` is NBS-oblivious; the correction lives in the
-network solver (`networksolver.jl`: `NBSElement`/`NBSPlan`, `_build_nbs_plan`,
-`_propagate_correction`, `_apply_nbs_corrections!`).  The old footprint-as-sink +
-positive re-emit path (sink overlay, `nbs_actual` slots, `_nbs_exit_weights`, `nbs_into`,
-submergence, `RouteScratch`) is deleted.  Deferred: NBS→NBS series (§11).
+Status: **removed** (replaced by the node-plan router element). `watercourses` is
+NBS-oblivious; the diff now lives in the router (`networksolver.jl`: `NBSElement`/`NBSPlan`,
+`_build_nbs_plan`, `_nbs_routing`, `_attenuate_diff`, `:nbsin` events).  Deferred: NBS→NBS
+series (§11).
 
 Scope: how Nature-Based Solution (NBS) installations couple to the dynamic
 surface-flow network. Supersedes the overlay-element approach in
