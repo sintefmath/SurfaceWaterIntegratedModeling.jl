@@ -1,5 +1,16 @@
 # Plan: NBS as a signed-diff router element (culvert-style `:nbsin`/`:nbsout`)
 
+> **Status: IMPLEMENTED** (commits `2ff9f6a` add `DynFlowPath.nbs_inlets`; `fa21568` the
+> router rewrite). Output is realized as **head injection on the carrier path departing from
+> each output cell** (both output cells are seeds), not a mid-path `:nbsout` event — an
+> equivalent, lighter carrier than the plan's `:nbsout` (no `nbs_outlets` events needed; the
+> `nbs_outlets` field is retained only for component coupling in `_nbs_coupled_nodes`). Input
+> is `:nbsin` draws as planned. Background input is seeded with `O_0_total` (the oblivious
+> throughput = inflow + on-footprint rain by zero-infil mass balance), which subsumes the
+> plan's separate `I_bg` inflow-cell sum. Deferred (see Verification): the terrain cascade /
+> network-inflow / upstream-outlet integration tests — the retention + pass-through + unit-rule
+> tests pass; the cascade path is generic router behavior covered by the driver suite.
+
 ## Context
 
 The current NBS handling is an oblivious-correction model whose correction is
