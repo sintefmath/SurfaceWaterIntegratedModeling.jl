@@ -474,12 +474,6 @@ network-locally (`net.traps` / `net.flow_paths` order).
 # are power-law in layer storage (`compute_outflow`), mm↔m^3 via `S_mm = V*1000/A`.
 #
 # @@@ Deferred: NBS→NBS series coupling (upstream correction lowering a downstream capture).
-struct NBSLayerParams
-    Kout::Float64; nout::Float64; Smax_mm::Float64
-    Kinf::Float64; ninf::Float64; Smin_mm::Float64
-    A::Float64                            # layer area (== footprint area, m^2)
-end
-
 # Where a signed correction lands: the network-local trap it is added to (0 = it leaves the
 # network and is dropped), and the oblivious runoff `V` along the flow-path cells it travels
 # through to get there (empty for a correction deposited straight into a trap).
@@ -488,9 +482,11 @@ struct NBSDelivery
     path_V::Vector{Float64}
 end
 
-# One NBS element's static routing data.
+# One NBS element's static routing data.  Layer params are read straight off `system`
+# (`NBSSystem`, concrete layers); `A` is the footprint area for the mm<->m^3 conversion.
 struct NBSElement
-    layers    ::Vector{NBSLayerParams}
+    system    ::NBSSystem
+    A         ::Float64                        # footprint area (m^2) for S_mm = V*1000/A
     state_base::Int                            # 0-based offset of its layer block after the nt trap states
     n_terrain ::Int                            # top layers re-emitting at terrain
     capture   ::Float64                        # I: oblivious footprint capture (Σ Q over endpoints)
@@ -588,16 +584,12 @@ function _build_nbs_plan(net::DynNetwork, tstruct, runoff::AbstractMatrix{<:Real
     elems = NBSElement[]
     base  = 0
     for nb in net.nbs
-        lyrs   = nb.system.layers
         A_foot = Float64(length(nb.footprint))   # @@@ 1 m^2/cell; use real cell area when available
-        layers = NBSLayerParams[
-            NBSLayerParams(float(L.Kout), float(L.nout), float(L.Smax),
-                           float(L.Kinf), float(L.ninf), float(L.Smin), A_foot) for L in lyrs]
         endpoints = _nbs_endpoints(nb, tstruct, runoff, trap_of_cell)
         outlets   = _nbs_outlets(nb, tstruct, runoff, trap_of_cell, LI)
         capture   = sum(Float64[Qc for (Qc, _) in endpoints]; init = 0.0)
-        push!(elems, NBSElement(layers, base, nb.n_terrain, capture, endpoints, outlets))
-        base += length(lyrs)
+        push!(elems, NBSElement(nb.system, A_foot, base, nb.n_terrain, capture, endpoints, outlets))
+        base += length(nb.system.layers)
     end
     return NBSPlan(elems, base)
 end
@@ -611,9 +603,9 @@ function _apply_nbs_corrections!(inflow, V, p, nt::Int)
         base = el.state_base
         O_terrain = 0.0
         @inbounds for l in 1:el.n_terrain
-            lp = el.layers[l]
-            O_terrain += compute_outflow(lp.Kout, lp.nout, lp.Smax_mm,
-                                         V[nt + base + l] * 1000.0 / lp.A) * 1e-3
+            L = el.system.layers[l]
+            O_terrain += compute_outflow(L.Kout, L.nout, L.Smax,
+                                         V[nt + base + l] * 1000.0 / el.A) * 1e-3
         end
         I    = el.capture
         nend = length(el.endpoints)
@@ -624,9 +616,9 @@ function _apply_nbs_corrections!(inflow, V, p, nt::Int)
         end
         for (l, del) in el.outlets
             del.trap == 0 && continue
-            lp = el.layers[l]
-            e  = compute_outflow(lp.Kout, lp.nout, lp.Smax_mm,
-                                 V[nt + base + l] * 1000.0 / lp.A) * 1e-3
+            L = el.system.layers[l]
+            e  = compute_outflow(L.Kout, L.nout, L.Smax,
+                                 V[nt + base + l] * 1000.0 / el.A) * 1e-3
             inflow[del.trap] += _propagate_correction(e, del.path_V)
         end
     end
@@ -760,10 +752,10 @@ function dynNetworkRateFunction!(dV, V, p::DynNetworkRateParams, t = 0.0)
         @inbounds for el in p.nbsplan.elems
             base    = el.state_base
             prev_qi = el.capture                          # layer-1 inflow = capture I
-            for (l, lp) in enumerate(el.layers)
-                S_mm = V[nt + base + l] * 1000.0 / lp.A
-                qo   = compute_outflow(lp.Kout, lp.nout, lp.Smax_mm, S_mm) * 1e-3
-                qi   = compute_outflow(lp.Kinf, lp.ninf, lp.Smin_mm, S_mm) * 1e-3
+            for (l, L) in enumerate(el.system.layers)
+                S_mm = V[nt + base + l] * 1000.0 / el.A
+                qo   = compute_outflow(L.Kout, L.nout, L.Smax, S_mm) * 1e-3
+                qi   = compute_outflow(L.Kinf, L.ninf, L.Smin, S_mm) * 1e-3
                 # @@@ evapotranspiration deferred: ET is an explicit 0.0 placeholder, so
                 #     wiring it in (from EVCoeff/EVS11) is a one-line change per layer.
                 ET = 0.0
