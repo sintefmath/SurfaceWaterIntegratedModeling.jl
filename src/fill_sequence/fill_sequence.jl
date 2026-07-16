@@ -26,7 +26,7 @@ patterns.
                                           changes in weather over time
 - `time_slack::Real`: tolerance for when to merge events that are close to each other
                       in time.  Should be set to zero or a small number.
-                      @@@ NB: Support for this currently unimplemented.
+                      @@@ NB: Support for this currently verified.
 - `infiltration::Union{Matrix{Real}, Nothing}`:
                       grid of same shape as the terrain, giving the infiltration rate
                       at each gridcell.  NBS footprints are forced to zero infiltration
@@ -459,6 +459,18 @@ function _identify_next_status_change!(changetimeest, cur_amounts, rateinfo,
 end
 
 # ----------------------------------------------------------------------------
+"""
+    _compute_exact_fill(rateinfo, cur_amounts, trap, filled_traps, tstruct, time,
+                        z_vol_tables, use_saved) -> Float64
+
+The exact water volume in `trap` at absolute `time`, projected from `cur_amounts[trap]` under a
+constant rate.
+
+Short-circuits the projection for the two states whose volume is already known: a filled trap
+sits at its own capacity, and a parent with any unfilled child is empty.  Otherwise the volume
+comes from [`fill_trap_until`](@ref), with `use_saved` selecting the saved rather than the
+current rates.  Nothing is mutated.
+"""
 function _compute_exact_fill(rateinfo, cur_amounts, trap, filled_traps, tstruct,
                              time, z_vol_tables, use_saved::Bool)
     if filled_traps[trap]
@@ -510,7 +522,16 @@ function _compute_exact_changetime(trap, changetimes, cur_amounts, rateinfo,
 end
 
 # ----------------------------------------------------------------------------
-# Per trap, a table mapping trap water volume to water level (z), for fast level lookups.
+"""
+    _compute_z_vol_tables(tstruct) -> Vector{Tuple{Vector{Float64},Vector{Float64}}}
+
+Per trap, a table mapping trap water volume to water level (z), for fast level lookups.
+
+Returns one `(z, v)` pair per trap of `tstruct`, both ascending and of equal length, so a level
+is read by interpolating `v -> z`.  `z` runs from the trap's bottom to its spillpoint
+elevation, with duplicate levels dropped; a parent trap's bottom is raised to its subtraps'
+spillpoint, so `v` counts only its own volume.  `tstruct` is not mutated.
+"""
 function _compute_z_vol_tables(tstruct)
 
     N = numtraps(tstruct)
@@ -538,9 +559,31 @@ function _compute_z_vol_tables(tstruct)
 end
 
 # ----------------------------------------------------------------------------
-# Fills or empties `trap` over [cur_amount.time, endtime].  Returns (amount, tstop):
-# `amount` is the water volume (0 .. own capacity); `tstop` is when it became full/empty,
-# or `nothing` if neither happened before `endtime`.
+"""
+    fill_trap_until(trap, rateinfo, cur_amount, endtime, tstruct, z_vol_tables;
+                    use_saved=false) -> (amount, tstop)
+
+Project `trap` forward under a constant inflow, filling or emptying it over
+`[cur_amount.time, endtime]`.  With a fill-independent net rate the time to full/empty is
+solved analytically; otherwise the wetted footprint (and so the infiltration loss) varies with
+the fill level and an ODE is integrated instead.
+
+# Arguments
+- `trap`: trap index into `tstruct`.
+- `rateinfo`: the rate state supplying the trap's inflow and infiltration bounds.
+- `cur_amount`: the `FilledAmount` to start from — its `amount` and its `time`.
+- `endtime`: absolute time to project to (`Inf` to run to the next full/empty).
+- `tstruct`, `z_vol_tables`: terrain geometry and the cached volume->level tables.
+- `use_saved`: read the *saved* rates rather than the current ones, projecting the trap under
+  the inflow it has been evolving under rather than a newly-updated one.
+
+# Returns
+`(amount, tstop)`, mutating nothing.  `amount` is the water volume, between 0 and the trap's
+own capacity.  `tstop` is the time it took to become full or empty — an **elapsed duration**,
+relative to `cur_amount.time`, not an absolute time like `endtime`; add `cur_amount.time` to
+place it on the absolute clock.  It is `nothing` if the trap became neither full nor empty
+before `endtime`, and `0.0` if it was already full or empty on entry.
+"""
 function fill_trap_until(trap, rateinfo, cur_amount, endtime, tstruct, z_vol_tables;
                          use_saved=false)
 
@@ -566,11 +609,10 @@ function fill_trap_until(trap, rateinfo, cur_amount, endtime, tstruct, z_vol_tab
         dt = (accum_rate > 0) ?
                 (tvolume - cur_amount.amount) / accum_rate : # time to full
                 cur_amount.amount / abs(accum_rate)          # time to empty
-        t = cur_amount.time + dt
-        reached = (t <= endtime)
+        reached = (cur_amount.time + dt <= endtime)
 
         return (reached) ?
-            (accum_rate > 0.0 ? tvolume : 0.0, t) :
+            (accum_rate > 0.0 ? tvolume : 0.0, dt) :
             (cur_amount.amount + (endtime - cur_amount.time) * accum_rate, nothing)
     end
     # infiltration depends on fill level (wetted footprint varies), so solve an ODE
@@ -594,8 +636,8 @@ function fill_trap_until(trap, rateinfo, cur_amount, endtime, tstruct, z_vol_tab
     dvdt(dv0, v0, 0, 0) # compute derivative at start of integration (used to
                         # detect sign changes in derivative later
     # Empty traps w/negative rate or full traps w/positive rate are already finished
-    (v0[1] == 0.0 && dv0[1] <= 0) && return (0.0, cur_amount.time)
-    (v0[1] == tvolume && dv0[1] >= 0) && return (tvolume, cur_amount.time)
+    (v0[1] == 0.0 && dv0[1] <= 0) && return (0.0, 0.0)
+    (v0[1] == tvolume && dv0[1] >= 0) && return (tvolume, 0.0)
     
     function condition(out, v, t, integrator)
         out[1] = tvolume - v[1] # trap full

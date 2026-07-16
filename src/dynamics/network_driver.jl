@@ -5,6 +5,22 @@
 # are the source of truth surviving structural change; contexts are rebuilt from them.
 # ----------------------------------------------------------------------------
 
+"""
+    NetworkDriver
+
+The live dynamic-network state for one weather period of a `fill_sequence` run: the component
+set, one [`DynNetworkContext`](@ref) per component, and the committed state that survives a
+structural change.  Built by [`build_network_driver`](@ref).
+
+Fields:
+- `comps`: live components, mutated in place by `apply_fill!` / `apply_unfill!` /
+  `apply_empty!` — the structural source of truth (culverts and NBS travel on each component,
+  not on the driver).
+- `contexts`: one context per entry of `comps`, same order; rebuilt after every event.
+- `vol_by_trapix`: node trap index -> committed volume at `last_time`.
+- `nbs_state`: NBS placement id -> layer states, persistent across events and periods.
+- `last_time`: absolute time the committed volumes hold at.
+"""
 mutable struct NetworkDriver
     comps          ::Vector{DynNetwork}          # live components, mutated by apply_* (the
                                                  # structural source of truth — culverts/NBS
@@ -16,8 +32,33 @@ mutable struct NetworkDriver
 end
 
 # ----------------------------------------------------------------------------
-# Build the driver for one weather period: trace the components, seed committed volumes from
-# `cur_amounts`, and build + predict one context per component.
+
+"""
+    build_network_driver(tstruct, dyn_coords, culverts, full_traps, cur_amounts, rateinfo,
+                         infiltration, z_vol_tables, cur_time, endtime;
+                         nbs_placements = DynNBSPlacement[],
+                         nbs_state = Dict{Int,Vector{Float64}}()) -> NetworkDriver
+
+Build the [`NetworkDriver`](@ref) for one weather period: trace the components from the seeds,
+seed the committed volumes from `cur_amounts`, and build and predict one context per component
+over `[cur_time, endtime]`.
+
+# Arguments
+- `tstruct`: the [`TrapStructure`](@ref) supplying terrain, traps and spillpoints.
+- `dyn_coords`, `culverts`, `nbs_placements`: the dynamic seeds to trace from.
+- `full_traps`: indices of traps currently at capacity.
+- `cur_amounts`, `rateinfo`, `infiltration`, `z_vol_tables`: the fill-sequence state supplying
+  each node's initial volume and inflow.
+- `cur_time`, `endtime`: the period the driver runs over.
+- `nbs_state`: existing NBS layer states, carried in from an earlier period.
+
+# Returns
+The driver, with its contexts built and predicted.
+
+`cur_amounts` and `full_traps` are read only, but `nbs_placements` is mutated by
+[`setup_network`](@ref), and the caller's `nbs_state` is retained by reference — the driver
+writes each period's layer storage back through it.
+"""
 function build_network_driver(tstruct, dyn_coords, culverts, full_traps, cur_amounts,
                               rateinfo, infiltration, z_vol_tables, cur_time, endtime;
                               nbs_placements = DynNBSPlacement[],
@@ -103,10 +144,24 @@ function _harvest!(driver::NetworkDriver)
 end
 
 # ----------------------------------------------------------------------------
-# Advance to the earliest predicted event, apply its structural transition to the live
-# components, hand off state, and rebuild the contexts.  Mutates `filled_traps` to match the
-# fired event; `cur_amounts` seeds any newly-absorbed trap.  Returns the fired event
-# `(; time, trap, kind, migrated)`, or `nothing` if none falls before `endtime`.
+
+"""
+    step_network_driver!(driver, tstruct, rateinfo, infiltration, z_vol_tables,
+                         filled_traps, cur_amounts, endtime)
+        -> (; time, trap, kind, migrated) or nothing
+
+Advance the networks to their earliest predicted event: commit every context to that time,
+apply the event's structural transition to the live components, hand the committed state off,
+and rebuild and re-predict the contexts.
+
+Mutates `driver` (components, contexts, committed volumes, NBS layers, `last_time`) and
+`filled_traps`, which is flipped to match the fired event — an `:empty` parent also clears its
+exposed children.  `cur_amounts` is read only; it only seeds newly-absorbed traps.
+
+Returns the fired event, where `migrated` lists the trap indices that entered or left the
+networks, or `nothing` when no event falls before `endtime` (the period boundary is
+[`finalize_network_driver!`](@ref)'s job).
+"""
 function step_network_driver!(driver::NetworkDriver, tstruct, rateinfo, infiltration,
                               z_vol_tables, filled_traps, cur_amounts, endtime)
     sel = _driver_next_event(driver)
@@ -153,18 +208,43 @@ function step_network_driver!(driver::NetworkDriver, tstruct, rateinfo, infiltra
 end
 
 # ----------------------------------------------------------------------------
-# Period-boundary finalize: advance each context to `endtime` and settle node volumes (and
-# subsumed capacities) into `cur_amounts`, carrying NBS layer storage into the next period.
+
+"""
+    finalize_network_driver!(driver, cur_amounts, tstruct, infiltration, z_vol_tables, endtime)
+        -> cur_amounts
+
+Period-boundary finalize: advance each context to `endtime` and settle the node volumes (and
+subsumed capacities) into `cur_amounts`, carrying NBS layer storage into the next period.
+
+Mutates `cur_amounts` (returned) and `driver` (contexts committed to `endtime`, `nbs_state`
+updated).
+"""
 finalize_network_driver!(driver::NetworkDriver, cur_amounts, tstruct, infiltration,
                          z_vol_tables, endtime) =
     _finalize_networks!(cur_amounts, driver.contexts, tstruct, infiltration,
                         z_vol_tables, driver.last_time, endtime, driver.nbs_state)
 
 # ----------------------------------------------------------------------------
-# The `fill_sequence` touch entry: commit under cached inflow, apply the fired transitions via
-# `apply_*`, reconcile the spillgraph to the new coverage, then rebuild + re-predict the
-# contexts.  `filled_traps` is ALREADY updated by the caller.  Returns the refreshed
-# `(net_trap_set, net_covered_set)`; committed volumes live in `driver.vol_by_trapix`.
+
+"""
+    _touch_networks_driver!(driver, changetimeest, sgraph, tstruct, filled_traps, cur_amounts,
+                            rateinfo, z_vol_tables, infiltration, fill_updates, old_covered,
+                            cur_time, endtime) -> (net_trap_set, net_covered_set)
+
+The `fill_sequence` touch entry, called once per event that affects a network: commit every
+context to `cur_time` under its cached inflow, apply the fired transitions via `apply_fill!` /
+`apply_unfill!` / `apply_empty!`, reconcile the spillgraph to the new coverage, then rebuild
+and re-predict the contexts.
+
+`filled_traps` is ALREADY updated by the caller and, like `cur_amounts`, `fill_updates` and
+`old_covered` (the covered set before this event), is read only here.  Mutates `driver`
+(components, contexts, committed volumes, NBS layers, `last_time`), `changetimeest` (the
+network traps get exact estimates), and — only when coverage actually changed — `sgraph` and
+`rateinfo`.
+
+Returns the refreshed `(net_trap_set, net_covered_set)`, both empty when the driver holds no
+contexts; the committed volumes live in `driver.vol_by_trapix`.
+"""
 function _touch_networks_driver!(driver::NetworkDriver, changetimeest, sgraph, tstruct,
                                  filled_traps, cur_amounts, rateinfo, z_vol_tables,
                                  infiltration, fill_updates, old_covered, cur_time, endtime)

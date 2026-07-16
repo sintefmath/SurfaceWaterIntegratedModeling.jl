@@ -22,6 +22,8 @@ Fields:
 - `last_solve_time`: absolute time the committed `state` refers to.
 - `extern_inflow`: per-node external inflow the `state` is currently evolving
   under (cached at the last touch; the rate the commit/predict solves use).
+- `runoff`: the oblivious runoff grid (`rateinfo.runoff`), read by the solver to
+  build the NBS correction plan.
 - `next_event`: cached prediction `(; time, trap, kind)` of the network's next
   event, with `time` an ABSOLUTE timestamp and `trap` a global trap index.
 """
@@ -62,12 +64,20 @@ function _descendants(tstruct, t::Int)
     return out
 end
 
-# The trap indices that are *nodes* of some active network.
+"""
+    _net_trap_set(contexts) -> Set{Int}
+
+The trap indices that are *nodes* of some active network.
+"""
 _net_trap_set(contexts) = Set{Int}(g for ctx in contexts for g in ctx.global_ix)
 
-# `net_trap_set` plus every descendant subsumed under a network parent node: those
-# subsumed children are full and static while their parent is a node, so they must be
-# excluded from the standard changetime machinery.
+"""
+    _net_covered_set(contexts, tstruct) -> Set{Int}
+
+`_net_trap_set` plus every descendant subsumed under a network parent node: those subsumed
+children are full and static while their parent is a node, so they must be excluded from the
+standard changetime machinery.
+"""
 function _net_covered_set(contexts, tstruct)
     s = Set{Int}()
     for ctx in contexts, g in ctx.global_ix
@@ -78,10 +88,16 @@ function _net_covered_set(contexts, tstruct)
 end
 
 # ----------------------------------------------------------------------------
-# Predict the network's next event on a COPY of the committed state (the committed
-# `state` is left untouched), bounded by the time remaining to `endtime`.  Solves
-# under the cached `ctx.extern_inflow` (the rate the state is evolving under) and
-# stores an ABSOLUTE-time `next_event`.  Returns that `next_event`.
+"""
+    _predict_network!(ctx, tstruct, infiltration, z_vol_tables, endtime) -> (; time, trap, kind)
+
+Predict `ctx`'s next event, bounded by the time remaining to `endtime`.  Solves under the
+cached `ctx.extern_inflow` (the rate the state is evolving under).
+
+Mutates `ctx.next_event` only, storing `time` as an ABSOLUTE timestamp and `trap` as a global
+trap index; the solve runs on a COPY, so the committed `ctx.state` is left untouched.  Returns
+that `next_event`.
+"""
 function _predict_network!(ctx::DynNetworkContext, tstruct, infiltration,
                            z_vol_tables, endtime)
     res = solveDynNetwork!(copy(ctx.state), tstruct, ctx.net, infiltration,
@@ -93,11 +109,17 @@ function _predict_network!(ctx::DynNetworkContext, tstruct, infiltration,
     return ctx.next_event
 end
 
-# Advance the committed `state` IN PLACE to absolute time `T_commit`, under the
-# cached `extern_inflow` (the rates valid since the last touch — so this is
-# order-independent of any intervening spillgraph/flow update).  `state` is left at
-# the exact `T_commit` volumes and `last_solve_time` is updated.  Returns the solver
-# result (so the caller can act on an event that coincides with `T_commit`).
+"""
+    _commit_network!(ctx, tstruct, infiltration, z_vol_tables, T_commit) -> (; time, trap, kind)
+
+Advance `ctx`'s committed state to absolute time `T_commit`, under the cached `extern_inflow`
+(the rates valid since the last touch — so this is order-independent of any intervening
+spillgraph/flow update).
+
+Mutates `ctx`: `state` is left at the exact `T_commit` volumes and `last_solve_time` is
+updated.  Returns the solver result, so the caller can act on an event coinciding with
+`T_commit`.
+"""
 function _commit_network!(ctx::DynNetworkContext, tstruct, infiltration,
                           z_vol_tables, T_commit)
     res = solveDynNetwork!(ctx.state, tstruct, ctx.net, infiltration,
@@ -109,8 +131,13 @@ function _commit_network!(ctx::DynNetworkContext, tstruct, infiltration,
 end
 
 # ----------------------------------------------------------------------------
-# Seed cells for the dynamic networks: a representative footprint cell of each
-# named `dyn_trap` (validated) plus every culvert's inlet/outlet cell.
+"""
+    _dyn_seeds(tstruct, dyn_traps, culverts) -> Vector{CartesianIndex{2}}
+
+Seed cells for the dynamic networks: a representative footprint cell of each named
+`dyn_trap` (validated against `tstruct`, erroring on an out-of-range index) plus every
+culvert's inlet and outlet cell.  Duplicates are dropped; no argument is mutated.
+"""
 function _dyn_seeds(tstruct, dyn_traps, culverts)
     CI     = CartesianIndices(size(tstruct.topography))
     ntraps = numtraps(tstruct)
@@ -140,9 +167,15 @@ function _nbs_layer_block(net::DynNetwork, nbs_state)
     return block
 end
 
-# Write a context's current layer states back into the persistent `nbs_state` store
-# (the single source of truth across events and weather periods).  Keyed by placement `id`,
-# so a later rebuild that regroups NBS into new components restores each layer correctly.
+"""
+    _store_nbs_state!(nbs_state, ctx) -> nbs_state
+
+Write `ctx`'s current layer states back into the persistent `nbs_state` store (the single
+source of truth across events and weather periods).  Keyed by placement `id`, so a later
+rebuild that regroups NBS into new components restores each layer correctly.
+
+Mutates and returns `nbs_state`; `ctx` is read only.
+"""
 function _store_nbs_state!(nbs_state, ctx::DynNetworkContext)
     nt   = length(ctx.global_ix)
     base = 0
@@ -154,8 +187,16 @@ function _store_nbs_state!(nbs_state, ctx::DynNetworkContext)
     return nbs_state
 end
 
-# Build one context from a single network component.  `state0(g)` supplies the initial
-# committed volume for the global trap index `g`.  NBS placements travel on `net.nbs`.
+"""
+    _make_context(net, tstruct, rateinfo, state0, cur_time, nbs_state) -> DynNetworkContext
+
+Build one context from a single network component, committed at `cur_time`.  `state0(g)`
+supplies the initial committed volume for the global trap index `g`; NBS placements travel on
+`net.nbs`, their layer states restored from the persistent `nbs_state` store.
+
+No argument is mutated (`nbs_state` is read only), but `net` and `rateinfo.runoff` are stored
+by reference into the returned context.
+"""
 function _make_context(net::DynNetwork, tstruct, rateinfo, state0, cur_time,
                        nbs_state = Dict{Int,Vector{Float64}}())
     global_ix = Int[t.trap_ix for t in net.traps]
@@ -175,14 +216,24 @@ function _make_context(net::DynNetwork, tstruct, rateinfo, state0, cur_time,
                              (; time = Inf, trap = 0, kind = :none))
 end
 
-# Own storage capacity of a trap (net of subtraps) — the same quantity the solver
-# uses as `geom.capacity` and `fill_sequence` records for a full trap.
+"""
+    _own_capacity(tstruct, t) -> Real
+
+Own storage capacity of trap `t` (net of subtraps) — the same quantity the solver uses as
+`geom.capacity` and `fill_sequence` records for a full trap.
+"""
 _own_capacity(tstruct, t::Int) = tstruct.trapvolumes[t] - tstruct.subvolumes[t]
 
-# Write each context's predicted next event into `changetimeest` as an EXACT
-# (min == max) estimate, and force every covered trap that is not a predicted
-# trigger to `Inf`.  Used by both `_set_initial_changetime_estimates` and the touch
-# step so the branch-and-bound resolves network traps from the network prediction.
+"""
+    _apply_network_changetimeest!(changetimeest, net_contexts, net_covered_set) -> changetimeest
+
+Write each context's predicted next event into `changetimeest` as an EXACT (`min == max`)
+estimate, and force every covered trap that is not a predicted trigger to `Inf`.  Used by both
+`_set_initial_changetime_estimates` and the touch step, so the branch-and-bound resolves
+network traps from the network prediction rather than the constant-rate logic.
+
+Mutates and returns `changetimeest`.
+"""
 function _apply_network_changetimeest!(changetimeest, net_contexts, net_covered_set)
     for t in net_covered_set
         changetimeest[t] = ChangeTimeEstimate(false, Inf, Inf)
@@ -196,11 +247,19 @@ function _apply_network_changetimeest!(changetimeest, net_contexts, net_covered_
 end
 
 # ----------------------------------------------------------------------------
-# Reconcile the spillgraph (and the flow it drives in `rateinfo`) to the invariant
-# "spillgraph = exactly the FULL ∧ ¬COVERED traps": a trap absorbed into a network has
-# its outflow routed by the ODE, not the spillgraph, so its deposit must be withdrawn
-# (and restored when it leaves coverage).  Recomputes the target spillgraph from the
-# effective filled state, diffs it, and propagates only the changed edges' flow.
+"""
+    _reconcile_spillgraph!(sgraph, rateinfo, filled_traps, covered, tstruct)
+        -> Vector{IncrementalUpdate{Tuple{Int,Int}}}
+
+Reconcile the spillgraph (and the flow it drives in `rateinfo`) to the invariant "spillgraph =
+exactly the FULL ∧ ¬COVERED traps": a trap absorbed into a network has its outflow routed by
+the ODE, not the spillgraph, so its deposit must be withdrawn (and restored when it leaves
+coverage).  Recomputes the target spillgraph from the effective filled state, diffs it, and
+propagates only the changed edges' flow.
+
+Mutates `sgraph.edges` and, via `_update_flow!`, `rateinfo`; `filled_traps` and `covered` are
+read only.  Returns the applied edge diffs (empty when already reconciled).
+"""
 function _reconcile_spillgraph!(sgraph, rateinfo, filled_traps, covered, tstruct)
     n         = numtraps(tstruct)
     effective = Bool[filled_traps[t] && !(t in covered) for t in 1:n]
@@ -217,8 +276,13 @@ function _reconcile_spillgraph!(sgraph, rateinfo, filled_traps, covered, tstruct
 end
 
 # ----------------------------------------------------------------------------
-# The predicted kind (:fill/:empty/:unspill) of each trap that fired this event,
-# captured from the contexts' predictions before anything is mutated.
+"""
+    _capture_fired_kinds(net_contexts, fill_updates) -> Dict{Int,Symbol}
+
+The predicted kind (`:fill` / `:empty` / `:unspill`) of each trap that fired this event, keyed
+by global trap index.  Read from the contexts' predictions, so it must be called before
+anything is mutated.  No argument is mutated.
+"""
 function _capture_fired_kinds(net_contexts, fill_updates)
     fired_kind = Dict{Int,Symbol}()
     for ctx in net_contexts
@@ -229,7 +293,13 @@ function _capture_fired_kinds(net_contexts, fill_updates)
     return fired_kind
 end
 
-# All traps covered by `components` (nodes plus their subsumed full descendants).
+"""
+    _covered_of(components, tstruct) -> Set{Int}
+
+All traps covered by `components`: the nodes plus their subsumed full descendants.  Reads the
+components directly rather than the contexts, so unlike `_net_covered_set` it is valid after a
+structural change but before the contexts are rebuilt.
+"""
 function _covered_of(components, tstruct)
     s = Set{Int}()
     for net in components, t in net.traps
@@ -239,11 +309,17 @@ function _covered_of(components, tstruct)
     return s
 end
 
-# Overlay the boundary volumes of fired traps that did NOT just become full.  An :empty
-# parent drops to 0 and EXPOSES its immediate children — they go from full to transitory
-# (just below their own capacity), so they leave `full_traps` (the caller already flipped
-# them via `_expand_empty_network_fill_updates`) and start at prevfloat(C_child).  An :unspill trap
-# drops to prevfloat(C).
+"""
+    _apply_fired_boundaries!(committed, fired_kind, tstruct) -> committed
+
+Overlay the boundary volumes of fired traps that did NOT just become full.  An `:empty` parent
+drops to 0 and EXPOSES its immediate children — they go from full to transitory (just below
+their own capacity), so they leave `full_traps` (the caller already flipped them via
+`_expand_empty_network_fill_updates`) and start at `prevfloat(C_child)`.  An `:unspill` trap
+drops to `prevfloat(C)`.
+
+Mutates and returns `committed` (a trap index -> volume map); `fired_kind` is read only.
+"""
 function _apply_fired_boundaries!(committed, fired_kind, tstruct)
     for (ft, k) in fired_kind
         if k == :empty
@@ -259,12 +335,21 @@ function _apply_fired_boundaries!(committed, fired_kind, tstruct)
 end
 
 # ----------------------------------------------------------------------------
-# Weather-period boundary finalization: advance every context to `endtime`
-# under its cached external inflow and read the settled volumes.  Network traps follow the
-# multi-trap ODE, so they can't use the constant-rate `fill_trap_until` projection — and
-# these exact volumes are what the NEXT period rebuilds from.  The advance is event-free
-# (any event ≤ endtime was already processed), so it settles cleanly.  A node takes its
-# settled ODE volume; a subsumed full descendant sits at capacity.
+"""
+    _finalize_networks!(cur_amounts, net_contexts, tstruct, infiltration, z_vol_tables,
+                        cur_time, endtime, nbs_state = Dict{Int,Vector{Float64}}())
+        -> cur_amounts
+
+Weather-period boundary finalization: advance every context to `endtime` under its cached
+external inflow and read the settled volumes.  Network traps follow the multi-trap ODE, so
+they can't use the constant-rate `fill_trap_until` projection — and these exact volumes are
+what the NEXT period rebuilds from.  The advance is event-free (any event ≤ `endtime` was
+already processed), so it settles cleanly.  A node takes its settled ODE volume; a subsumed
+full descendant sits at capacity.
+
+Mutates `cur_amounts` (returned), every context in `net_contexts` (each committed to
+`endtime`), and `nbs_state`, which carries the NBS layer storage into the next period.
+"""
 function _finalize_networks!(cur_amounts, net_contexts, tstruct, infiltration,
                              z_vol_tables, cur_time, endtime,
                              nbs_state = Dict{Int,Vector{Float64}}())
@@ -285,11 +370,17 @@ function _finalize_networks!(cur_amounts, net_contexts, tstruct, infiltration,
 end
 
 # ----------------------------------------------------------------------------
-# A network *parent* that fired :empty exposes its immediate children as transitory
-# (draining) traps.  Without this they stay in `filled_traps`, the rebuild re-subsumes
-# them under the parent at V == 0, and the parent re-fires :empty at the same instant
-# forever.  Returns `fill_updates` augmented with a `(child, false)` entry per exposed
-# child (the caller then flips `filled_traps` for them like any other update).
+"""
+    _expand_empty_network_fill_updates(fill_updates, net_contexts, tstruct)
+        -> Vector{IncrementalUpdate{Bool}}
+
+A network *parent* that fired `:empty` exposes its immediate children as transitory (draining)
+traps.  Without this they stay in `filled_traps`, the rebuild re-subsumes them under the parent
+at `V == 0`, and the parent re-fires `:empty` at the same instant forever.
+
+Returns `fill_updates` augmented with a `(child, false)` entry per exposed child — the caller
+then flips `filled_traps` for them like any other update.  No argument is mutated.
+"""
 function _expand_empty_network_fill_updates(fill_updates, net_contexts, tstruct)
     kind_of = Dict{Int,Symbol}()
     for ctx in net_contexts
@@ -307,11 +398,18 @@ function _expand_empty_network_fill_updates(fill_updates, net_contexts, tstruct)
     return isempty(extra) ? fill_updates : vcat(fill_updates, extra)
 end
 
-# Amount updates for network traps whose volume the network owns: a node carries
-# its committed ODE volume; a subsumed full descendant is at capacity; a trap that just
-# LEFT the networks (e.g. an emptied parent) takes its committed boundary value.
-# `affected` is the union of the pre- and post-touch covered sets.  Only traps whose
-# amount actually changed (vs `cur_amounts`) are emitted, keeping the event incremental.
+"""
+    _network_amount_updates(net_contexts, affected, committed, tstruct, cur_amounts, cur_time)
+        -> Vector{IncrementalUpdate{FilledAmount}}
+
+Amount updates for network traps whose volume the network owns: a node carries its committed
+ODE volume; a subsumed full descendant is at capacity; a trap that just LEFT the networks (e.g.
+an emptied parent) takes its `committed` boundary value.
+
+`affected` is the union of the pre- and post-touch covered sets.  Only traps whose amount
+actually changed (vs `cur_amounts`) are emitted, keeping the event incremental.  No argument is
+mutated.
+"""
 function _network_amount_updates(net_contexts, affected, committed, tstruct,
                                  cur_amounts, cur_time)
     node_amt = Dict{Int,Float64}()

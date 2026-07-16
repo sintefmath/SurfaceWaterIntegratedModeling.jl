@@ -6,7 +6,7 @@
 
 # ----------------------------------------------------------------------------
 """
-        setup_network(tstruct, full_traps; dyn_coords, culverts, nbs)
+    setup_network(tstruct, full_traps; dyn_coords, culverts, nbs)
 
 Trace the dynamic-flow network over the terrain and return it as a
 `Vector{DynNetwork}` (one per connected component).
@@ -21,7 +21,14 @@ domain or reaches a trap already in the network.
 - `dyn_coords`, `culverts`, `nbs`: the dynamic seeds to trace from.
 
 # Returns
-`Vector{DynNetwork}` — the traced network split into connected components.
+`Vector{DynNetwork}` — the traced network split into connected components.  `culverts` and
+`nbs` are held by reference on the components, not copied.
+
+!!! note
+    Despite the name, this **mutates `nbs`**: each placement is stamped with its stable `id`
+    (its position in `nbs`, which keys its persistent layer storage) and has its inflow,
+    outflow and internal-accumulation cells filled in.  `tstruct`, `full_traps` and
+    `dyn_coords` are read only.
 """
 function setup_network(tstruct, full_traps;
                        dyn_coords::Vector{CartesianIndex{2}}=CartesianIndex{2}[],
@@ -136,11 +143,25 @@ function _trace_to_next_trap(tstruct, start_cell, full_traps)
 end
 
 # ----------------------------------------------------------------------------
-# `departing_trap_ix` seeds the trap whose spill_path the first connector sets (used by
-# grow, where the seed is an existing trap's spillpoint; 0 at build, where seeds are
-# dyn_coords / culvert / NBS cells).  The trace stops when it reaches a trap already in the
-# network: its downstream is already represented, so we attach the incoming connector and
-# stop, rather than re-tracing and overwriting that trap's single spill path.
+"""
+    _grow_network_from_seed!(network, pathmap, seed, tstruct, full_traps;
+                             departing_trap_ix = 0) -> nothing
+
+Trace from `seed` and attach what it finds to `network`: follow the flow path to the next trap,
+add that trap and the connecting path, and repeat from its spillpoint until the flow leaves the
+domain or reaches a trap already present.  Stopping at a present trap is deliberate — its
+downstream is already represented, so only the incoming connector is attached rather than
+re-tracing and overwriting that trap's single spill path.
+
+# Arguments
+- `network`: **mutated** — grows by the traced traps, flow paths, merges and `spill_path` links.
+- `pathmap`: **mutated** — the terrain cell -> flow path index map, extended for each new path.
+- `seed`: terrain cell to trace from.
+- `tstruct`, `full_traps`: read-only terrain/trap state driving the trace.
+- `departing_trap_ix`: the trap whose `spill_path` the first connector sets.  Used by
+  [`grow_spill!`](@ref), where the seed is an existing trap's spillpoint; 0 at build, where
+  seeds are `dyn_coords` / culvert / NBS cells.
+"""
 function _grow_network_from_seed!(network, pathmap, seed::CartesianIndex{2},
                                  tstruct, full_traps; departing_trap_ix::Int=0)
     LI = LinearIndices(tstruct.topography)

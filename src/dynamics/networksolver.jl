@@ -713,17 +713,6 @@ function _build_rate_params(tstruct::TrapStructure,
 end
 
 # ----------------------------------------------------------------------------
-"""
-    dynNetworkRateFunction!(dV, V, p::DynNetworkRateParams, t=0.0)
-
-In-place ODE rate of the trap-volume state `V` (plus appended NBS layer states).
-
-A *full* trap (`V >= capacity`) passes excess downstream at steady volume:
-`dV = inflow - footprint_infil - max(inflow - footprint_infil, 0)` (0 while well fed, negative
-once inflow drops below its losses).  An *accumulating* trap fills at its wetted-area rate:
-`dV = inflow - wetted_infiltration(V)`.  `inflow` is the external inflow plus everything routed
-in from upstream (see [`_route_flow`](@ref)).
-"""
 # Routed inflow into every trap at state `V`, which traps are full (spilling), and the NBS
 # live input draws (`nbs_draw`, or `nothing` with no NBS).  Shared by the rate function and
 # the :unspill condition.  With NBS, the signed output diffs are folded into the routing via
@@ -744,6 +733,25 @@ function _routed_inflow(V, p::DynNetworkRateParams)
     return inflow, spilling, (nbsrt === nothing ? nothing : nbsrt.nbs_draw)
 end
 
+"""
+    dynNetworkRateFunction!(dV, V, p::DynNetworkRateParams, t=0.0)
+
+In-place ODE rate of the trap-volume state `V` (plus appended NBS layer states).
+
+A *full* trap (`V >= capacity`) passes excess downstream at steady volume:
+`dV = inflow - footprint_infil - max(inflow - footprint_infil, 0)` (0 while well fed, negative
+once inflow drops below its losses).  An *accumulating* trap fills at its wetted-area rate:
+`dV = inflow - wetted_infiltration(V)`.  `inflow` is the external inflow plus everything routed
+in from upstream (see [`_route_flow`](@ref)).
+
+# Arguments
+- `dV`: **written in place** — the rate for each trap, then for each NBS layer.  The only
+  argument mutated; `V` and `p` are read only.
+- `V`: current state — one volume per trap in `p.net.traps` order, then the NBS layer states.
+- `p`: the static parameters for this solve (geometry, external inflow, routing plan).
+- `t`: unused — the rate is autonomous; present for the `DifferentialEquations.jl` RHS
+  signature.
+"""
 function dynNetworkRateFunction!(dV, V, p::DynNetworkRateParams, t = 0.0)
     geom = p.geom
     nt   = length(geom)
