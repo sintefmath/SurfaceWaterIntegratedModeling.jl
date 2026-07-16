@@ -111,6 +111,23 @@ function fill_sequence(tstruct::TrapStructure{<:Real},
 end
 
 # ----------------------------------------------------------------------------
+"""
+    _fill_sequence_for_weather_event!(seq, sgraph, rateinfo, changetimeest, filled_traps,
+                                      cur_amounts, z_vol_tables, tstruct, infiltration,
+                                      endtime, time_slack, verbose, driver) -> nothing
+
+Run the event loop for one weather period, from the time held in `cur_amounts` up to `endtime`.
+
+Each iteration resolves the next status change, flips the affected traps, republishes the
+spillgraph and flow, touches any affected dynamic network, and appends one `SpillEvent`.  At
+the period boundary the non-covered traps are settled analytically and the networks are
+advanced to `endtime`, so their volumes seed the next period.
+
+Mutates nearly everything it is handed: `seq` (extended by one event per iteration),
+`filled_traps`, `cur_amounts`, `changetimeest`, `sgraph`, `rateinfo`, and `driver`.
+`tstruct`, `infiltration` and `z_vol_tables` are read only.  `time_slack` is accepted but not
+yet used (see [`fill_sequence`](@ref)).
+"""
 function _fill_sequence_for_weather_event!(seq, sgraph, rateinfo, changetimeest,
                                            filled_traps, cur_amounts, z_vol_tables,
                                            tstruct, infiltration, endtime, time_slack,
@@ -171,13 +188,24 @@ function _fill_sequence_for_weather_event!(seq, sgraph, rateinfo, changetimeest,
 end
 
 # ----------------------------------------------------------------------------
-# Touch the networks affected by this event; return whether a touch happened.  A network is
-# touched when one of its member traps fired or its external inflow changed; an untouched
-# network keeps its exact cached state, so quiet events cost no ODE solves.  On a touch,
-# commit/rebuild/re-predict via the driver and give every trap that left a network a fresh
-# constant-rate changetime estimate.
-# MUTATES `net_trap_set` and `net_covered_set` in place (plus driver, changetimeest, sgraph,
-# rateinfo, filled_traps, cur_amounts).  `old_covered` is the covered set before this event.
+"""
+    _touch_affected_networks!(net_trap_set, net_covered_set, driver, changetimeest, sgraph,
+                              rateinfo, filled_traps, cur_amounts, z_vol_tables, infiltration,
+                              fill_updates, tstruct, old_covered, cur_time, endtime) -> Bool
+
+Touch the dynamic networks affected by this event.  A network is touched when one of its member
+traps fired or one of its inflow regions changed; an untouched network keeps its exact cached
+state, so quiet events cost no ODE solves.  On a touch, commit / rebuild / re-predict through
+the driver and give every trap that just left a network a fresh constant-rate changetime
+estimate.
+
+Mutates `net_trap_set` and `net_covered_set` in place, refreshing them to the new membership,
+plus `driver`, `changetimeest`, `sgraph` and `rateinfo` via `_touch_networks_driver!`.
+`filled_traps`, `cur_amounts`, `fill_updates` and `old_covered` (the covered set before this
+event) are read only.
+
+Returns `true` if a touch happened; `false` leaves every argument untouched.
+"""
 function _touch_affected_networks!(net_trap_set, net_covered_set, driver, changetimeest,
                                    sgraph, rateinfo, filled_traps, cur_amounts, z_vol_tables,
                                    infiltration, fill_updates, tstruct, old_covered,
@@ -208,9 +236,19 @@ function _touch_affected_networks!(net_trap_set, net_covered_set, driver, change
 end
 
 # ----------------------------------------------------------------------------
-# Amount updates for this event: constant-rate traps whose inflow changed or that just filled,
-# plus network-owned trap amounts (read from the driver) when a network was touched.
-# `old_covered` is the covered set before the touch.
+"""
+    _collect_amount_updates(rateinfo, cur_amounts, filled_traps, tstruct, z_vol_tables,
+                            cur_time, fill_updates, driver, net_covered_set, old_covered,
+                            network_touched) -> Vector{IncrementalUpdate{FilledAmount}}
+
+The amount updates for one event, in three parts: constant-rate traps whose inflow changed,
+traps that just flipped fill status (which sit at exactly their own capacity at that instant),
+and — when `network_touched` — the network-owned amounts read from the driver.
+
+Network-covered traps are excluded from the first two parts: their volumes come from the ODE
+state, not from a constant-rate projection.  `old_covered` is the covered set before the touch.
+Nothing is mutated; the updates are returned for the caller to apply.
+"""
 function _collect_amount_updates(rateinfo, cur_amounts, filled_traps, tstruct, z_vol_tables,
                                  cur_time, fill_updates, driver, net_covered_set, old_covered,
                                  network_touched)
@@ -237,8 +275,16 @@ function _collect_amount_updates(rateinfo, cur_amounts, filled_traps, tstruct, z
 end
 
 # ----------------------------------------------------------------------------
-# Settle every non-covered trap's amount exactly at `endtime` (covered traps follow the ODE
-# and are handled by `_finalize_networks!`).
+"""
+    _settle_noncovered_at_endtime!(cur_amounts, rateinfo, filled_traps, tstruct, z_vol_tables,
+                                   net_covered_set, cur_time, endtime) -> cur_amounts
+
+Project every non-covered trap's amount to exactly `endtime`, closing out the weather period.
+Traps in `net_covered_set` are skipped — they follow the multi-trap ODE and are settled by
+`_finalize_networks!` instead.
+
+Mutates and returns `cur_amounts`; every other argument is read only.
+"""
 function _settle_noncovered_at_endtime!(cur_amounts, rateinfo, filled_traps, tstruct,
                                         z_vol_tables, net_covered_set, cur_time, endtime)
     for (trap, cur_fill) in enumerate(cur_amounts)
@@ -253,6 +299,18 @@ function _settle_noncovered_at_endtime!(cur_amounts, rateinfo, filled_traps, tst
 end
 
 # ----------------------------------------------------------------------------
+"""
+    _update_affected_amounts(rateinfo, cur_amounts, filled_traps, tstruct, z_vol_tables,
+                             cur_time, net_covered_set = nothing)
+        -> Vector{IncrementalUpdate{FilledAmount}}
+
+One amount update per trap whose inflow changed, each projected to `cur_time` under the trap's
+*saved* rates — the rates it was evolving under since the last event, not the newly-updated
+ones.
+
+Traps in `net_covered_set` are skipped, taking their amount from the network state instead;
+`nothing` (the default) means no networks are active.  Nothing is mutated.
+"""
 function _update_affected_amounts(rateinfo, cur_amounts, filled_traps, tstruct,
                                   z_vol_tables, cur_time, net_covered_set = nothing)
 
@@ -269,6 +327,12 @@ function _update_affected_amounts(rateinfo, cur_amounts, filled_traps, tstruct,
 end
 
 # ----------------------------------------------------------------------------
+"""
+    _apply_updates!(amounts, updates) -> nothing
+
+Write each `IncrementalUpdate` in `updates` into `amounts` at its own index.  Mutates
+`amounts`.
+"""
 function _apply_updates!(amounts, updates)
     for up in updates
         amounts[up.index] = up.value
@@ -276,7 +340,20 @@ function _apply_updates!(amounts, updates)
 end
 
 # ----------------------------------------------------------------------------
-# Note, this function remains completely unaffected by the presence of dynamic networks.
+"""
+    _compute_changetime_estimate(trap, cur_amounts, cur_time, rateinfo, filled_traps, tstruct)
+        -> ChangeTimeEstimate
+
+Bracket when `trap` next flips fill status, as a `[min, max]` window of absolute times.
+
+The bounds come from the trap's net inflow range: infiltration varies with the wetted
+footprint, so the net rate lies between `inflow - Smax` and `inflow - Smin`.  When those
+coincide the rate is fill-independent and the estimate is *exact* (`min == max`), which lets
+`_compute_exact_changetime` short-circuit.  A full trap is bracketed on when it starts
+emptying, an unfilled one on when it fills; a submerged trap waits on its parent draining.
+
+Nothing is mutated.  This function is unaffected by the presence of dynamic networks.
+"""
 function _compute_changetime_estimate(trap, cur_amounts, cur_time, rateinfo, filled_traps, tstruct)
 
     min_net_inflow = tr -> getinflow(rateinfo, tr) - getsmax(rateinfo, tr)
@@ -331,8 +408,16 @@ end
 
 
 # ----------------------------------------------------------------------------
-# Updates changetime estimates for all non-network traps whose inflow has changed.
-# Traps covered by dynamic networks are skipped.
+"""
+    _update_changetime_estimates!(changetimeest, cur_amounts, cur_time, rateinfo, filled_traps,
+                                  tstruct, net_covered_set = nothing) -> nothing
+
+Refresh the changetime estimate of every trap whose inflow changed in `rateinfo`.
+
+Traps in `net_covered_set` are skipped: they are governed by the network prediction, not by
+this constant-rate estimate.  `nothing` (the default) means no networks are active.  Mutates
+`changetimeest` at the affected indices.
+"""
 function _update_changetime_estimates!(changetimeest, cur_amounts, cur_time,
                                        rateinfo, filled_traps, tstruct,
                                        net_covered_set = nothing)
@@ -350,6 +435,18 @@ function _update_changetime_estimates!(changetimeest, cur_amounts, cur_time,
 end
 
 # ----------------------------------------------------------------------------
+"""
+    _set_initial_changetime_estimates(rateinfo, cur_amounts, cur_time, filled_traps, tstruct,
+                                      net_contexts = nothing, net_covered_set = nothing)
+        -> Vector{ChangeTimeEstimate}
+
+One changetime estimate per trap of `tstruct`, for the start of a weather period.
+
+When networks are active, the covered traps are then overridden from their network prediction —
+an exact estimate for each predicted trigger, `Inf` for the rest — so the branch-and-bound in
+`_identify_next_status_change!` resolves them from the ODE rather than the constant-rate logic.
+Nothing is mutated; the vector is freshly built.
+"""
 function _set_initial_changetime_estimates(rateinfo, cur_amounts, cur_time,
                                            filled_traps, tstruct,
                                            net_contexts = nothing,
@@ -369,7 +466,13 @@ function _set_initial_changetime_estimates(rateinfo, cur_amounts, cur_time,
 end
 
 # ----------------------------------------------------------------------------
-# True iff every subtrap of `ix` is filled (allocation-free; short-circuits).
+"""
+    all_subtraps_filled(tstruct, ix, filled_traps) -> Bool
+
+True iff every subtrap of trap `ix` is filled.  Allocation-free and short-circuiting: a trap
+cannot start filling before its children have, so this gates the candidate scan in
+`_identify_next_status_change!` on every event.
+"""
 function all_subtraps_filled(tstruct, ix, filled_traps)
     @inbounds for c in subtrapsof(tstruct, ix)
         filled_traps[c] || return false
@@ -377,6 +480,33 @@ function all_subtraps_filled(tstruct, ix, filled_traps)
     return true
 end
 
+# ----------------------------------------------------------------------------
+"""
+    _identify_next_status_change!(changetimeest, cur_amounts, rateinfo, filled_traps, tstruct,
+                                  z_vol_tables, cur_time, tmax, net_trap_set = nothing,
+                                  net_covered_set = nothing) -> (earliest_changetime, fill_updates)
+
+Find the next moment any trap flips fill status, and which traps flip at it.
+
+Estimates are cheap and exact changetimes are not, so this is a branch and bound: take the
+candidate with the smallest lower bound, resolve it exactly, and drop every candidate whose
+lower bound now exceeds the best exact time, until none remain.  Ties are kept — several traps
+can flip at the same instant.
+
+Network nodes stay candidates and carry their exact ODE prediction; subsumed descendants are
+excluded, and nodes skip the constant-rate subtrap recompute since the touch step re-predicts
+them.
+
+# Returns
+`(earliest_changetime, fill_updates)` — the absolute time of the next change (`tmax` if none
+falls before it), and one `IncrementalUpdate{Bool}` per trap flipping at it.  Empty updates mean
+no further event this period.
+
+Mutates `changetimeest`: resolved candidates are pinned to their exact time, traps that fired
+are set to `Inf`, and the children of a fired trap are re-estimated.  `filled_traps` is flipped
+temporarily while re-estimating those children (a child's changetime depends on its parent's
+status) and restored before returning — so it is consistent on return, but not exception-safe.
+"""
 function _identify_next_status_change!(changetimeest, cur_amounts, rateinfo,
                                        filled_traps, tstruct, z_vol_tables,
                                        cur_time, tmax,
@@ -486,10 +616,21 @@ function _compute_exact_fill(rateinfo, cur_amounts, trap, filled_traps, tstruct,
 end
     
 # ----------------------------------------------------------------------------
-# This code is dynamic network-agnostic.  A network-covered trap arrives here
-# with min == max (set from the network prediction in _apply_network_changetimeest!),
-# so the guard below returns that exact changetime and none of the constant-rate
-# logic runs.
+"""
+    _compute_exact_changetime(trap, changetimes, cur_amounts, rateinfo, tstruct, filled_traps,
+                              z_vol_tables) -> ChangeTimeEstimate
+
+Resolve `trap`'s bracketed changetime to an exact one, returned as a degenerate estimate
+(`min == max`) at the absolute time it flips, or `Inf` if it never does.
+
+A filled trap is resolved by projecting its *parent* — it can only stop being full once the
+parent drains enough to expose it — and an unfilled one by projecting itself.  Either way the
+projection is [`fill_trap_until`](@ref), whose elapsed result is placed on the absolute clock.
+
+Nothing is mutated.  This code is dynamic network-agnostic: a network-covered trap arrives with
+`min == max` already set from its network prediction, so the guard returns that straight back
+and none of the constant-rate logic runs.
+"""
 function _compute_exact_changetime(trap, changetimes, cur_amounts, rateinfo,
                                    tstruct, filled_traps, z_vol_tables)
 
@@ -666,6 +807,17 @@ function fill_trap_until(trap, rateinfo, cur_amount, endtime, tstruct, z_vol_tab
 end
 
 # ----------------------------------------------------------------------------
+"""
+    _setup_dvdt(trap_bottom, trapvolume, infilfun, inflow, spillpoint, zvtable) -> Function
+
+Build the ODE rate closure `_dvdt(dv, v, p, t)` for a single trap's water volume, for
+[`fill_trap_until`](@ref) to integrate.
+
+The rate is `inflow` minus infiltration through the *wetted* footprint only: the closure reads
+the water level off `zvtable`, selects the cells at or below it, and sums their infiltration via
+`infilfun`.  That makes it a step function of `v` — hence the ODE rather than a closed form —
+but autonomous, ignoring `t`.  The returned closure writes `dv[1]` and mutates nothing else.
+"""
 function _setup_dvdt(trap_bottom, trapvolume, infilfun, inflow, spillpoint, zvtable)
     # note: for parent traps, trap_bottom will represent the bottom topography
     # except within the footprint of its children's traps, where trap_bottom
