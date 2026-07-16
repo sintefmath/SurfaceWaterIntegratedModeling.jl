@@ -10,6 +10,7 @@ considering infiltration and potentially changing weather conditions.
 ```@autodocs
 Modules = [SurfaceWaterIntegratedModeling]
 Pages = ["fill_sequence.jl"]
+Private = false
 ```
 
 ## Associated structs and functions
@@ -17,4 +18,5 @@ Pages = ["fill_sequence.jl"]
 ```@autodocs
 Modules = [SurfaceWaterIntegratedModeling]
 Pages = ["weatherevent.jl", "spillevent.jl", "spillgraph.jl", "rateinfo.jl", "flow.jl"]
+Private = false
 ```
