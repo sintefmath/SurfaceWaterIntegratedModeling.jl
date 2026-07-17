@@ -75,7 +75,7 @@ function test_update_regions_changes(grid, domain)
 
     # compute solution on unmodified grid
     field, slope = spillfield(grid)
-    regions = spillregions(field)
+    regions, = spillregions(field)
 
     reg_hash = hash(regions)
     
@@ -101,10 +101,10 @@ function test_update_regions_sameanswer(grid_orig, domain)
     
     # computing original spill field and region
     field_orig, slope_orig = spillfield(grid_orig)
-    regions_orig = spillregions(field_orig)
-    
+    regions_orig, = spillregions(field_orig)
+
     reg_hash = hash(regions_orig)
-    
+
     # computing modified spillfield
     field_modif, slope_modif = spillfield(grid_modif)
 
@@ -114,7 +114,7 @@ function test_update_regions_sameanswer(grid_orig, domain)
     reg2_hash = hash(regions_modif)
 
     # compute update globally
-    regions_modif_global = spillregions(field_modif)
+    regions_modif_global, = spillregions(field_modif)
     reg3_hash = hash(regions_modif_global)
     
     return reg3_hash == reg2_hash
@@ -129,8 +129,8 @@ function test_return_region_reindex(grid_orig, domain)
     
     # computing original spill field and region
     field_orig, slope_orig = spillfield(grid_orig)
-    regions_orig = spillregions(field_orig)
-    
+    regions_orig, = spillregions(field_orig)
+
     # computing modified spillfield
     field_modif, slope_modif = spillfield(grid_modif)
 
@@ -149,7 +149,7 @@ end
 function test_spillpoint_tiling(grid; usediags=true, tiling=nothing)
 
     field, slope = spillfield(grid, usediags=usediags)
-    regions = spillregions(field, usediags=usediags)
+    regions, = spillregions(field, usediags=usediags)
 
     spoints, = spillpoints(grid, regions, usediags=usediags)
     spoints_tiling, = spillpoints(grid, regions, usediags=usediags, tiling=tiling)

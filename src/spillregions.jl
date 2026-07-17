@@ -102,16 +102,13 @@ function spillregions(spillfield::Matrix{Int8};
     # the domain.
     _renumerate_regions!(regions, exitregions=enoderegs)
 
-    # create spillfield graph; skip edges representing self-loops
-    N = prod(size(spillfield)) # total number of grid cells (vertices)
-    g = Graphs.SimpleDiGraph([Graphs.SimpleEdge{Int64}((e[1], e[2])) for e in edges
-                                  if e[1] != e[2]])
-    Graphs.add_vertices!(g, N - Graphs.nv(g)) # add any missing vertices (i.e. those without edges)
+    N = prod(size(spillfield))
+    fg = FlowGraph(edges, N)
 
-    println("Number of gridcells: ", prod(size(spillfield)))
-    println("Number of graph nodes; ", Graphs.nv(g))
-    
-    return regions, g, bottomcells
+    println("Number of gridcells: ", N)
+    println("Number of graph nodes: ", length(fg.forward))
+
+    return regions, fg, bottomcells
     
 end
 

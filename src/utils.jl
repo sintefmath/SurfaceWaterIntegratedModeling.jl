@@ -696,13 +696,9 @@ end
 end
 
 # ----------------------------------------------------------------------------
-@inline function _downstream_cell(flowgraph::Graphs.SimpleDiGraph, lix::Int)
-    outneighs = Graphs.outneighbors(flowgraph, lix)
-    if isempty(outneighs)
-        return lix, true
-    else
-        return outneighs[1], false
-    end
+@inline function _downstream_cell(flowgraph::FlowGraph, lix::Int)
+    ds = downstream_cells(flowgraph, lix)
+    return isempty(ds) ? (lix, true) : (Int(ds[1]), false)
 end
 
 # ----------------------------------------------------------------------------
@@ -944,7 +940,7 @@ function upstream_area(tstruct::TrapStructure{<:Real},
         # spilling directly into the current cell
 
         # upstream cells in region
-        ucells = findall(Graphs.dfs_parents(tstruct.flowgraph, point, dir=:in) .> 0) 
+        ucells = upstream_dfs(tstruct.flowgraph, point)
         
         if local_only
             return ucells
@@ -1038,14 +1034,14 @@ function reconstruct_spillfield(tstruct::TrapStructure{<:Real})
     CI = CartesianIndices(size(spillfield))
 
     for cix in CartesianIndices(size(spillfield))
-        outneigh = Graphs.outneighbors(tstruct.flowgraph, LI[cix])
-        if length(outneigh) == 0
+        ds = downstream_cells(tstruct.flowgraph, LI[cix])
+        if isempty(ds)
             spillfield[cix] = -1
         else
-            @assert length(outneigh) == 1 # for now, only single downstream cell supported
-            spillfield[cix] = _compute_direction(cix, CI[outneigh[1]], undef_val)
+            @assert length(ds) == 1 # for now, only single downstream cell supported
+            spillfield[cix] = _compute_direction(cix, CI[Int(ds[1])], undef_val)
         end
-        
+
     end
         
     # fill in sinks (-3)
@@ -1429,7 +1425,7 @@ function current_upstream_area(tstruct::TrapStructure{<:Real}, point, tstates)
     # determine involved, non-submerged cells
     cells = submerged ?
         [] :
-        findall(Graphs.dfs_parents(tstruct.flowgraph, point, dir=:in) .> 0)
+        upstream_dfs(tstruct.flowgraph, point)
 
     # determine first-order full region contributions
     full_regions = submerged ?

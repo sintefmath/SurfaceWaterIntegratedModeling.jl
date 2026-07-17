@@ -78,7 +78,7 @@ function _is_trap_bottom(cell, tstruct)
     # region, it must be a trap bottom.  (If it were a cell spilling out of the
     # domain, it would belong to a negative reion)
     @assert cell > 0
-    return isempty(Graphs.outneighbors(tstruct.flowgraph, cell)) && 
+    return !has_downstream(tstruct.flowgraph, cell) &&
         (tstruct.regions[cell] > 0) &&
         !_is_sink(cell, tstruct)
 end
@@ -125,11 +125,11 @@ function _track_flow!(rateinfo, node, amount, tstruct)
 
         (sign(amount) != initial_sign) && break # stop when there is no more to
                                                 # propagate/remove
-        ds = Graphs.outneighbors(tstruct.flowgraph, cell)
-        isempty(ds) && break # no downstream cell, stop here (either trap bottom, sink, or 
+        ds = downstream_cells(tstruct.flowgraph, cell)
+        isempty(ds) && break # no downstream cell, stop here (either trap bottom, sink, or
                              # domain boundary)
         @assert length(ds) == 1
-        cell = ds[1]
+        cell = Int(ds[1])
         
         #_is_trap_bottom(cell, tstruct) && break # return if the cell is a trap bottom
 
