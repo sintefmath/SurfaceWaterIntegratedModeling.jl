@@ -1,0 +1,381 @@
+<title>fill_sequence call tree</title>
+<style>
+  :root{
+    --bg:#f1f4f5; --surface:#ffffff; --surface-2:#f7f9fa;
+    --ink:#182126; --muted:#586970; --faint:#8a979d; --line:#dde4e6;
+    --accent:#0f7d86; --accent-ink:#0b5f66;
+    --dyn:#a9691a; --dyn-tint:rgba(169,105,26,.085); --dyn-bar:#c07d24;
+    --nbs:#2d8a54; --nbs-tint:rgba(45,138,84,.10); --nbs-bar:#2d8a54;
+    --glyph:#aeb9bd;
+    --font-sans:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    --font-mono:ui-monospace,"SF Mono","JetBrains Mono","Cascadia Code",Menlo,Consolas,"Liberation Mono",monospace;
+    --sz:13px;
+    color-scheme:light;
+  }
+  @media (prefers-color-scheme:dark){
+    :root{
+      --bg:#0f161a; --surface:#151e22; --surface-2:#1a252a;
+      --ink:#e7eef1; --muted:#9fb0b7; --faint:#6d7f86; --line:#25333a;
+      --accent:#43b8c1; --accent-ink:#7fd6dc;
+      --dyn:#e2a751; --dyn-tint:rgba(226,167,81,.10); --dyn-bar:#e2a751;
+      --nbs:#5ec081; --nbs-tint:rgba(94,192,129,.11); --nbs-bar:#5ec081;
+      --glyph:#4d5c63;
+      color-scheme:dark;
+    }
+  }
+  :root[data-theme="dark"]{
+    --bg:#0f161a; --surface:#151e22; --surface-2:#1a252a;
+    --ink:#e7eef1; --muted:#9fb0b7; --faint:#6d7f86; --line:#25333a;
+    --accent:#43b8c1; --accent-ink:#7fd6dc;
+    --dyn:#e2a751; --dyn-tint:rgba(226,167,81,.10); --dyn-bar:#e2a751;
+    --nbs:#5ec081; --nbs-tint:rgba(94,192,129,.11); --nbs-bar:#5ec081;
+    --glyph:#4d5c63;
+    color-scheme:dark;
+  }
+  :root[data-theme="light"]{
+    --bg:#f1f4f5; --surface:#ffffff; --surface-2:#f7f9fa;
+    --ink:#182126; --muted:#586970; --faint:#8a979d; --line:#dde4e6;
+    --accent:#0f7d86; --accent-ink:#0b5f66;
+    --dyn:#a9691a; --dyn-tint:rgba(169,105,26,.085); --dyn-bar:#c07d24;
+    --nbs:#2d8a54; --nbs-tint:rgba(45,138,84,.10); --nbs-bar:#2d8a54;
+    --glyph:#aeb9bd;
+    color-scheme:light;
+  }
+
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--font-sans);
+    line-height:1.55;-webkit-font-smoothing:antialiased;}
+  .wrap{max-width:1180px;margin:0 auto;padding:clamp(1.2rem,4vw,3rem) clamp(1rem,4vw,2.5rem) 4rem;}
+
+  header.masthead{border-bottom:1px solid var(--line);padding-bottom:1.5rem;margin-bottom:1.5rem;}
+  .eyebrow{font-size:.72rem;letter-spacing:.16em;text-transform:uppercase;color:var(--accent);
+    font-weight:650;margin:0 0 .5rem;}
+  h1{font-size:clamp(1.7rem,4.5vw,2.7rem);line-height:1.08;margin:0 0 .5rem;letter-spacing:-.02em;
+    font-weight:760;text-wrap:balance;}
+  h1 code{font-family:var(--font-mono);font-size:.82em;font-weight:700;
+    background:var(--surface-2);padding:.04em .28em;border-radius:.28em;border:1px solid var(--line);}
+  .sub{margin:0;color:var(--muted);max-width:60ch;font-size:1.02rem;}
+  .sub b.dyn{color:var(--dyn);font-weight:650;} .sub b.nbs{color:var(--nbs);font-weight:650;}
+
+  .toolbar{display:flex;flex-wrap:wrap;gap:.6rem 1.4rem;align-items:center;
+    margin:1.4rem 0 1rem;}
+  .group{display:flex;align-items:center;gap:.5rem;}
+  .group > .label{font-size:.68rem;letter-spacing:.12em;text-transform:uppercase;
+    color:var(--faint);font-weight:600;}
+  .legend{display:flex;flex-wrap:wrap;gap:.45rem;}
+  .chip{display:inline-flex;align-items:center;gap:.4rem;font-size:.82rem;font-weight:550;
+    padding:.28rem .62rem;border-radius:999px;border:1px solid var(--line);
+    background:var(--surface);color:var(--muted);cursor:pointer;user-select:none;
+    transition:background .15s,border-color .15s,color .15s;}
+  .chip:hover{border-color:var(--accent);}
+  .chip .dot{width:.62rem;height:.62rem;border-radius:50%;flex:none;}
+  .chip[data-k="dyn"] .dot{background:var(--dyn-bar);}
+  .chip[data-k="nbs"] .dot{background:var(--nbs-bar);}
+  .chip[data-k="all"] .dot{background:var(--glyph);}
+  .chip[aria-pressed="true"]{background:var(--surface-2);border-color:var(--accent);color:var(--ink);
+    box-shadow:inset 0 0 0 1px var(--accent);}
+  .chip:focus-visible{outline:2px solid var(--accent);outline-offset:2px;}
+
+  .zoom{display:inline-flex;border:1px solid var(--line);border-radius:.55rem;overflow:hidden;background:var(--surface);}
+  .zoom button{border:0;background:transparent;color:var(--ink);font-family:var(--font-mono);
+    font-size:.95rem;width:2.1rem;height:2rem;cursor:pointer;line-height:1;}
+  .zoom button:hover{background:var(--surface-2);color:var(--accent);}
+  .zoom button:focus-visible{outline:2px solid var(--accent);outline-offset:-2px;}
+  .zoom button + button{border-left:1px solid var(--line);}
+  .zoom .lvl{font-family:var(--font-mono);font-size:.78rem;color:var(--muted);
+    display:inline-flex;align-items:center;padding:0 .55rem;min-width:3.4rem;justify-content:center;
+    font-variant-numeric:tabular-nums;}
+
+  .canvas{position:relative;border:1px solid var(--line);border-radius:.8rem;background:var(--surface);
+    overflow:auto;max-height:78vh;cursor:grab;box-shadow:0 1px 2px rgba(0,0,0,.03),0 12px 32px -18px rgba(0,0,0,.22);}
+  .canvas.grabbing{cursor:grabbing;}
+  .canvas:focus-visible{outline:2px solid var(--accent);outline-offset:2px;}
+  .tree{font-family:var(--font-mono);font-size:var(--sz);line-height:1.5;white-space:pre;
+    padding:1.1rem 1.3rem 1.4rem;min-width:min-content;tab-size:2;}
+  .ln{position:relative;padding-left:.7rem;border-radius:2px;}
+  .ln[data-a]::before{content:"";position:absolute;left:0;top:1px;bottom:1px;width:3px;border-radius:3px;}
+  .ln[data-a="dyn"]{background:var(--dyn-tint);} .ln[data-a="dyn"]::before{background:var(--dyn-bar);}
+  .ln[data-a="nbs"]{background:var(--nbs-tint);} .ln[data-a="nbs"]::before{background:var(--nbs-bar);}
+  .ln[data-a="both"]{background:linear-gradient(90deg,var(--dyn-tint),var(--nbs-tint));}
+  .ln[data-a="both"]::before{background:linear-gradient(var(--dyn-bar),var(--nbs-bar));}
+  .m-dyn{color:var(--dyn);font-weight:700;} .m-nbs{color:var(--nbs);font-weight:700;}
+  .glyph{color:var(--glyph);} .ref{color:var(--faint);font-style:italic;}
+
+  /* focus filter */
+  .tree.focus-dyn .ln:not([data-a="dyn"]):not([data-a="both"]),
+  .tree.focus-nbs .ln:not([data-a="nbs"]):not([data-a="both"]){opacity:.24;filter:saturate(.4);}
+
+  .notes{margin-top:2.6rem;}
+  .notes h2{font-size:1.15rem;letter-spacing:-.01em;margin:0 0 1rem;font-weight:700;}
+  .cards{display:grid;gap:1rem;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));}
+  .card{border:1px solid var(--line);border-radius:.7rem;background:var(--surface);padding:1.05rem 1.1rem;}
+  .card h3{margin:0 0 .5rem;font-size:.94rem;font-weight:680;letter-spacing:-.005em;display:flex;align-items:center;gap:.5rem;}
+  .card h3 .tag{font-family:var(--font-mono);font-size:.72rem;font-weight:600;padding:.1rem .4rem;border-radius:.3rem;
+    background:var(--surface-2);border:1px solid var(--line);color:var(--muted);}
+  .card p{margin:0;color:var(--muted);font-size:.9rem;}
+  .card code{font-family:var(--font-mono);font-size:.86em;color:var(--ink);background:var(--surface-2);
+    padding:.03em .3em;border-radius:.28em;border:1px solid var(--line);}
+  .card.dyn{border-top:3px solid var(--dyn-bar);} .card.nbs{border-top:3px solid var(--nbs-bar);}
+  .card.accent{border-top:3px solid var(--accent);}
+
+  footer{margin-top:2.6rem;padding-top:1.2rem;border-top:1px solid var(--line);
+    color:var(--faint);font-size:.8rem;display:flex;flex-wrap:wrap;gap:.4rem 1rem;justify-content:space-between;}
+  footer code{font-family:var(--font-mono);}
+  .hint{color:var(--faint);font-size:.78rem;margin:.5rem 0 0;}
+  @media (prefers-reduced-motion:reduce){*{transition:none!important;}}
+</style>
+
+<div class="wrap">
+  <header class="masthead">
+    <p class="eyebrow">SWIM · surface water integrated modelling</p>
+    <h1><code>fill_sequence</code> call structure</h1>
+    <p class="sub">The dynamic fill-sequencing engine, traced from the top-level driver down to the shared
+      multi-trap ODE. Highlighting the machinery tied to <b class="dyn">dynamic networks ◆</b>
+      and <b class="nbs">NBS elements ★</b>.</p>
+  </header>
+
+  <div class="toolbar">
+    <div class="group">
+      <span class="label">Focus</span>
+      <div class="legend" role="group" aria-label="Focus filter">
+        <button class="chip" data-k="all" aria-pressed="true"><span class="dot"></span>All</button>
+        <button class="chip" data-k="dyn" aria-pressed="false"><span class="dot"></span>Dynamic ◆</button>
+        <button class="chip" data-k="nbs" aria-pressed="false"><span class="dot"></span>NBS ★</button>
+      </div>
+    </div>
+    <div class="group">
+      <span class="label">Zoom</span>
+      <div class="zoom" role="group" aria-label="Zoom">
+        <button id="zout" title="Zoom out" aria-label="Zoom out">–</button>
+        <span class="lvl" id="zlvl">13px</span>
+        <button id="zin" title="Zoom in" aria-label="Zoom in">+</button>
+        <button id="zreset" title="Reset zoom" aria-label="Reset zoom" style="font-size:.7rem;width:2.6rem;">reset</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="canvas" id="canvas" tabindex="0" aria-label="Call tree, scrollable and zoomable">
+    <div class="tree" id="tree"></div>
+  </div>
+  <p class="hint">Drag to pan · <kbd>Ctrl</kbd>/<kbd>⌘</kbd> + scroll to zoom · click a focus chip to dim the rest.</p>
+
+  <section class="notes">
+    <h2>How the pieces fit</h2>
+    <div class="cards">
+      <div class="card accent">
+        <h3>Three ways into the ODE <span class="tag">solveDynNetwork!</span></h3>
+        <p><b>predict</b> estimates a context's next event on a <i>copy</i> of its state, <b>commit</b> advances
+          the real <code>state</code> to a known time, <b>finalize</b> settles every context to period end. All
+          three run under the context's <i>cached</i> <code>extern_inflow</code>, which is what makes them
+          order-independent of any intervening spillgraph update. NBS just adds layer states to the state vector
+          and a second, layer-aware steady-state callback.</p>
+      </div>
+      <div class="card nbs">
+        <h3><span class="tag">★</span> NBS state continuity</h3>
+        <p><code>nbs_state</code> — a <code>Dict{Int,Vector{Float64}}</code> owned by the
+          <code>NetworkDriver</code>, not by the <code>TrapStructure</code> — is the single source of truth for
+          layer storage, keyed by each placement's stable <code>id</code>. Seeded into contexts via
+          <code>_nbs_layer_block</code>, persisted back via <code>_store_nbs_state!</code> at every harvest and at
+          finalize. That round-trip keeps storage continuous across both structural change and weather periods.</p>
+      </div>
+      <div class="card dyn">
+        <h3><span class="tag">◆</span> The quiet-event skip gate</h3>
+        <p><code>_touch_affected_networks!</code> runs only when a network member fired (topology) or one of its
+          inflow regions changed (dynamics). If neither holds, the pass is skipped — cached state and prediction
+          stay exact and the event costs zero ODE solves. The dominant runtime win for a small network in a large
+          terrain.</p>
+      </div>
+      <div class="card dyn">
+        <h3><span class="tag">◆</span> Mutate, don't retrace</h3>
+        <p>The driver builds its components once per weather period, then mutates the live
+          <code>Vector{DynNetwork}</code> in place per event via <code>apply_fill!</code> /
+          <code>apply_unfill!</code> / <code>apply_empty!</code> — grow, detach, subsume, fuse. Committed node
+          volumes and NBS layers are harvested first, so they survive the structural change and reseed the rebuilt
+          contexts. The old full-retrace path is retired.</p>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <span>Source of truth: <code>src/fill_sequence/</code> · <code>src/dynamics/</code></span>
+    <span>Branch <code>nbs-dynamic-core</code></span>
+  </footer>
+</div>
+
+<script type="text/plain" id="tree-src">
+fill_sequence(tstruct, weather_events; time_slack, infiltration, dyn_traps, culverts, nbs, verbose)
+│
+├─  _compute_z_vol_tables            volume→level tables, once for all traps
+├─  compute_complete_spillgraph
+├─  compute_flow                                                  ── flow.jl
+│   ├─ _compute_initial_rateinfo ─ watercourses
+│   ├─ _is_parent                    merge vs terrain spill
+│   └─ _track_flow! ─ _update_Smin_Smax! ─ _ponding_infiltration
+│
+├─◆ _dyn_seeds                       dyn_trap footprints + both culvert ends
+├─◆ build_network_driver                                          ── network_driver.jl
+│  ├─  setup_network                                              ── build_network.jl
+│  │  ├─  _validate_network_inputs   no culvert/seed inside an NBS footprint
+│  │  ├─★ _compute_nbs_inflow_outflow_cells!   MUTATES nbs: stamps id + cell lists
+│  │  ├─  _grow_network_from_seed!   [per seed] trace downstream
+│  │  │  ├─ _trace_to_next_trap
+│  │  │  ├─ _intersecting_culverts_and_nbs_outlets    (trap: bare ids)
+│  │  │  ├─ _intersecting_on_path                     (path: id + position)
+│  │  │  └─ _update_pathmap!         truncate where paths meet
+│  │  ├─  init_in_counts!                                         ── network_updating.jl
+│  │  └─  split_network_into_connected_components                 ── network_utils.jl
+│  │     ├─ _coupling_graph ─ _culvert_owner_nodes, ★_nbs_coupled_nodes
+│  │     └─ _build_subnetwork ─ _localize_path / _localize_trap
+│  └─◆ _rebuild_contexts!
+│     ├─ _driver_state0 ─ fill_trap_until    project a newly-absorbed trap to now
+│     ├─ _make_context ─ ★_nbs_layer_block   restore layer state from nbs_state
+│     └─◆ _predict_network!  ──────────────────────────┐  first event prediction
+│                                                      │
+├─  _set_initial_changetime_estimates                  │
+│  ├─ _compute_changetime_estimate     [per trap]      │
+│  └─◆ _apply_network_changetimeest!   covered → exact / Inf
+├─  push SpillEvent (period start, full snapshot)      │
+│                                                      │
+└─ for each WeatherEvent: _fill_sequence_for_weather_event!
+   │                                                   │
+   ├─  _identify_next_status_change!   branch and bound over candidates
+   │  ├─ _update_changetime_estimates! ─ _compute_changetime_estimate
+   │  ├─ all_subtraps_filled           gate: children must be full first
+   │  └─ _compute_exact_changetime ─ fill_trap_until ─ _setup_dvdt
+   ├─◆ _expand_empty_network_fill_updates   :empty parent → expose draining children
+   ├─  update_spillgraph!              covered traps excluded — ODE owns them
+   ├─  setsavepoint!
+   ├─  _update_flow! ─ _propagate_amount! ─ _track_flow!
+   │                                                   │
+   ├─◆ _touch_affected_networks!   (ONLY when a member fired or external inflow    │
+   │  │                             changed — the "quiet event" skip gate)          │
+   │  └─◆ _touch_networks_driver!                                ── network_driver.jl
+   │     ├─  _capture_fired_kinds      read predictions BEFORE mutating
+   │     ├─◆ _commit_network!  ──────────────────────┐│  commit to cur_time
+   │     ├─  _harvest! ─ ★_store_nbs_state!           ││  volumes + layers survive the change
+   │     ├─  _apply_fired_boundaries!  :empty→0, :unspill→prevfloat(C)
+   │     ├─  apply_fill! / apply_unfill! / apply_empty!           ── network_updating.jl
+   │     │  ├─ apply_fill!   ─ _index_components, _fill_subsumes,
+   │     │  │                  grow_spill! ─ _grow_network_from_seed!,
+   │     │  │                  _fuse_components! ─ _regrow
+   │     │  ├─ apply_unfill! ─ detach_spill! ─ _reroot_or_kill_path!
+   │     │  │                                 ─ _promote_tributary! / _kill_path!
+   │     │  │                                 ─ _compact!
+   │     │  └─ apply_empty!  ─ _fuse_components!    de-subsume a drained parent
+   │     ├─  _covered_of               reads comps (valid pre-rebuild)
+   │     ├─  _reconcile_spillgraph! ─ _update_flow!
+   │     │       invariant: spillgraph == FULL ∧ ¬COVERED
+   │     ├─◆ _rebuild_contexts! ─ _predict_network! ──┤│  re-predict
+   │     └─  _apply_network_changetimeest!            ││
+   │                                                  ││
+   ├─  _collect_amount_updates                        ││
+   │  ├─ _update_affected_amounts ─ _compute_exact_fill ─ fill_trap_until
+   │  └─◆ _network_amount_updates   node=ODE state, subsumed=capacity, exited=boundary
+   ├─  _apply_updates! / push SpillEvent (incremental)
+   │       … loop …                                   ││
+   ├─  _settle_noncovered_at_endtime! ─ _compute_exact_fill   (non-covered only)
+   └─◆★ _finalize_networks!  ─────────────────────────┤│  advance every net to endtime
+      ├─◆ _commit_network!  ──────────────────────────┘│  (next period rebuilds from here)
+      └─★ _store_nbs_state!             layer storage → next period
+                                                       │
+   ┌───────────────────────────────────────────────────┘
+   │  _predict_network! / _commit_network! / _finalize_networks!  all call ↓
+   ▼
+◆★ solveDynNetwork!(state, tstruct, net, infiltration, inflow; tmax, runoff, zvt)  ── networksolver.jl
+   │        THE shared multi-trap ODE engine (state = one per trap + ★one per NBS layer)
+   ├─  _validate_network            three-state entry contract (FULL/TRANSITORY/EMPTY)
+   ├─◆ _build_rate_params
+   │  ├─  _build_trap_geometry / _network_order / _merge_targets
+   │  ├─  _build_culvert_plan
+   │  ├─★ _build_nbs_plan           per-layer Kout/Kinf/Smax/Smin/A, state_base offsets
+   │  ├─  _footprint_infiltration / _path_cell_infiltration / _path_cell_runoff
+   │  └─  _path_event_templates
+   ├─  _t0_fast_path                immediate event: entry state cannot be held
+   ├─◆★ dynNetworkRateFunction!     ODE RHS, every step
+   │  ├─◆ _routed_inflow ─→◆ _route_flow ─ _path_delivered! (─ _attenuate_range,
+   │  │                                     _culvert_flow ─ culvert_rate),
+   │  │                                     _route_trap_node!
+   │  ├─★ _nbs_routing              signed output diffs, head-injected on carrier paths
+   │  ├─  wetted_infiltration       (per trap; step function of V → forces DiscreteCallback)
+   │  └─★ NBS layer loop            top layer fed by live input I_1; each lower by layer-above
+   │      └─★ compute_outflow       qout=K·(S−Smax)ⁿ, qinf=K·(S−Smin)ⁿ  (mantillaRR/elhadi/puddle)
+   └─  callbacks
+      ├─  _build_event_callback     :fill / :empty / :unspill (VectorContinuousCallback)
+      ├─  _build_steadystate_callback
+      └─★ _build_steadystate_callback_nbs   layer-aware steady-state
+</script>
+
+<script>
+(function(){
+  const raw = document.getElementById("tree-src").textContent.replace(/^\n/,"").replace(/\s+$/,"");
+  const esc = s => s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+  const tree = document.getElementById("tree");
+
+  const frag = document.createDocumentFragment();
+  for(const line of raw.split("\n")){
+    const div = document.createElement("div");
+    div.className = "ln";
+    const hasDyn = line.includes("◆"), hasNbs = line.includes("★");
+    if(hasDyn && hasNbs) div.dataset.a = "both";
+    else if(hasDyn)      div.dataset.a = "dyn";
+    else if(hasNbs)      div.dataset.a = "nbs";
+
+    let h = esc(line);
+    // file:line references (keep the leading ── inside the ref)
+    h = h.replace(/(──\s[^\n]*?\.jl:\d+)/g, '<span class="ref">$1</span>');
+    // markers
+    h = h.replace(/◆/g, '<span class="m-dyn">◆</span>')
+         .replace(/★/g, '<span class="m-nbs">★</span>');
+    // recede the tree-drawing glyphs (runs of box chars, arrows, connectors)
+    h = h.replace(/([│├└┌┐┘─▼▲]+)/g, '<span class="glyph">$1</span>');
+    div.innerHTML = h || " ";
+    frag.appendChild(div);
+  }
+  tree.appendChild(frag);
+
+  // ---- focus filter ----
+  const chips = [...document.querySelectorAll(".chip")];
+  chips.forEach(c => c.addEventListener("click", () => {
+    chips.forEach(o => o.setAttribute("aria-pressed", String(o === c)));
+    tree.classList.remove("focus-dyn","focus-nbs");
+    if(c.dataset.k === "dyn") tree.classList.add("focus-dyn");
+    if(c.dataset.k === "nbs") tree.classList.add("focus-nbs");
+  }));
+
+  // ---- zoom ----
+  const root = document.documentElement, lvl = document.getElementById("zlvl");
+  const MIN=9, MAX=26, DEF=13; let sz=DEF;
+  const apply = () => { root.style.setProperty("--sz", sz+"px"); lvl.textContent = sz+"px"; };
+  const bump = d => { sz = Math.max(MIN, Math.min(MAX, sz+d)); apply(); };
+  document.getElementById("zin").onclick = () => bump(1);
+  document.getElementById("zout").onclick = () => bump(-1);
+  document.getElementById("zreset").onclick = () => { sz=DEF; apply(); };
+
+  const canvas = document.getElementById("canvas");
+  canvas.addEventListener("wheel", e => {
+    if(e.ctrlKey || e.metaKey){ e.preventDefault(); bump(e.deltaY < 0 ? 1 : -1); }
+  }, {passive:false});
+
+  // ---- drag to pan ----
+  let dragging=false, sx=0, sy=0, sl=0, st=0;
+  canvas.addEventListener("pointerdown", e => {
+    if(e.button!==0) return;
+    dragging=true; sx=e.clientX; sy=e.clientY; sl=canvas.scrollLeft; st=canvas.scrollTop;
+    canvas.classList.add("grabbing"); canvas.setPointerCapture(e.pointerId);
+  });
+  canvas.addEventListener("pointermove", e => {
+    if(!dragging) return;
+    const dx=e.clientX-sx, dy=e.clientY-sy;
+    if(!canvas.dataset.moved && Math.hypot(dx,dy)>3) canvas.dataset.moved="1";
+    canvas.scrollLeft = sl-dx; canvas.scrollTop = st-dy;
+  });
+  const end = e => { dragging=false; canvas.classList.remove("grabbing"); delete canvas.dataset.moved;
+    try{ canvas.releasePointerCapture(e.pointerId);}catch(_){} };
+  canvas.addEventListener("pointerup", end);
+  canvas.addEventListener("pointercancel", end);
+  // suppress text-selection only while an actual drag happened
+  canvas.addEventListener("click", e => { if(canvas.dataset.moved) e.preventDefault(); }, true);
+
+  apply();
+})();
+</script>
