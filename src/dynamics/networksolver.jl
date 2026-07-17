@@ -456,7 +456,7 @@ function _route_flow(net::DynNetwork,
     # internal-depression diff); `path_flow`, `trib_output` and `culvert_actual` zeroed —
     # every path's water arrives from an upstream trap's spill or an NBS head-injection.
     trap_inflow = Float64.(external_inflow)
-    nbsrt === nothing || (trap_inflow .+= nbsrt.trap_extra)
+    nbsrt === nothing || (trap_inflow .+= nbsrt.trap_diff)
     path_flow   = zeros(Float64, np)
     trib_output = zeros(Float64, np)
     culvert_actual = cvplan === nothing ? Float64[] : zeros(Float64, length(net.culverts))
@@ -617,17 +617,35 @@ _nbs_state_count(p) = p.nbsplan === nothing ? 0 : p.nbsplan.nlayer_total
 """
     NBSRouting
 
-Per-step NBS routing scratch, threaded into the router and rebuilt each rate-function call.
+Per-step NBS scratch, rebuilt each rate-function call and threaded through the router.  It
+carries traffic in **both** directions, and each field is indexed in a **different space**:
 
-`path_diff` and `trap_extra` are inputs carrying the signed output diffs — head-injected on the
-carrier path, or deposited straight into the accumulation trap.  `nbs_draw` is the output: the
-`:nbsin` flow the router captured into each element's live input `I_1`.  The attenuation
-reference `path_runoff` is not here; it is static and lives on the rate params.
+| Field | Indexed by | Direction |
+|---|---|---|
+| `path_diff` | flow path (`1:np`) | in — router reads |
+| `trap_diff` | trap (`1:nt`) | in — router reads |
+| `nbs_draw` | NBS placement (`nbsplan.elems`) | out — router writes |
+
+**In.** `path_diff` and `trap_diff` are the placements' signed output diffs, computed from the
+current layer state by [`_nbs_routing`](@ref).  Both are the same quantity — a share
+`(O_terrain - O_0_total) * ratio_e` — differing only in where it lands: `path_diff` is injected
+at a carrier path's head and then attenuated along it (and also collects each piped outlet's
+`+E_l`), while `trap_diff` is deposited straight into an internal depression's trap.
+
+**Out.** `nbs_draw` is the *network-routed* flow intercepted at each placement's
+footprint-inflow cells (the `:nbsin` events).  Layer 1 is fed by the live input
+`I_1 = O_0_total + nbs_draw`: the oblivious half is static and known when the plan is built,
+but the network half depends on which traps are spilling right now, so it can only be collected
+while routing — hence a router output rather than a plan field.  It is signed: an upstream NBS
+that is storing water rides a negative diff, which arrives here as a *deficit* in this
+placement's input rather than as flow that quietly bypassed it.
+
+The attenuation reference `path_runoff` is not here — it is static and lives on the rate params.
 """
 struct NBSRouting
-    path_diff  ::Vector{Float64}
-    trap_extra ::Vector{Float64}
-    nbs_draw   ::Vector{Float64}
+    path_diff  ::Vector{Float64}   # per flow path — signed diff injected at its head (in)
+    trap_diff  ::Vector{Float64}   # per trap — signed diff deposited into it (in)
+    nbs_draw   ::Vector{Float64}   # per NBS placement — :nbsin flow captured while routing (out)
 end
 
 """
@@ -760,17 +778,21 @@ end
     _nbs_routing(V, p, nt, np) -> NBSRouting
 
 The signed output diffs of every NBS element at state `V`, laid into a fresh [`NBSRouting`](@ref)
-with a zeroed `nbs_draw`, ready to thread through the router.
+ready to thread through the router.  Fills the two *input* fields; `nbs_draw` is left zeroed for
+the router to fill on the way back.
 
-Terrain re-emission contributes `(O_terrain(V) - O_0_total) * ratio_e`, head-injected on each
-carrier path or deposited into each accumulation trap; each piped outlet contributes `+E_l(V)`
-head-injected on its carrier path.  Emitting the *diff* over the oblivious baseline is what
-keeps `external_inflow`'s `O_0` from being double-counted.  Nothing is mutated; the scratch is
+Terrain re-emission contributes `(O_terrain(V) - O_0_total) * ratio_e` to `path_diff` (injected
+at the carrier path's head) or to `trap_diff` (deposited into the accumulation trap) — the same
+share either way, differing only in where it lands.  Each piped outlet adds `+E_l(V)` to its
+carrier path.
+
+Emitting the *diff* over the oblivious baseline, rather than the output itself, is what keeps
+`external_inflow`'s `O_0` from being counted twice.  Nothing is mutated; the scratch is
 allocated per call.
 """
 function _nbs_routing(V, p, nt::Int, np::Int)
     path_diff  = zeros(Float64, np)
-    trap_extra = zeros(Float64, nt)
+    trap_diff  = zeros(Float64, nt)
     for el in p.nbsplan.elems
         base = el.state_base
         O_terrain = 0.0
@@ -781,7 +803,7 @@ function _nbs_routing(V, p, nt::Int, np::Int)
         end
         diffbase = O_terrain - el.O_0_total
         for (pth, r) in el.terrain_paths; path_diff[pth]  += diffbase * r; end
-        for (tr,  r) in el.terrain_traps; trap_extra[tr]  += diffbase * r; end
+        for (tr,  r) in el.terrain_traps; trap_diff[tr]   += diffbase * r; end
         for (pth, l) in el.piped_paths
             L = el.system.layers[l]
             E = compute_outflow(L.Kout, L.nout, L.Smax,
@@ -789,7 +811,7 @@ function _nbs_routing(V, p, nt::Int, np::Int)
             path_diff[pth] += E
         end
     end
-    return NBSRouting(path_diff, trap_extra, zeros(Float64, length(p.nbsplan.elems)))
+    return NBSRouting(path_diff, trap_diff, zeros(Float64, length(p.nbsplan.elems)))
 end
 
 # ----------------------------------------------------------------------------

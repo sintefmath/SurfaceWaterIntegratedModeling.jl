@@ -41,32 +41,38 @@ I_1  =  O_0_total            # oblivious background throughput (static; = inflow
 
 Layer-1 (top) inflow in the rate function is `el.O_0_total + nbs_draw[k]`.
 
-**Why `O_0_total`, and not a separate `Σ runoff[inflow_cell] + precip` sum** — this is the
-key subtlety. The footprint has **zero infiltration** (the contract), so by mass balance
-every drop entering (boundary inflow + rain falling on the footprint) must leave at a
-boundary exit or pond at an internal sink:
+**`O_0_total` is the throughput, and it has two equivalent readings.** The footprint has
+**zero infiltration** (the contract), so by mass balance every drop entering — boundary inflow
+plus rain falling on the footprint — must leave at a boundary exit or pond at an internal sink:
 
 ```
 inflow + on-footprint rain  =  Σ(boundary-exit flow)  +  Σ(internal-sink ponding)  =  O_0_total
 ```
 
-`_build_nbs_plan` sums `runoff` over **every** footprint drainage endpoint — boundary exits
-(`ds[1] ∉ footprint`) *and* internal depressions (flowgraph sinks) — skipping interior cells
-that drain to another footprint cell. So each drop is counted once, at its exit/sink, with
-its full accumulated flow, and `O_0_total` equals the **total live background input**. It only
-*looks* like an output name.
+Both sides are the same number. `_build_nbs_plan` evaluates the **left** (commit `bd7f0c5`):
+`Σ max(runoff, 0)` over `footprint_inflow_cells` — the flowgraph is single-successor, so each
+contributes its whole accumulated flow — plus `_footprint_rain` over the footprint. Both come
+from data already to hand: the cell lists `setup_network` cached on the placement, and the
+period's rain rate. No footprint walk, and `O_0_total` is the **total live background input**
+despite the output-sounding name.
 
-- **Precipitation is included** — folded into `O_0_total` via the `runoff` grid (`compute_flow`
-  accumulates rain), *not* as a separate `+precip` term. A separate term would double-count
-  the on-footprint rain that is already in the endpoint runoff.
+- **Precipitation is a separate term here, and is not a double-count.** The inflow cells lie
+  *outside* the footprint, so their runoff carries none of the footprint's own rain. (Adding
+  `+precip` to the *right*-hand reading **would** double-count, since endpoint runoff has the
+  rain already accumulated into it — that is what the earlier warning meant.)
 - `:nbsin` draws are the *network* flow (upstream network spills, upstream outlet discharge)
   arriving on `DynFlowPath`s. The oblivious grid excludes these, so `O_0_total + draws` does
   not double-count.
 
-**BUILT vs plan:** the plan proposed `I_bg = Σ runoff[footprint_inflow_cells]` (boundary
-inflow only) plus a separate precip term. That omits on-footprint rain and broke pass-through
-(see *History* below). Replaced by `O_0_total`, which is mass-consistent with the output
-baseline.
+**Three cuts, for the record:**
+1. *The plan:* `I_bg = Σ runoff[footprint_inflow_cells]` — boundary inflow **only**, no rain
+   term. Broke pass-through (see *History*): input and output baseline measured different water.
+2. *`fa21568`:* the **right**-hand reading — walk every footprint cell, sum `runoff` at each
+   drainage endpoint. Correct, and it restored the identity. But it re-derived endpoint
+   classification the placement already caches, and read `runoff` at every interior cell only to
+   throw it away.
+3. *`bd7f0c5`:* the **left**-hand reading — cut (1) *with* the rain term it was missing. Same
+   number as (2), straight from the cached input lists.
 
 ### `:nbsin` capture
 
@@ -83,15 +89,32 @@ from `_route_flow` and feeds the layer ODE.
 oblivious baseline `O_0`, distributed across the same endpoints the oblivious flow used:
 
 - **terrain endpoint** `e`: `diff_e = (O_terrain(V) − O_0_total) · ratio_e`,
-  `ratio_e = O_0[e] / O_0_total` (guard `O_0_total ≈ 0` → even split over endpoints). New total
-  at `e` `= O_0[e] + diff_e = O_terrain · ratio_e`.
-  - *boundary exit*: head-injected on the carrier path departing from the exit cell.
-  - *internal depression*: deposited straight into the accumulation trap (no path).
+  `ratio_e = w_e / Σw` with `w_e` the oblivious `runoff` **at the outlet cell itself** — the
+  receiving watercourse (guard `Σw ≈ 0` → even split over endpoints).
+  - *boundary exit*: `w_e = runoff[outlet cell]`, from `footprint_outflow_cells`; the diff is
+    head-injected on the carrier path departing that cell.
+  - *internal depression*: `w_e = runoff[ponding cell]`, from `internal_accumulation_cells`;
+    the diff is deposited straight into the accumulation trap (no path).
+
+  The weight is keyed on the **outlet**, not on the footprint cells feeding it: several may
+  feed one outlet, and they resolve to the same carrier and re-sum anyway, so splitting per
+  feeder bought nothing. `ratio_e` is only ever a normalised share, which is why it can be
+  measured on the outlet while `O_0_total` cannot — see below.
+
+  > **@@@ Weighting semantics.** `w_e` is the outlet's *total* oblivious flow, so it also
+  > carries the outlet cell's own rain and any flow converging on it from **outside** the
+  > footprint. `Σ ratio_e = 1` regardless, so the placement still emits exactly `O_terrain`
+  > and mass is conserved globally. But the per-endpoint identity of the earlier model
+  > (`new total at e = O_0[e] + diff_e = O_terrain · ratio_e`, which held when
+  > `ratio_e = O_0[e]/O_0_total`) no longer holds: with foreign flow converging on one outlet,
+  > that outlet draws a larger share of the re-emission than the placement's own oblivious flow
+  > through it would warrant. Deliberate — the share follows the receiving watercourse — but
+  > revisit if a footprint ever has outlets with very unequal foreign inflow.
 - **piped outlet** `l`: `+E_l(V)`, head-injected on the carrier path departing from the
   outlet cell.
 
-The diffs total `O_1 − O_0_total`. The terrain split math equals the old model's `−X·Q_c`
-(`Q_c = O_0[e]`); what changed is the dynamic, mass-consistent input `I_1` and that the diff
+The diffs total `O_1 − O_0_total` (`Σ ratio_e = 1`). What changed from the old model is the
+dynamic, mass-consistent input `I_1`, the outlet-keyed weighting above, and that the diff
 now rides the router.
 
 **BUILT vs plan — head injection, not `:nbsout` events.** The plan emitted the output diff as
@@ -153,14 +176,15 @@ identity is what makes a true pass-through NBS emit `diff ≈ 0`.
   `terrain_paths::[(carrier_path, ratio_e)]`, `terrain_traps::[(acc_trap, ratio_e)]`,
   `piped_paths::[(carrier_path, layer)]`.
 - `NBSPlan` — `elems`, `nlayer_total`.
-- `NBSRouting` — per-step scratch: `path_diff`, `trap_extra` (internal-depression deposits),
-  `nbs_draw` (router output = `:nbsin` captures).
-- `_build_nbs_plan` — endpoint walk → `O_0`, `O_0_total`, `ratio_e`, carrier paths.
+- `NBSRouting` — per-step scratch: `path_diff` (per path) and `trap_diff` (per trap) in,
+  `nbs_draw` (per placement) out = the `:nbsin` captures.
+- `_build_nbs_plan` — `O_0_total` from the input boundary (inflow cells + rain); `ratio_e`
+  weighted by the runoff at each outlet cell; carrier paths.
 - `_nbs_routing` — per-step output diffs from the live layer state → a fresh `NBSRouting`.
 - `_attenuate_range` (the one rule) / `_attenuate_diff` (whole-path), `_path_cell_values`,
   `DynNetworkRateParams.path_runoff` (always present — real grid or `−infiltration`).
 - `_path_event_templates` emits `:nbsin`; `_path_delivered!` walks cells against `path_runoff`
-  and handles the `:nbsin` draw; `_route_flow` seeds `trap_extra` and head-injects `path_diff`
+  and handles the `:nbsin` draw; `_route_flow` seeds `trap_diff` and head-injects `path_diff`
   into the signed `current`; `_routed_inflow` builds the `NBSRouting` and returns `nbs_draw`;
   the rate function drives layer-1 with `O_0_total + nbs_draw`.
 - **Deleted:** `NBSDelivery`, `_walk_to_trap`, `_apply_nbs_corrections!`,
