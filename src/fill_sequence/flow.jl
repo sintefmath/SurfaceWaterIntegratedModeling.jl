@@ -67,6 +67,14 @@ function compute_flow(spillgraph::SpillGraph,
 end
 
 # ----------------------------------------------------------------------------
+"""
+    _is_parent(target, source, tstruct) -> Bool
+
+True when `target` is `source`'s immediate parent in the agglomeration hierarchy, i.e. `source`
+spills by merging into the supertrap that subsumes it rather than by running over terrain.  That
+distinction decides whether flow is handed straight over or tracked downstream.  Nothing is
+mutated.
+"""
 function _is_parent(target, source, tstruct)
     parent = Graphs.outneighbors(tstruct.agglomerations, source)
     @assert isempty(parent) || length(parent) == 1
@@ -74,10 +82,16 @@ function _is_parent(target, source, tstruct)
 end
 
 # ----------------------------------------------------------------------------
+"""
+    _is_trap_bottom(cell, tstruct) -> Bool
+
+True when `cell` is the bottom of a trap, i.e. where arriving flow accumulates.
+
+A cell with no downstream neighbour that is not a sink and belongs to a non-negative region must
+be a trap bottom: a cell spilling out of the domain would belong to a negative region instead.
+Nothing is mutated.
+"""
 function _is_trap_bottom(cell, tstruct)
-    # if a cell has no outneighbors, is not a sink and belongs to a nonnegative
-    # region, it must be a trap bottom.  (If it were a cell spilling out of the
-    # domain, it would belong to a negative reion)
     @assert cell > 0
     return isempty(Graphs.outneighbors(tstruct.flowgraph, cell)) && 
         (tstruct.regions[cell] > 0) &&
@@ -91,15 +105,35 @@ end
 # end
 
 # ----------------------------------------------------------------------------
-function _is_sink(cell, tstruct)
-    #return cell > 0 && tstruct.spillfield[cell] == -3
+"""
+    _is_sink(cell, tstruct) -> Bool
 
+True when `cell` is one of the terrain's designated sinks, where water leaves the model rather
+than accumulating.  Always `false` when the structure defines no sinks.  Nothing is mutated.
+"""
+function _is_sink(cell, tstruct)
     # @@@ TODO: should this be optimized, to avoid creation of intermediary
     # CartesianIndices objects every time?
     return cell > 0 && (tstruct.sinks !== nothing) &&
         CartesianIndices(size(tstruct.topography))[cell] in tstruct.sinks
 end
 # ----------------------------------------------------------------------------
+"""
+    _track_flow!(rateinfo, node, amount, tstruct) -> Float64
+
+Propagate a signed `amount` of flow from trap `node`'s spillpoint downstream over the terrain,
+adding it to each cell's runoff until it is exhausted or the flow reaches a trap bottom, a sink,
+or the domain boundary.  Returns the amount still carried on arrival (`0.0` if it ran out).
+
+Each cell absorbs against its remaining infiltration capacity — a negative runoff — so the
+amount decays toward zero and stops once it changes sign.  Removal (a negative `amount`) is the
+mirror image, which is what lets `_update_flow!` retract a spill along the exact cells it filled.
+This is the terrain-side counterpart of the network solver's `_attenuate_range`, which builds on
+the grid this produces.
+
+**Mutates `rateinfo`**: the runoff of every cell traversed, the `Smin`/`Smax` of the supertraps
+over the arrival region, and — when the flow lands on a trap bottom — that region's inflow.
+"""
 function _track_flow!(rateinfo, node, amount, tstruct)
 
     initial_sign = sign(amount)
@@ -170,6 +204,17 @@ function _track_flow!(rateinfo, node, amount, tstruct)
 end
 
 # ----------------------------------------------------------------------------
+"""
+    _compute_initial_rateinfo(precipitation, infiltration, tstruct) -> RateInfo
+
+The [`RateInfo`](@ref) for a terrain with every trap empty: the baseline runoff field and each
+lowest-level trap's inflow, before any trap spills.  Scalar `precipitation` / `infiltration` are
+broadcast to the grid.
+
+Higher-level traps start at zero inflow — they only receive once their children fill.  The
+runoff field is NBS-oblivious; an NBS's effect is applied later as a signed correction inside
+the network solver.  Nothing is mutated; the `RateInfo` is freshly built.
+"""
 function _compute_initial_rateinfo(precipitation, infiltration, tstruct)
     if typeof(precipitation) <: Real
         precipitation = precipitation .* ones(size(tstruct.regions))
@@ -198,19 +243,26 @@ function _compute_initial_rateinfo(precipitation, infiltration, tstruct)
 end
 
 # ----------------------------------------------------------------------------
-# Maximum remaining infiltration capacity of a trap: the infiltration summed over its
-# footprint, EXCLUDING cells whose terrain lies at or above the trap's spillpoint.  Such
-# a cell never holds standing water while it is part of the trap (water reaching the spill
-# level flows out rather than pooling), so it carries no trap infiltration; excluding it
-# keeps the full-trap loss continuous at capacity and consistent with the dynamic network
-# solver (removing the fill/unfill chatter the discontinuity used to cause).  The test is
-# on the cell's actual terrain height — no need to raise the bottom to the subtrap
-# spillpoint as the volume/level code does, because a child's spillpoint is always <= the
-# parent's, so `max(topo, child_sp) < sp` reduces to `topo < sp` (and where they'd differ,
-# a degenerate zero-own-volume parent, the plain test is the correct one).  Explicit,
-# allocation-free loop — this runs per trap and is refreshed per event, so it must stay
-# cheap on large terrains.  `fill_trap_until` and `_build_trap_geometry` apply the same
-# `topography >= spillpoint` rule to their own footprints.
+"""
+    _ponding_infiltration(rateinfo, tstruct, trap) -> Float64
+
+Maximum remaining infiltration capacity of `trap`: its remaining per-cell capacity summed over
+the footprint, **excluding** cells whose terrain lies at or above the trap's spillpoint.  This
+is the trap's `Smax`.  Nothing is mutated.
+
+An excluded cell never holds standing water while part of the trap — water reaching the spill
+level flows out rather than pooling — so it carries no trap infiltration.  Excluding it keeps
+the full-trap loss continuous at capacity and consistent with the dynamic network solver,
+removing the fill/unfill chatter the discontinuity used to cause.  `fill_trap_until` and
+`_build_trap_geometry` apply the same `topography >= spillpoint` rule to their own footprints.
+
+The test is on the cell's actual terrain height; there is no need to raise the bottom to the
+subtrap spillpoint as the volume/level code does, because a child's spillpoint is always `<=`
+the parent's, so `max(topo, child_sp) < sp` reduces to `topo < sp` — and where they would
+differ (a degenerate zero-own-volume parent) the plain test is the correct one.  The loop is
+explicit and allocation-free: it runs per trap and is refreshed per event, so it must stay cheap
+on large terrains.
+"""
 function _ponding_infiltration(rateinfo, tstruct, trap)
     sp = Float64(tstruct.spillpoints[trap].elevation)   # concrete: Spillpoint.elevation is ::Real
     s  = 0.0
@@ -220,6 +272,20 @@ function _ponding_infiltration(rateinfo, tstruct, trap)
     return s
 end
 
+"""
+    _update_Smin_Smax!(rateinfo, tstruct, traps) -> nothing
+
+Recompute the infiltration bounds of each trap in `traps`, **mutating `rateinfo`**.
+
+`Smax` is the trap's full remaining capacity ([`_ponding_infiltration`](@ref)), incurred once it
+is full and its whole footprint is wetted.  `Smin` is the least it can lose — for a parent, the
+`Smax` of its immediate children, whose footprints are already submerged; zero for a leaf.  A
+trap's net inflow therefore lies between `inflow - Smax` and `inflow - Smin`, which is what makes
+the fill-sequence changetime estimate a bracket rather than an exact time.
+
+The two passes cannot be merged: every `Smax` must be final before any `Smin` reads its
+children's.
+"""
 function _update_Smin_Smax!(rateinfo, tstruct, traps)
 
     for i in traps
@@ -227,21 +293,24 @@ function _update_Smin_Smax!(rateinfo, tstruct, traps)
     end
 
     for i in traps
-        # minimum extra infiltration in submerged areas. For parent traps, this
-        # amounts to the sum of the Smax of the immediate children traps
         setsmin!(rateinfo, i, sum(getsmax(rateinfo, subtrapsof(tstruct, i))))
     end
 end
 
 # ----------------------------------------------------------------------------
-function _spills_to_parent(trap, tstruct, sgraph)
-    target = get(sgraph.edges, trap, 0)
-    parent = Graphs.outneighbors(tstruct.agglomerations, trap)
+"""
+    _update_flow!(rateinfo, graph_updates, tstruct, sgraph) -> nothing
 
-    return !isempty(parent) && parent[1] == target
-end
+Bring `rateinfo` up to date after the spillgraph changed, given `graph_updates` as one
+`(trap, (from, to))` diff per redirected edge.  **Mutates `rateinfo`**; `sgraph` is read as the
+already-updated graph.
 
-# ----------------------------------------------------------------------------
+Runs in two passes, and the order is load-bearing: every old flow is retracted before any new
+flow is added, so a trap whose inflow feeds a redirected edge is not counted under both routings.
+The retraction re-derives the old routing from the updates' `from` fields, since `sgraph` already
+holds the new one.  As each edge's outflow is fully deducted its entry is zeroed, stopping
+further upstream deduction across it.
+"""
 function _update_flow!(rateinfo, graph_updates, tstruct, sgraph)
 
     # When redirecting flow, we need to know the spill graph before updates happened.
@@ -283,7 +352,19 @@ end
 
 # ----------------------------------------------------------------------------
 """
-will modify rateinfo 
+    _propagate_amount!(rateinfo, trap, outflow, tstruct, sgraph; old_edges=nothing) -> nothing
+
+Push a signed `outflow` from `trap` along the spill chain, cascading downstream for as long as
+each target is itself full, and stopping at the first non-filled trap or the domain boundary.
+
+Each hop either hands the amount straight to a parent trap (a merge, no terrain involved) or
+tracks it over terrain via [`_track_flow!`](@ref), which may exhaust it en route — once it
+reaches zero the walk ends.  A negative `outflow` retracts a previous spill along the same
+chain.
+
+**Mutates `rateinfo`** (runoff, trap inflows, and `Smin`/`Smax` via `_track_flow!`).  Pass
+`old_edges` to walk the *pre-update* spillgraph, which is what makes retraction follow the route
+the water actually took; it falls back to `sgraph` for traps it does not name.
 """
 function _propagate_amount!(rateinfo, trap, outflow, tstruct, sgraph; old_edges=nothing)
 
