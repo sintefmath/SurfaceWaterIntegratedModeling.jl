@@ -350,12 +350,19 @@ end
 """
     _validate_network_inputs(tstruct, dyn_coords, culverts, nbs) -> nothing
 
-Error if any culvert endpoint or `dyn_coord` lies inside an NBS footprint.  An NBS replaces the
-surface flow over its footprint with its layer model, so a seed or culvert end there would have
-no well-defined flow to attach to.  Nothing is mutated.
+Error if a culvert endpoint, a `dyn_coord`, or a sink lies inside an NBS footprint.  An NBS
+replaces the surface flow over its footprint with its layer model, so nothing else may claim
+water there.  Nothing is mutated.
+
+The sink rule is load-bearing, not hygiene: `_build_nbs_plan` takes a placement's ponding
+endpoints from `internal_accumulation_cells`, which is `footprint ∩ trap_bottoms` — and a sink
+is deliberately *not* a trap bottom (`_is_trap_bottom` excludes it).  A sink inside a footprint
+would therefore terminate flow at a cell the plan never sees, silently dropping it from the
+placement's endpoints while it still counted toward the throughput.
 """
 function _validate_network_inputs(tstruct, dyn_coords, culverts, nbs)
-    nbs_footprints = vcat([n.footprint for n in nbs]...)
+    isempty(nbs) && return nothing
+    nbs_footprints = Set(vcat([n.footprint for n in nbs]...))
     LI = LinearIndices(tstruct.topography)
     for culvert in culverts
         if LI[culvert.inlet] in nbs_footprints || LI[culvert.outlet] in nbs_footprints
@@ -367,6 +374,14 @@ function _validate_network_inputs(tstruct, dyn_coords, culverts, nbs)
             error("Dynamic flow coordinate is inside an NBS footprint.")
         end
     end
+    for sink in tstruct.sinks
+        if LI[sink] in nbs_footprints
+            error("Sink cell $sink is inside an NBS footprint.  An NBS footprint must not " *
+                  "contain a sink: water terminating there is invisible to the placement's " *
+                  "ponding endpoints (internal_accumulation_cells covers trap bottoms only).")
+        end
+    end
+    return nothing
 end
 
 # ----------------------------------------------------------------------------

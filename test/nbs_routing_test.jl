@@ -131,3 +131,26 @@ end
     # storage rate = in − out − to-ground: no mass created or lost in the cascade
     @test isapprox(sum_dV, I_1 - O_surface - ground; atol = 1e-12, rtol = 1e-9)
 end
+
+@testset "NBS: a sink inside the footprint is rejected" begin
+    # `internal_accumulation_cells` (the plan's ponding endpoints) is footprint ∩ trap_bottoms,
+    # and a sink is deliberately not a trap bottom — so a sink inside a footprint would swallow
+    # flow the placement never accounts for.  setup_network must refuse it.
+    grid = Float64[j for i in 1:30, j in 1:30]
+    for i in 12:18, j in 3:6; grid[i, j] = 1.0; end
+    inside = CartesianIndex(15, 17)              # sits in _upstream_footprint's 12:18 × 15:20 block
+
+    ts_ok = spillanalysis(grid, usediags = true)
+    fp    = _upstream_footprint(ts_ok)
+    @test LinearIndices(size(ts_ok.topography))[inside] in fp     # the sink really is in the footprint
+    mk(t) = [SWIM.DynNBSPlacement(SWIM.puddle(1.0), fp, CartesianIndex{2}[])]
+
+    # same terrain, same footprint: accepted with no sink, refused once the sink is declared
+    @test setup_network(ts_ok, Int[]; nbs = mk(ts_ok)) isa Vector{SWIM.DynNetwork}
+    ts_sink = spillanalysis(grid, usediags = true, sinks = [inside])
+    @test_throws Exception setup_network(ts_sink, Int[]; nbs = mk(ts_sink))
+
+    # a sink outside every footprint stays legal
+    ts_out = spillanalysis(grid, usediags = true, sinks = [CartesianIndex(25, 25)])
+    @test setup_network(ts_out, Int[]; nbs = mk(ts_out)) isa Vector{SWIM.DynNetwork}
+end
