@@ -40,19 +40,39 @@ mutable struct DynNetworkContext
 end
 
 # ----------------------------------------------------------------------------
-# Each node's leaf spill regions, in `net.traps` order; the shared source for both inflow fields.
+"""
+    _node_leaf_regions(net, tstruct) -> Vector{Vector{Int}}
+
+Each node's leaf spill regions, in `net.traps` order.  A leaf trap and its spill region share
+an id, so these are what carry the terrain's inflow; the shared source for both inflow fields
+of a [`DynNetworkContext`](@ref).
+"""
 _node_leaf_regions(net::DynNetwork, tstruct) =
     [tstruct.lowest_subtraps_for[t.trap_ix] for t in net.traps]
 
-# Per-node external inflow, summed over leaves rather than `getinflow(node)`, whose parent
-# entries `_reconcile_spillgraph!` leaves stale.
+"""
+    _external_inflow(rateinfo, node_leaves) -> Vector{Float64}
+
+Per-node external inflow, in `node_leaves` order.  Summed over each node's leaves rather than
+read from `getinflow(node)`, whose parent entries `_reconcile_spillgraph!` leaves stale.
+"""
 _external_inflow(rateinfo, node_leaves) =
     Float64[sum(getinflow(rateinfo, leaf) for leaf in leaves) for leaves in node_leaves]
 
-# Flat set of the network's leaf regions, for the touch test.
+"""
+    _inflow_regions(node_leaves) -> Set{Int}
+
+The network's leaf regions, flattened across nodes.  Used by the touch test to spot an inflow
+change anywhere upstream of the network.
+"""
 _inflow_regions(node_leaves) = Set{Int}(Iterators.flatten(node_leaves))
 
-# All (transitive) sub-traps of `t`, walking the agglomeration hierarchy downward.
+"""
+    _descendants(tstruct, t) -> Vector{Int}
+
+All transitive sub-traps of `t`, walking the agglomeration hierarchy downward.  Excludes `t`
+itself.
+"""
 function _descendants(tstruct, t::Int)
     out   = Int[]
     stack = collect(subtrapsof(tstruct, t))
@@ -153,10 +173,15 @@ function _dyn_seeds(tstruct, dyn_traps, culverts)
     return unique!(seeds)
 end
 
-# The NBS layer-state block for `net`, read from the persistent `nbs_state` store in
-# `net.nbs` order (matching `_make_context`'s state layout and `_build_nbs_plan`'s
-# state_base offsets).  Each placement in `net.nbs` carries its own layer model and stable
-# `id`; a placement not yet in the store starts empty (zeros).
+"""
+    _nbs_layer_block(net, nbs_state) -> Vector{Float64}
+
+The NBS layer states for `net`, concatenated in `net.nbs` order — the layout `_make_context`
+appends after the trap volumes, matching `_build_nbs_plan`'s `state_base` offsets.
+
+Read from the persistent `nbs_state` store by each placement's stable `id`; a placement not yet
+in the store starts empty (zeros).  Nothing is mutated.
+"""
 function _nbs_layer_block(net::DynNetwork, nbs_state)
     block = Float64[]
     for nb in net.nbs

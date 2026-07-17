@@ -139,10 +139,17 @@ end
 # the path they join.  The router's output is the total inflow arriving at each trap.
 # ============================================================================
 
-# Combined topological order over path nodes (1:np) and trap nodes (np+1:np+nt).  Edges follow
-# the flow (trap→spill path, path→target trap, tributary→joined path).  Returns (order, np).
-# `net.traps` order alone doesn't fix the path/trap interleaving once tributaries exist, so the
-# combined graph is sorted.
+"""
+    _network_order(net) -> (order, np)
+
+Topological order over the combined path nodes (`1:np`) and trap nodes (`np+1 : np+nt`), so the
+router can visit each element only once everything upstream of it is known.
+
+Edges follow the flow: trap to its spill path, path to its target trap, tributary to the path it
+joins, and culvert inlet owner to outlet owner.  `net.traps` order alone doesn't fix the
+path/trap interleaving once tributaries exist, hence sorting the combined graph.  Nothing is
+mutated.
+"""
 function _network_order(net::DynNetwork)
     np = length(net.flow_paths)
     nt = length(net.traps)
@@ -163,8 +170,12 @@ function _network_order(net::DynNetwork)
 end
 
 # ----------------------------------------------------------------------------
-# `merge_target[p]` = the path that tributary `p` feeds into, or 0 if `p` is not a
-# tributary.  Each path is a tributary of at most one other, so this is well defined.
+"""
+    _merge_targets(net) -> Vector{Int}
+
+`merge_target[p]` is the path that tributary `p` feeds into, or `0` if `p` is not a tributary.
+Each path is a tributary of at most one other, so this is well defined.  Nothing is mutated.
+"""
 function _merge_targets(net::DynNetwork)
     merge_target = zeros(Int, length(net.flow_paths))
     for (a, path) in enumerate(net.flow_paths), (m, _) in path.merges
@@ -174,10 +185,17 @@ function _merge_targets(net::DynNetwork)
 end
 
 # ----------------------------------------------------------------------------
-# Culvert routing data.  Each culvert's inlet/outlet is owned by a flow path or a trap
-# (resolved at construction).  `CulvertPlan` precomputes, per culvert, which kind owns each
-# endpoint and its local index, the barrel diameter, and the two invert elevations.
+"""
+    CulvertPlan
 
+Static culvert routing data for one solve.  Each culvert endpoint is owned by either a flow path
+or a trap; this precomputes, per culvert, which kind owns each end and its local index, plus the
+barrel diameter and the two invert elevations — everything the rate function needs to price a
+culvert without re-deriving it each step.
+
+Fields are parallel vectors indexed by culvert: `diam`, `inlet_invert`, `outlet_invert`,
+`inlet_is_path` / `inlet_owner`, and `outlet_is_path` / `outlet_owner`.
+"""
 struct CulvertPlan
     diam::Vector{Float64}         # barrel diameter (2r) per culvert
     inlet_invert::Vector{Float64} # terrain elevation at each culvert's inlet cell
@@ -188,6 +206,12 @@ struct CulvertPlan
     outlet_owner::Vector{Int}     # local path or trap index owning the outlet
 end
 
+"""
+    _build_culvert_plan(net, tstruct) -> CulvertPlan
+
+Build the [`CulvertPlan`](@ref) for `net`: resolve each culvert's inlet and outlet to its owning
+flow path or trap, and read the invert elevations off the terrain.  Nothing is mutated.
+"""
 function _build_culvert_plan(net::DynNetwork, tstruct)
     nc   = length(net.culverts)
     plan = CulvertPlan([2 * cv.r for cv in net.culverts],
@@ -205,9 +229,15 @@ function _build_culvert_plan(net::DynNetwork, tstruct)
     return plan
 end
 
-# Add an inlet-owner -> outlet-owner edge per culvert to the routing-order graph, so
-# the inlet is routed before the outlet.  Construction already verified the network
-# is acyclic with these edges (see `_topological_order`).
+"""
+    _add_culvert_edges!(g, net, np) -> g
+
+Add an inlet-owner -> outlet-owner edge per culvert to the routing-order graph `g`, so each
+culvert's inlet is routed before its outlet and the drawn flow is known when it is delivered.
+
+**Mutates `g`**.  Assumes downhill culverts: the network is verified acyclic with these edges at
+construction, so a culvert running against the flow order would not sort.
+"""
 function _add_culvert_edges!(g, net::DynNetwork, np::Int)
     inlet_node  = zeros(Int, length(net.culverts))
     outlet_node = zeros(Int, length(net.culverts))
@@ -226,10 +256,17 @@ function _add_culvert_edges!(g, net::DynNetwork, np::Int)
     return g
 end
 
-# Per-path event stream for the culvert/NBS-aware router: tributary junctions, culvert
-# inlet/outlet positions, and NBS inlet (footprint-inflow) draw positions, sorted by cell
-# position, as `(position, :trib|:cvin|:cvout|:nbsin, idx)`.  Static for a solve, so built
-# once and reused every rate-function call.
+"""
+    _path_event_templates(net) -> Vector{Vector{Tuple{Int,Symbol,Int}}}
+
+Per-path event stream for the router: every tributary junction, culvert inlet/outlet, and NBS
+inlet draw position along each path, as `(position, kind, idx)` sorted by position, with `kind`
+one of `:trib`, `:cvin`, `:cvout`, `:nbsin`.
+
+Walking these in order is what lets the router charge each segment only the infiltration of the
+cells it actually crosses.  Static for a solve, so built once and reused every rate-function
+call.  Nothing is mutated.
+"""
 function _path_event_templates(net::DynNetwork)
     return [begin
                 ev = Tuple{Int,Symbol,Int}[]
@@ -243,10 +280,18 @@ function _path_event_templates(net::DynNetwork)
             for fp in net.flow_paths]
 end
 
-# Volumetric flow through culvert `ci` given the current trap water levels.  A flow-
-# path endpoint is treated as not-submerged with head fixed at the diameter (so its
-# inlet-control capacity is the weir capacity at head D); a trap endpoint uses its
-# live water level above the culvert's invert.  Downhill-only (no reverse flow).
+"""
+    _culvert_flow(plan, net, ci, trap_level) -> Float64
+
+Volumetric capacity (m^3/s) of culvert `ci` at the current trap water levels — what it *could*
+carry.  The flow actually drawn is capped by what is available at the inlet; see
+[`_route_flow`](@ref).
+
+A trap endpoint uses its live water level above the culvert's invert.  A flow-path endpoint has
+no pool, so it is treated as not-submerged with its head fixed at the diameter, making its
+inlet-control capacity the weir capacity at head `D`.  Downhill-only: `allow_reverse = false`,
+so a higher outlet pool yields 0 rather than reverse flow.  Nothing is mutated.
+"""
 function _culvert_flow(plan::CulvertPlan, net::DynNetwork, ci::Int,
                        trap_level::AbstractVector{<:Real})
     cv = net.culverts[ci]
@@ -301,12 +346,23 @@ function _route_flow(net::DynNetwork,
                        cvplan, trap_level)
 end
 
-# Flow delivered at the end of a path.  A signed `head_flow` travels the cells, attenuated per
-# cell against the oblivious residual `path_runoff` (spare capacity infiltrates it, saturated
-# cells pass it, symmetric in sign — see `_attenuate_range`).  At each `events` stop a tributary
-# adds its (signed) output, a culvert draws/adds at its cell, an NBS inlet intercepts the whole
-# passing flow into `nbs_draw`.  Cell `k`'s residual is charged on the segment leaving `k`,
-# matching the old infiltration-prefix convention.  Mutates `culvert_actual` and `nbs_draw`.
+"""
+    _path_delivered!(path_runoff, head_flow, events, trib_output, culvert_actual, cvplan, net,
+                     trap_level, nbs_draw) -> Float64
+
+Walk one flow path and return the flow delivered at its end.  A signed `head_flow` travels the
+cells, attenuated per cell against the oblivious residual `path_runoff` — spare capacity
+infiltrates it, saturated cells pass it, symmetric in sign (see `_attenuate_range`).
+
+At each stop in `events`: a tributary adds its signed output; a culvert outlet adds what its
+inlet actually drew; a culvert inlet draws `min(capacity, available)`; an NBS inlet intercepts
+the whole passing flow. Cell `k`'s residual is charged on the segment leaving `k`, matching the
+infiltration-prefix convention.
+
+**Mutates `culvert_actual`** (the drawn amount, which is exactly what the outlet later delivers
+— the mass-conservation invariant) and **`nbs_draw`** (accumulated signed interception; a
+negative draw is an upstream NBS's deficit).
+"""
 function _path_delivered!(path_runoff, head_flow, events,
                           trib_output, culvert_actual, cvplan, net, trap_level, nbs_draw)
     current = head_flow
@@ -330,10 +386,18 @@ function _path_delivered!(path_runoff, head_flow, events,
     return _attenuate_range(path_runoff, lo, length(path_runoff), current)
 end
 
-# Trap node: apply the culvert flows touching this trap (deliver what culverts
-# routed in drew; drain what culverts draining it carry), then, if it is full,
-# spill its surplus into its spill path.  Mutates `trap_inflow`, `path_flow`, and
-# `culvert_actual`.
+"""
+    _route_trap_node!(i, net, trap_inflow, path_flow, footprint_infil, spilling, cvplan,
+                      trap_level, culvert_actual) -> nothing
+
+Route trap `i`: apply the culvert flows touching it — deliver what culverts ending here drew at
+their inlets, drain what culverts starting here carry — then, if the trap is full, spill its
+surplus `max(inflow - footprint_infil, 0)` into its spill path.  A trap with `spill_path == 0`
+that is full spills out of the domain, so the surplus simply leaves.
+
+Mutates `trap_inflow[i]`, `path_flow` at the spill path, and `culvert_actual` for the culverts
+this trap feeds.
+"""
 function _route_trap_node!(i, net, trap_inflow, path_flow, footprint_infil,
                            spilling, cvplan, trap_level, culvert_actual)
     if cvplan !== nothing
@@ -355,9 +419,23 @@ function _route_trap_node!(i, net, trap_inflow, path_flow, footprint_infil,
     return nothing
 end
 
-# Core router, all static routing data pre-supplied.  Segmented routing charges flow
-# infiltration only over the cells it travels, so a tributary joining at junction j isn't
-# charged the main path's pre-junction infiltration.  No tributaries → one lump deduction.
+"""
+    _route_flow(net, external_inflow, spilling, footprint_infil, path_runoff,
+                external_path_inflow, path_events, order, merge_target,
+                cvplan = nothing, trap_level = nothing, nbsrt = nothing) -> Vector{Float64}
+
+Core router: the total inflow arriving at each trap, in `net.traps` order.  All static routing
+data is pre-supplied, so this is the form the rate function calls every step (the keyword method
+above is the convenience wrapper that derives it).
+
+Walks `order` — topologically sorted, so everything upstream of a node is final when it is
+visited — accumulating into per-trap and per-path totals.  Segmented routing charges flow the
+infiltration only of the cells it actually travels, so a tributary joining at junction `j` is
+not charged the main path's pre-junction losses.
+
+Nothing the caller owns is mutated: the accumulators are built fresh here.  `nbsrt` (when NBS
+are present) is written through — its `nbs_draw` collects the intercepted flow.
+"""
 function _route_flow(net::DynNetwork,
                      external_inflow::AbstractVector{<:Real},
                      spilling::AbstractVector{Bool},
@@ -433,8 +511,13 @@ function _path_cell_infiltration(net::DynNetwork, infiltration::AbstractMatrix{<
             for p in net.flow_paths]
 end
 
-# Per-cell oblivious runoff of each flow path (in `net.flow_paths` order), the grid sampled
-# along each path's cells — the read-only residual the router attenuates all flow against.
+"""
+    _path_cell_runoff(net, runoff) -> Vector{Vector{Float64}}
+
+Per-cell oblivious runoff of each flow path, in `net.flow_paths` order — the grid sampled along
+each path's cells.  This is the read-only residual [`_attenuate_range`](@ref) charges all flow
+against.  Nothing is mutated.
+"""
 function _path_cell_runoff(net::DynNetwork, runoff::AbstractMatrix{<:Real})
     return [isempty(p.cells) ? Float64[] : Float64[runoff[c] for c in p.cells]
             for p in net.flow_paths]
@@ -447,28 +530,6 @@ end
 # `DynNetworkRateParams` bundle everything static for a solve (geometry, external inflow,
 # infiltration sums, routing plan), so per-step work is just routing + a loop over traps.
 # ============================================================================
-
-"""
-    DynNetworkRateParams
-
-Static precomputed inputs to [`dynNetworkRateFunction!`](@ref) for one solve, built by
-[`_build_rate_params`](@ref) and passed as the `ODEProblem` parameter.  Indexed
-network-locally (`net.traps` / `net.flow_paths` order).
-
-# Fields
-- `net`: the [`DynNetwork`](@ref) being solved
-- `geom`: per-trap [`TrapGeometry`](@ref)
-- `external_inflow`: constant inflow per trap
-- `external_path_inflow`: constant inflow onto each flow path (e.g. rain on path cells)
-- `footprint_infil`: whole-footprint infiltration per trap
-- `path_runoff`: per-path oblivious residual runoff, the read-only reference the router
-  attenuates all flow against (real grid where available, else `-infiltration`)
-- `order`, `merge_target`: the static routing plan ([`_network_order`](@ref), [`_merge_targets`](@ref))
-- `path_events`: per-path in-order `(cell_pos, kind, idx)` stops — tributary junctions, plus
-  culvert inlet/outlet and NBS-inlet positions when the net has culverts / NBS
-- `cvplan`: culvert routing data (`nothing` if no culverts)
-- `nbsplan`: NBS signed-diff routing data (`nothing` if no NBS)
-"""
 
 # ============================================================================
 # NBS as a signed-diff router element (see agent/NBS_ROUTING_NODE_PLAN.md).
@@ -489,6 +550,24 @@ network-locally (`net.traps` / `net.flow_paths` order).
 # runoff by `_attenuate_diff` and delivered to the path's target trap, cascading onward via
 # the normal trap spill.  Fluxes are power-law in layer storage (`compute_outflow`), mm↔m^3
 # via `S_mm = V*1000/A`.
+
+"""
+    NBSElement
+
+One NBS placement, resolved into router terms for a solve (see the section header above for the
+signed-diff model).
+
+# Fields
+- `system`: the layered storage model ([`NBSSystem`](@ref))
+- `A`: footprint area (m^2), for `S_mm = V*1000/A`
+- `state_base`: 0-based offset of this element's layer block, after the `nt` trap states
+- `n_terrain`: number of top layers re-emitting at terrain rather than through a pipe
+- `O_0_total`: oblivious throughput, summed over drainage endpoints.  With zero footprint
+  infiltration this equals the background live input, so it also seeds the ODE
+- `terrain_paths`: `(carrier path, ratio_e)` per boundary-exit endpoint
+- `terrain_traps`: `(accumulation trap, ratio_e)` per internal-depression endpoint
+- `piped_paths`: `(carrier path, layer index)` per piped outlet
+"""
 struct NBSElement
     system    ::NBSSystem
     A         ::Float64                     # footprint area (m^2) for S_mm = V*1000/A
@@ -502,34 +581,57 @@ struct NBSElement
     piped_paths  ::Vector{Tuple{Int,Int}}      # (carrier path, layer index) per piped outlet
 end
 
+"""
+    NBSPlan
+
+Every [`NBSElement`](@ref) of a solve, plus `nlayer_total` — the number of layer states appended
+after the trap volumes, i.e. how much longer the ODE state is than the trap count.
+"""
 struct NBSPlan
     elems       ::Vector{NBSElement}
     nlayer_total::Int
 end
 
+# Below this, an NBS's oblivious throughput counts as zero and the terrain diff is split evenly
+# across endpoints rather than by ratio (which would be 0/0).
 const _NBS_O0_EPS = 1e-12
 
-# Number of appended NBS layer states for a rate-params object (0 when no NBS).
+"""
+    _nbs_state_count(p) -> Int
+
+Number of appended NBS layer states for a rate-params object; `0` when it has no NBS.
+"""
 _nbs_state_count(p) = p.nbsplan === nothing ? 0 : p.nbsplan.nlayer_total
 
-# Per-step NBS routing scratch threaded into the router.  `path_diff`/`trap_extra` carry the
-# signed output diffs (head-injected on the carrier path, or deposited straight into the
-# accumulation trap); `nbs_draw` is the router's output — the :nbsin flow captured into each
-# element's live input `I_1`.  (The attenuation reference `path_runoff` lives on the rate
-# params and is passed to the router directly.)
+"""
+    NBSRouting
+
+Per-step NBS routing scratch, threaded into the router and rebuilt each rate-function call.
+
+`path_diff` and `trap_extra` are inputs carrying the signed output diffs — head-injected on the
+carrier path, or deposited straight into the accumulation trap.  `nbs_draw` is the output: the
+`:nbsin` flow the router captured into each element's live input `I_1`.  The attenuation
+reference `path_runoff` is not here; it is static and lives on the rate params.
+"""
 struct NBSRouting
     path_diff  ::Vector{Float64}
     trap_extra ::Vector{Float64}
     nbs_draw   ::Vector{Float64}
 end
 
-# The one flow-tracking rule (mirrors `_track_flow!`, which builds the oblivious grid):
-# attenuate a signed flow `d` across cells `lo:hi` of `runoff` (oblivious residual per cell,
-# read-only) by `max(V+d,0) - max(V,0)`.  A cell with spare capacity (`V<0`) infiltrates the
-# flow until it vanishes; a cell already carrying background flow (`V>=0`) passes it unchanged;
-# symmetric for negative `d`.  Charging the residual (not the raw infiltration) is what avoids
-# re-charging a cell the background already saturated.  Used for all router flow — network
-# spills, tributary/culvert additions, and NBS output diffs alike.
+"""
+    _attenuate_range(runoff, lo, hi, d) -> Float64
+
+The one flow-tracking rule (mirroring `_track_flow!`, which builds the oblivious grid):
+attenuate a signed flow `d` across cells `lo:hi` of the read-only per-cell residual `runoff`,
+each cell applying `max(V+d, 0) - max(V, 0)`.
+
+A cell with spare capacity (`V < 0`) infiltrates the flow until it vanishes; a cell already
+carrying background flow (`V >= 0`) passes it unchanged; negative `d` is symmetric.  Charging
+the *residual* rather than the raw infiltration is what avoids re-charging a cell the background
+already saturated.  Used for all router flow alike — network spills, tributary and culvert
+additions, and NBS output diffs.  Nothing is mutated.
+"""
 function _attenuate_range(runoff, lo::Int, hi::Int, d::Float64)
     @inbounds for k in lo:hi
         V = runoff[k]
@@ -538,14 +640,30 @@ function _attenuate_range(runoff, lo::Int, hi::Int, d::Float64)
     return d
 end
 
-# Whole-path attenuation (NBS unit test and any full-vector caller).
+"""
+    _attenuate_diff(runoff, d) -> Float64
+
+[`_attenuate_range`](@ref) over a whole path — the convenience form for full-vector callers and
+the NBS unit tests.
+"""
 _attenuate_diff(runoff::AbstractVector{<:Real}, d::Float64) =
     _attenuate_range(runoff, 1, length(runoff), d)
 
-# Build the NBS plan for `net` (nothing when it has no NBS), reading the oblivious `runoff`
-# grid to resolve each element's oblivious output `O_0` per drainage endpoint (which sums to
-# the throughput `O_0_total` that also seeds the ODE) and the carrier paths that head-inject
-# its output diffs.  The layer models and their ODE-state layout come straight off `net.nbs`.
+"""
+    _build_nbs_plan(net, tstruct, runoff) -> NBSPlan or nothing
+
+Build the [`NBSPlan`](@ref) for `net`, or `nothing` when it has no NBS.
+
+Reads the oblivious `runoff` grid to resolve, per placement, its oblivious output `O_0` at each
+drainage endpoint — summing to the throughput `O_0_total` that also seeds the ODE — and the
+carrier path that head-injects each output diff.  Endpoints are classified as boundary exits
+(flow crosses out of the footprint onto a carrier path) or internal depressions (a sink, whose
+share deposits into the covering trap); a domain-exit sink's share simply leaves.  The layer
+models and their ODE-state layout come straight off `net.nbs`.
+
+Nothing is mutated.  Asserts the coupling invariants: an internal depression must be covered by
+a network trap, and a boundary-exit cell must have a carrier path departing it (it is a seed).
+"""
 function _build_nbs_plan(net::DynNetwork, tstruct, runoff::AbstractMatrix{<:Real})
     isempty(net.nbs) && return nothing
     g  = tstruct.flowgraph
@@ -613,10 +731,18 @@ function _build_nbs_plan(net::DynNetwork, tstruct, runoff::AbstractMatrix{<:Real
     return NBSPlan(elems, base)
 end
 
-# The signed output diffs of every NBS element at state `V`, laid into a fresh `NBSRouting`
-# (with `path_runoff` and a zeroed `nbs_draw`) ready to thread through the router.  Terrain:
-# `(O_terrain(V) - O_0_total)*ratio_e` head-injected on each carrier path / deposited into
-# each accumulation trap; piped: `+E_l(V)` head-injected on the outlet's carrier path.
+"""
+    _nbs_routing(V, p, nt, np) -> NBSRouting
+
+The signed output diffs of every NBS element at state `V`, laid into a fresh [`NBSRouting`](@ref)
+with a zeroed `nbs_draw`, ready to thread through the router.
+
+Terrain re-emission contributes `(O_terrain(V) - O_0_total) * ratio_e`, head-injected on each
+carrier path or deposited into each accumulation trap; each piped outlet contributes `+E_l(V)`
+head-injected on its carrier path.  Emitting the *diff* over the oblivious baseline is what
+keeps `external_inflow`'s `O_0` from being double-counted.  Nothing is mutated; the scratch is
+allocated per call.
+"""
 function _nbs_routing(V, p, nt::Int, np::Int)
     path_diff  = zeros(Float64, np)
     trap_extra = zeros(Float64, nt)
@@ -642,6 +768,27 @@ function _nbs_routing(V, p, nt::Int, np::Int)
 end
 
 # ----------------------------------------------------------------------------
+"""
+    DynNetworkRateParams
+
+Static precomputed inputs to [`dynNetworkRateFunction!`](@ref) for one solve, built by
+[`_build_rate_params`](@ref) and passed as the `ODEProblem` parameter.  Indexed
+network-locally (`net.traps` / `net.flow_paths` order).
+
+# Fields
+- `net`: the [`DynNetwork`](@ref) being solved
+- `geom`: per-trap [`TrapGeometry`](@ref)
+- `external_inflow`: constant inflow per trap
+- `external_path_inflow`: constant inflow onto each flow path (e.g. rain on path cells)
+- `footprint_infil`: whole-footprint infiltration per trap
+- `path_runoff`: per-path oblivious residual runoff, the read-only reference the router
+  attenuates all flow against (real grid where available, else `-infiltration`)
+- `order`, `merge_target`: the static routing plan ([`_network_order`](@ref), [`_merge_targets`](@ref))
+- `path_events`: per-path in-order `(cell_pos, kind, idx)` stops — tributary junctions, plus
+  culvert inlet/outlet and NBS-inlet positions when the net has culverts / NBS
+- `cvplan`: culvert routing data (`nothing` if no culverts)
+- `nbsplan`: NBS signed-diff routing data (`nothing` if no NBS)
+"""
 struct DynNetworkRateParams
     net::DynNetwork                       # The network being solved
     geom::Vector{TrapGeometry}            # struct holding info about trap's geometry
@@ -713,10 +860,17 @@ function _build_rate_params(tstruct::TrapStructure,
 end
 
 # ----------------------------------------------------------------------------
-# Routed inflow into every trap at state `V`, which traps are full (spilling), and the NBS
-# live input draws (`nbs_draw`, or `nothing` with no NBS).  Shared by the rate function and
-# the :unspill condition.  With NBS, the signed output diffs are folded into the routing via
-# `nbsrt`; the :nbsin flow captured during routing comes back in `nbsrt.nbs_draw`.
+"""
+    _routed_inflow(V, p) -> (inflow, spilling, nbs_draw)
+
+Route the network at state `V`: the total inflow arriving at every trap, which traps are full
+(and so spilling), and the NBS live-input draws (`nothing` when the net has no NBS).
+
+Shared by the rate function and the `:unspill` event condition, so the two cannot disagree.
+With NBS the signed output diffs are folded into the routing via `nbsrt`, and the `:nbsin` flow
+captured during routing comes back in `nbsrt.nbs_draw`.  Nothing the caller owns is mutated;
+scratch is allocated per call.
+"""
 function _routed_inflow(V, p::DynNetworkRateParams)
     geom = p.geom
     nt   = length(geom)
@@ -823,7 +977,13 @@ end
 #    would give spurious crossings.  Vetoes when any evolving trap is at V >= C (:fill wins).
 # ============================================================================
 
-# One monitored topology event condition (:fill/:empty/:unspill) on a network-local `trap`.
+"""
+    EventCondition
+
+One monitored topology event — its `kind` (`:fill`, `:empty` or `:unspill`) and the
+network-local `trap` it watches.  The solve's `VectorContinuousCallback` monitors one scalar
+condition per entry.
+"""
 struct EventCondition
     kind::Symbol
     trap::Int
@@ -843,9 +1003,15 @@ end
 DynNetworkEvent() = DynNetworkEvent(:none, 0)
 
 # ----------------------------------------------------------------------------
-# The monitored conditions: :fill per evolving trap, :empty per evolving parent (a leaf at V=0
-# is just its floor, no topology change), :unspill per full trap.  (LeftRootFind rationale: see
-# the section header.)
+"""
+    _event_conditions(p, evolving, nreg) -> Vector{EventCondition}
+
+The topology events to monitor for this solve: `:fill` per evolving trap, `:empty` per evolving
+*parent* trap, and `:unspill` per full trap.
+
+A leaf reaching `V = 0` is just sitting at its floor rather than changing topology, so only
+parents (`trap_ix > nreg`) get `:empty`.  Nothing is mutated.
+"""
 function _event_conditions(p::DynNetworkRateParams,
                            evolving::AbstractVector{<:Integer},
                            nreg::Int)
@@ -864,10 +1030,18 @@ function _event_conditions(p::DynNetworkRateParams,
 end
 
 # ----------------------------------------------------------------------------
-# Steady-state detector (NBS-free): fires at the first accepted step where max|dV/dt| across
-# the evolving traps drops below abstol.  Discrete because wetted_infiltration is a step
-# function of V (interpolated mid-step states give spurious crossings).  Vetoes if any evolving
-# trap is at V >= C (the :fill VCB terminates first).
+"""
+    _build_steadystate_callback(p, evolving, abstol, du0) -> DiscreteCallback
+
+Steady-state detector for an NBS-free network: terminates at the first accepted step where every
+evolving trap's rate has settled — either `|dV/dt| < abstol`, or its rate has crossed the sign
+it started at (`du0`), meaning a trap oscillating across a wetted-infiltration step has reached
+a sub-capacity equilibrium; the multi-trap analogue of `fill_trap_until`'s stagnation stop.
+
+Discrete rather than continuous because `wetted_infiltration` is a step function of `V`, so
+interpolated mid-step states would give spurious crossings.  Vetoes while any evolving trap sits
+at `V >= C`, letting the `:fill` condition terminate instead.
+"""
 function _build_steadystate_callback(p::DynNetworkRateParams,
                                      evolving::AbstractVector{<:Integer},
                                      abstol::Real,
@@ -897,9 +1071,14 @@ function _build_steadystate_callback(p::DynNetworkRateParams,
     return DiscreteCallback(condition, terminate!; save_positions = (false, false))
 end
 
-# Steady-state detector with NBS: the `_routed_inflow` check can't express the layer dynamics,
-# so evaluate the full rate function and settle when |dV/dt| < abstol (or a sign flip) across
-# every `ss_indices` (evolving traps + NBS layer states).  A spilling trap still vetoes.
+"""
+    _build_steadystate_callback_nbs(p, ss_indices, abstol, du0) -> DiscreteCallback
+
+Steady-state detector for a network with NBS.  The cheap `_routed_inflow` check can't express
+the layer dynamics, so this evaluates the full rate function and settles only when every index
+in `ss_indices` — the evolving traps plus the NBS layer states — has `|dV/dt| < abstol` or has
+flipped sign against `du0`.  A trap at capacity still vetoes, letting `:fill` terminate.
+"""
 function _build_steadystate_callback_nbs(p::DynNetworkRateParams,
                                          ss_indices::AbstractVector{<:Integer},
                                          abstol::Real,
@@ -967,8 +1146,17 @@ function _build_event_callback(p::DynNetworkRateParams,
 end
 
 # ----------------------------------------------------------------------------
-# Enforce the three-state caller contract (see [`solveDynNetwork!`](@ref)) before a solve;
-# throws an informative error on the first violation.
+"""
+    _validate_network(tstruct, net, state, geom) -> nothing
+
+Enforce the three-state caller contract (FULL / TRANSITORY / EMPTY — see
+[`solveDynNetwork!`](@ref)) before a solve, throwing an informative error on the first
+violation.  Nothing is mutated.
+
+Checks that a FULL trap has a spill path and that a FULL parent's in-network children are FULL
+too, and that a TRANSITORY trap has none.  A parent at `V == 0` is TRANSITORY, not EMPTY: it
+subsumes its full children, so zero is its own-volume floor with the children submerged.
+"""
 function _validate_network(tstruct::TrapStructure,
                            net::DynNetwork,
                            state::AbstractVector{<:Real},
@@ -1011,10 +1199,17 @@ function _validate_network(tstruct::TrapStructure,
     end
 end
 
-# t=0 fast paths: an immediate event (no integration) when the entry state cannot be held,
-# else `nothing`.  A FULL trap already draining (du0<0) unspills; a parent at its floor (V==0)
-# with negative net inflow must expose its children now.  `du0`'s floor guard zeroes the rate
-# at V==0, so the parent check recomputes the unclamped net rate.
+"""
+    _t0_fast_path(V0, du0, p, nreg) -> (; time, trap, kind) or nothing
+
+An immediate `t = 0` event when the entry state cannot be held, letting the caller skip
+integration entirely; `nothing` when the state is viable and the ODE should run.
+
+A FULL trap already draining (`du0 < 0`) unspills at once; a parent at its floor (`V == 0`) with
+negative net inflow must expose its children now.  The parent check recomputes the *unclamped*
+net rate, since `du0`'s physical floor guard has already zeroed the rate at `V == 0`.  Nothing
+is mutated; `trap` is a global trap index.
+"""
 function _t0_fast_path(V0, du0, p::DynNetworkRateParams, nreg::Int)
     nt = length(p.geom)
     for i in 1:nt

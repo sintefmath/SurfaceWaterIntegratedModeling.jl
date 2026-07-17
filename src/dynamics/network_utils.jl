@@ -20,8 +20,16 @@ function split_network_into_connected_components(net::DynNetwork, tstruct)
             for nodes in Graphs.connected_components(g)]
 end
 
-# Undirected graph over path nodes (1:np) and trap nodes (np+1:np+nt); an edge
-# means the two elements must live in the same component.
+"""
+    _coupling_graph(net, np, nbs_coupled) -> Graphs.SimpleGraph
+
+Undirected graph whose connected components are the independently-solvable subnetworks.  Nodes
+are the flow paths (`1:np`) then the traps (`np+1 : np+nt`); an edge means the two elements are
+hydraulically coupled and must be solved together.
+
+Edges come from flow links (path to its target trap, trap to its spill path), merges, and the
+culverts and NBS placements that tie otherwise-separate elements together.  Nothing is mutated.
+"""
 function _coupling_graph(net::DynNetwork, np::Int, nbs_coupled)
     g = Graphs.SimpleGraph(np + length(net.traps))
     tnode(t) = np + t
@@ -40,8 +48,13 @@ end
 # Connect a set of nodes into one component (a chain suffices for connectivity).
 _link_all!(g, nodes) = for i in 2:length(nodes); Graphs.add_edge!(g, nodes[1], nodes[i]); end
 
-# For each culvert, the path/trap nodes hosting its inlet or outlet (both sides
-# must share a component, so the culvert unites its owners).
+"""
+    _culvert_owner_nodes(net, np) -> Vector{Vector{Int}}
+
+For each culvert, the coupling-graph nodes hosting its inlet or outlet.  A culvert moves water
+between its ends, so both sides must share a component — the caller links each list into one.
+Nothing is mutated.
+"""
 function _culvert_owner_nodes(net::DynNetwork, np::Int)
     owners = [Int[] for _ in net.culverts]
     for (p, fp) in enumerate(net.flow_paths), (c, _) in vcat(fp.culvert_inlets, fp.culvert_outlets)
@@ -53,9 +66,16 @@ function _culvert_owner_nodes(net::DynNetwork, np::Int)
     return owners
 end
 
-# Nodes causally coupled to each NBS (must share its component): outlet paths, outflow
-# paths, inflow paths, and the accumulation trap.  An outflow cell is a seed so it is the
-# path's first cell; an inflow cell is not, so match it anywhere on the path.
+"""
+    _nbs_coupled_nodes(net, tstruct, np) -> Vector{Vector{Int}}
+
+For each NBS placement, the coupling-graph nodes causally tied to it and so required to share
+its component: its outlet paths, the paths leaving its footprint, the paths entering it, and
+its internal-accumulation trap.
+
+An outflow cell seeds a path, so it is matched against the path's `departure_point`; an inflow
+cell is crossed mid-path, so it is matched anywhere in `cells`.  Nothing is mutated.
+"""
 function _nbs_coupled_nodes(net::DynNetwork, tstruct, np::Int)
     coupled = [Int[] for _ in net.nbs]
     outflow = [Set(n.footprint_outflow_cells) for n in net.nbs]
@@ -76,10 +96,16 @@ function _nbs_coupled_nodes(net::DynNetwork, tstruct, np::Int)
     return [unique!(v) for v in coupled]
 end
 
-# Unite each NBS with the network trap holding its internal-accumulation cells.
-# Cells map to lowest-level regions (direct `regions` lookup; dedup absorbs flat,
-# many-celled bottoms), each region to the one network trap in its supertrap
-# hierarchy.
+"""
+    _add_accumulation_traps!(coupled, net, tstruct, np) -> nothing
+
+Unite each NBS with the network trap holding its internal-accumulation cells — water ponding
+inside the footprint is that trap's, so the two must solve together.
+
+Cells map to lowest-level regions by direct `regions` lookup (dedup absorbs flat, many-celled
+bottoms), and each region to the single network trap in its supertrap hierarchy; that
+uniqueness is asserted.  **Mutates `coupled`**, appending the trap node to each NBS's list.
+"""
 function _add_accumulation_traps!(coupled, net::DynNetwork, tstruct, np::Int)
     tnode = Dict(t.trap_ix => np + l for (l, t) in enumerate(net.traps))
     for (n, nb) in enumerate(net.nbs)
@@ -91,8 +117,15 @@ function _add_accumulation_traps!(coupled, net::DynNetwork, tstruct, np::Int)
     end
 end
 
-# Rebuild one component as a standalone DynNetwork, remapping every cross-reference
-# (target traps, spill paths, merges, culverts, NBS) to local 1-based indices.
+"""
+    _build_subnetwork(net, nodes, np, nbs_coupled) -> DynNetwork
+
+Rebuild the component spanning `nodes` as a standalone [`DynNetwork`](@ref), remapping every
+cross-reference — target traps, spill paths, merges, culverts, NBS — from `net`'s indices to
+local 1-based ones, so the result is solvable without reference to `net`.
+
+`net` is not mutated, though the new paths alias its `cells` vectors by reference.
+"""
 function _build_subnetwork(net::DynNetwork, nodes::Vector{Int}, np::Int, nbs_coupled)
     nodeset = Set(nodes)
     pids = sort!([n      for n in nodes if n <= np])
@@ -112,6 +145,12 @@ end
 
 _local_index(global_ids) = Dict(g => l for (l, g) in enumerate(global_ids))
 
+"""
+    _referenced_culverts(net, pids, tids) -> Vector{Int}
+
+The sorted, deduplicated ids of every culvert with an inlet or outlet on the given paths
+(`pids`) or traps (`tids`) — the culverts a component must carry.  Nothing is mutated.
+"""
 function _referenced_culverts(net::DynNetwork, pids, tids)
     cv = Int[]
     for g in pids, (c, _) in vcat(net.flow_paths[g].culvert_inlets, net.flow_paths[g].culvert_outlets)
@@ -126,6 +165,13 @@ end
 # Sentinels pass through unchanged: 0 = none, -1 = out-of-domain (trap spill only).
 _relabel(ix, m) = ix <= 0 ? ix : m[ix]
 
+"""
+    _localize_path(fp, tmap, cvmap, nbsmap, pmap) -> DynFlowPath
+
+Copy of `fp` with every reference relabelled from global to component-local indices, via the
+supplied trap / culvert / NBS / path maps.  `cells` and `departure_point` are terrain
+coordinates and carry over unchanged.  Nothing is mutated.
+"""
 function _localize_path(fp::DynFlowPath, tmap, cvmap, nbsmap, pmap)
     DynFlowPath(fp.cells, fp.departure_point,
                 _relabel(fp.target_trap, tmap),
@@ -136,6 +182,13 @@ function _localize_path(fp::DynFlowPath, tmap, cvmap, nbsmap, pmap)
                 [(pmap[m],   j)   for (m, j)   in fp.merges])
 end
 
+"""
+    _localize_trap(tr, pmap, cvmap) -> DynTrap
+
+Copy of `tr` with its spill path and culvert ids relabelled to component-local indices.
+`trap_ix` is a `TrapStructure` index and stays global; `in_count` carries over because a trap's
+feeders all live in its own component.  Nothing is mutated.
+"""
 function _localize_trap(tr::DynTrap, pmap, cvmap)
     lt = DynTrap(tr.trap_ix,
                  _relabel(tr.spill_path, pmap),

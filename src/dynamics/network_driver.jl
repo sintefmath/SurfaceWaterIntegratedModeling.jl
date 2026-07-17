@@ -78,15 +78,23 @@ function build_network_driver(tstruct, dyn_coords, culverts, full_traps, cur_amo
     return driver
 end
 
-# Returns a function giving the current water volume for a given trap `g`.
-#   * a full trap sits at its exact own capacity `C`;
-#   * a node already in `vol_by_trapix` takes its already computed volume;
-#   * a newly-absorbed trap has a `cur_amounts` entry that generally was computed at some time
-#     in the past, so project it forward to `cur_time` under the saved inflow.
-# NB: A non-full trap is a transitory frontier (`spill_path == 0`) that must hold `V < capacity`,
-# so its seed is clamped to `prevfloat(C)`: when several traps reach `C` in the same instant,
-# only one fires per event and the rest stay transitory until their `:fill` fires on the next
-# predict (mass preserved to a ULP).
+"""
+    _driver_state0(driver, tstruct, rateinfo, cur_amounts, full_set, cur_time, z_vol_tables)
+        -> Function
+
+Build the `state0(g)` closure that seeds a context with trap `g`'s committed volume at
+`cur_time`, from three sources in order: a full trap sits at its exact own capacity `C`; a node
+already in `driver.vol_by_trapix` takes its committed volume; a newly-absorbed trap has a
+`cur_amounts` entry generally computed some time in the past, so it is projected forward to
+`cur_time` under its saved inflow.
+
+A non-full trap is a transitory frontier (`spill_path == 0`) that must hold `V < capacity`, so
+its seed is clamped to `prevfloat(C)`.  When several traps reach `C` in the same instant only
+one fires per event; the rest stay transitory until their own `:fill` fires on the next predict
+(mass preserved to a ULP).
+
+Nothing is mutated — the closure only reads `driver.vol_by_trapix`.
+"""
 function _driver_state0(driver::NetworkDriver, tstruct, rateinfo, cur_amounts, full_set,
                         cur_time, z_vol_tables)
     project(g) = first(fill_trap_until(g, rateinfo, cur_amounts[g], cur_time,
@@ -98,8 +106,17 @@ function _driver_state0(driver::NetworkDriver, tstruct, rateinfo, cur_amounts, f
     end
 end
 
-# Rebuild every context from the current `comps` and committed volumes and re-predict.  A
-# context is a pure function of its component + committed volumes, so a full rebuild is correct.
+"""
+    _rebuild_contexts!(driver, tstruct, rateinfo, infiltration, z_vol_tables, cur_amounts,
+                       full_set, cur_time, endtime) -> driver
+
+Discard `driver.contexts` and rebuild one context per current component, each seeded from the
+committed volumes and re-predicted out to `endtime`.  A context is a pure function of its
+component plus those volumes, so a full rebuild is correct after any structural change.
+
+Mutates `driver.contexts` (replaced wholesale); the committed volumes and NBS layers it reads
+are left as they are.
+"""
 function _rebuild_contexts!(driver::NetworkDriver, tstruct, rateinfo, infiltration,
                             z_vol_tables, cur_amounts, full_set, cur_time, endtime)
 
@@ -114,8 +131,13 @@ function _rebuild_contexts!(driver::NetworkDriver, tstruct, rateinfo, infiltrati
     return driver
 end
 
-# The earliest predicted event across all components as `(ctx_index, next_event)`, or `nothing`
-# when every component predicts `:none`.
+"""
+    _driver_next_event(driver) -> (ctx_index, next_event) or nothing
+
+The earliest predicted event across all components, as the index of the owning context and its
+`(; time, trap, kind)` prediction.  `nothing` when every component predicts `:none`.  Reads the
+cached predictions; nothing is mutated or re-solved.
+"""
 function _driver_next_event(driver::NetworkDriver)
     best_i = 0
     best_t = Inf
@@ -131,8 +153,16 @@ function _driver_next_event(driver::NetworkDriver)
     return (best_i, driver.contexts[best_i].next_event)
 end
 
-# Read every committed context back into the persistent stores (node volumes -> `vol_by_trapix`,
-# NBS layers -> `nbs_state`), so they survive the structural mutation that follows.
+"""
+    _harvest!(driver) -> driver
+
+Read every committed context back into the driver's persistent stores — node volumes into
+`vol_by_trapix`, NBS layers into `nbs_state` — so they survive the structural mutation that
+follows and can reseed the rebuilt contexts.
+
+Mutates `driver.vol_by_trapix` and `driver.nbs_state`; the contexts are read only.  Call only
+once the contexts are committed to the intended time, as it takes their state at face value.
+"""
 function _harvest!(driver::NetworkDriver)
     for ctx in driver.contexts
         for (i, g) in enumerate(ctx.global_ix)

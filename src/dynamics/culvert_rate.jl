@@ -18,10 +18,18 @@
 
 export culvert_rate
 
-# Non-negative capacity for a single flow direction, from the upstream end to the
-# downstream end.  Each end is (submerged?, head above invert, invert elevation),
-# but only the *upstream* submergence matters -- it selects weir vs orifice at the
-# entrance.  The entrance-loss coefficient cv.Ke is used symmetrically.
+"""
+    _directional_capacity(cv, up_submerged, up_head, up_z, down_head, down_z) -> Float64
+
+Non-negative flow capacity (m^3/s) for a single direction, from the upstream end to the
+downstream end.  Each end is given as a head above its invert and that invert's elevation.
+
+Returns `min(Q_inlet, Q_outlet)` — the more restrictive of inlet and outlet control, i.e. the
+bottleneck that physically governs.  Only the *upstream* submergence matters: it selects weir
+(free entrance) versus orifice (submerged entrance) at the inlet.  The entrance-loss
+coefficient `cv.Ke` is applied symmetrically, so callers get a hydraulically symmetric culvert
+by swapping the ends.  Pure; nothing is mutated.
+"""
 function _directional_capacity(cv::DynCulvert,
                                up_submerged::Bool, up_head, up_z,
                                down_head, down_z)

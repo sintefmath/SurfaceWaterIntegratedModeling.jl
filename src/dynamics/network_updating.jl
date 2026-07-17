@@ -66,11 +66,17 @@ function detach_spill!(net::DynNetwork, trap_id::Int)
     return detached_ix
 end
 
-# Remove the dead nodes a detach cascade leaves in `net` — tombstoned paths
-# (departure_point == (0,0)) and traps with in_count == 0 — and reindex the survivors'
-# cross-references, in place.  Culverts/NBS are untouched (a detach removes none).
-# DynNetwork/DynTrap are mutable, so the vectors are reassigned and spill_path is patched
-# directly; each DynFlowPath slot is rebuilt.  Returns `net`, mutated.
+"""
+    _compact!(net) -> net
+
+Drop the dead elements a detach left behind — tombstoned paths (`departure_point == (0,0)`) and
+traps with `in_count == 0` — and reindex the survivors' cross-references.
+
+Mutates and returns `net`: `flow_paths` and `traps` are reassigned to the compacted vectors and
+`spill_path` / `target_trap` / `merges` are relabelled.  Culverts and NBS are untouched, since a
+detach removes none.  Local indices therefore change; callers hand back stable `trap_ix` values
+instead.
+"""
 function _compact!(net::DynNetwork)
     live_p = [p for p in eachindex(net.flow_paths)
               if net.flow_paths[p].departure_point != CartesianIndex(0, 0)]
@@ -89,19 +95,31 @@ function _compact!(net::DynNetwork)
     return net
 end
 
-# The orphaned spill path `path_id` lost its head trap: promote its uppermost live tributary,
-# else kill it.  `detached` is an accumulator, appended with the local indices of traps that
-# lose all feeds as the kill cascades downstream.
+"""
+    _reroot_or_kill_path!(net, path_id, detached) -> nothing
+
+The orphaned spill path `path_id` lost its head trap: promote its uppermost live tributary to
+take over the downstream role, or kill the path outright if it has none.
+
+Mutates `net` and appends to `detached`, the accumulator collecting the local indices of traps
+that lose all their feeds as a kill cascades downstream.
+"""
 function _reroot_or_kill_path!(net::DynNetwork, path_id::Int, detached::Vector{Int})
     m = _uppermost_merge(net.flow_paths[path_id])
     m === nothing ? _kill_path!(net, path_id, detached) : _promote_tributary!(net, path_id, m[2], m[1])
 end
 
-# Uppermost tributary merging into this path, as (tributary_path, junction_pos), or nothing.
-# Only merges feed a re-root: a culvert/NBS outlet is always seeded as its own connector
-# path, which enters an intersected path as a co-located merge (or heads its own source
-# path), so an outlet never needs promoting on its own — the merge already covers it.
-# culvert_inlets draw rather than feed, so they are irrelevant here too.
+"""
+    _uppermost_merge(fp) -> (tributary_path, junction_pos) or nothing
+
+The tributary merging into `fp` highest up its length, or `nothing` if it has none.  Nothing is
+mutated.
+
+Only merges can feed a re-root.  A culvert or NBS outlet is always seeded as its own connector
+path, which enters an intersected path as a co-located merge (or heads its own source path), so
+an outlet never needs promoting on its own — the merge already covers it.  Culvert inlets draw
+rather than feed, so they are irrelevant here too.
+"""
 function _uppermost_merge(fp::DynFlowPath)
     best = nothing
     for (q, pos) in fp.merges
@@ -110,9 +128,17 @@ function _uppermost_merge(fp::DynFlowPath)
     return best
 end
 
-# No live tributary: path `path_id` dies.  If it targets a trap, decrement that trap and, when
-# it loses its last feed, append it to `detached` and cascade; a tributary/domain-exit path is
-# just removed.
+"""
+    _kill_path!(net, path_id, detached) -> nothing
+
+Path `path_id` has no live tributary, so it dies.  If it targets a trap, that trap's `in_count`
+is decremented, and when it loses its last feed it leaves the network too: it is appended to
+`detached`, its spill path cleared, and the kill cascades down that path.  A tributary or
+domain-exit path is simply removed.
+
+Mutates `net` (tombstones the path, patches `in_count` / `spill_path`) and appends to
+`detached`.
+"""
 function _kill_path!(net::DynNetwork, path_id::Int, detached::Vector{Int})
     t = net.flow_paths[path_id].target_trap
     if t > 0
@@ -130,28 +156,45 @@ function _kill_path!(net::DynNetwork, path_id::Int, detached::Vector{Int})
     end
 end
 
-# Drop this (dying tributary) path from whatever path lists it in `merges`.  No trap is
-# decremented — a tributary feeds a path, not a trap.
+"""
+    _detach_from_host_merges!(net, path_id) -> nothing
+
+Drop the dying tributary `path_id` from the `merges` list of whatever path hosts it.  Mutates
+those paths' `merges`.  No trap `in_count` is touched: a tributary feeds a path, not a trap.
+"""
 function _detach_from_host_merges!(net::DynNetwork, path_id::Int)
     for host in net.flow_paths
         filter!(m -> m[1] != path_id, host.merges)
     end
 end
 
-# Replace a path slot with a dead marker (departure_point == (0,0)) without shifting
-# indices; live references are updated by the caller before this is reached.
+"""
+    _tombstone_path!(net, path_id) -> DynFlowPath
+
+Mark path `path_id` dead by replacing its slot with an empty marker
+(`departure_point == (0,0)`), leaving every other index intact so references stay valid until
+`_compact!` reindexes.  Mutates `net.flow_paths`; live references to the slot are the caller's
+to clear beforehand.
+"""
 _tombstone_path!(net::DynNetwork, path_id::Int) =
     net.flow_paths[path_id] = DynFlowPath(CartesianIndex{2}[], CartesianIndex(0, 0), 0,
         Tuple{Int,Int}[], Tuple{Int,Int}[], Tuple{Int,Int}[], Tuple{Int,Int}[], Tuple{Int,Int}[])
 
-# Re-root: the tributary `Q` (path slot `q`) at junction position `j` takes over the orphaned
-# path `P` (slot `path_id`)'s downstream role.  The survivor is Q followed by P from the
-# junction down, kept in Q's slot (it is Q's continuation): Q's head trap already spills into
-# q, and path_id's head trap was cleared
-# before re-root, so no spill_path redirect is needed — tombstone the orphaned head path
-# (path_id) instead.  The dead head stub (P.cells 1:j-1) is dropped; the target trap stays
-# fed (in_count unchanged); injections all sit at positions >= j, so none is lost.
-# @@@ a culvert *inlet* in the dropped stub (position < j) is dropped with it.
+"""
+    _promote_tributary!(net, path_id, j, q) -> nothing
+
+Re-root: the tributary `Q` in slot `q`, joining at junction position `j`, takes over the
+downstream role of the orphaned path `P` in slot `path_id`.
+
+The survivor is `Q` followed by `P` from the junction down, kept in `Q`'s slot since it is `Q`'s
+continuation — `Q`'s head trap already spills into `q`, and `P`'s head trap was cleared before
+the re-root, so no `spill_path` redirect is needed and `P`'s slot is tombstoned.  `P`'s dead
+head stub (cells `1:j-1`) is dropped, the target trap stays fed (`in_count` unchanged), and
+injections all sit at positions `>= j`, so none is lost.  Mutates `net`.
+
+!!! note
+    @@@ a culvert *inlet* in the dropped stub (position < j) is dropped with it.
+"""
 function _promote_tributary!(net::DynNetwork, path_id::Int, j::Int, q::Int)
     P, Q = net.flow_paths[path_id], net.flow_paths[q]
     lq = length(Q.cells)
@@ -224,13 +267,20 @@ function grow_spill!(net::DynNetwork, tstruct, full_traps, trap_id::Int)
 end
 
 # ----------------------------------------------------------------------------
-# Global lookup over the live components, rebuilt on demand each event (cheap, cannot go
-# stale, and doubles as the fusion detector).  Returns:
-#   trapmap: trap_ix -> (component index, local trap index) — locate a trap from an event;
-#   cellmap: occupied cell (linear) -> component index — flow-path cells, trap footprint
-#            cells, and NBS footprint cells.  A grown-path cell hitting a *different*
-#            component here is a fusion trigger.
-# Components are disjoint by construction, so each cell/trap resolves to exactly one.
+"""
+    _index_components(comps, tstruct) -> (trapmap, cellmap)
+
+Global lookup over the live components, rebuilt on demand each event — cheap, cannot go stale,
+and doubles as the fusion detector.  Nothing is mutated.
+
+# Returns
+- `trapmap`: `trap_ix -> (component index, local trap index)`, to locate an event's trap.
+- `cellmap`: occupied cell (linear) `-> component index`, covering flow-path cells, trap
+  footprints and NBS footprints.  A grown path cell landing on a *different* component here is
+  what triggers a fusion.
+
+Components are disjoint by construction, so every cell and trap resolves to exactly one.
+"""
 function _index_components(comps::Vector{DynNetwork}, tstruct)
     LI = LinearIndices(tstruct.topography)
     trapmap = Dict{Int, Tuple{Int,Int}}()
@@ -246,8 +296,13 @@ function _index_components(comps::Vector{DynNetwork}, tstruct)
     return trapmap, cellmap
 end
 
-# Locate trap `trap_ix` in the component set: (component index, local trap index), or nothing
-# if the trap is not currently dynamic.  O(traps) scan — no cell map built.
+"""
+    _locate_trap(comps, trap_ix) -> (component index, local trap index) or nothing
+
+Locate `trap_ix` in the component set, or `nothing` if it is not currently dynamic.  An
+`O(traps)` scan that builds no cell map — for when only the trap is needed and the full
+[`_index_components`](@ref) lookup would be waste.  Nothing is mutated.
+"""
 function _locate_trap(comps::Vector{DynNetwork}, trap_ix::Int)
     for (ci, net) in enumerate(comps), (li, t) in enumerate(net.traps)
         t.trap_ix == trap_ix && return (ci, li)
@@ -258,9 +313,15 @@ end
 # All trap_ix currently in the dynamic network (as a set).
 _live_trap_ix(comps::Vector{DynNetwork}) = Set(t.trap_ix for net in comps for t in net.traps)
 
-# True if filling `trap_ix` completes its parent's subtraps (all now full), so the region must
-# collapse to the parent supertrap — a hierarchy change the incremental grow cannot make, so we
-# regrow instead.  (One level suffices to trigger: the regrow's tracer cascades any further up.)
+"""
+    _fill_subsumes(tstruct, trap_ix, full_traps) -> Bool
+
+True when filling `trap_ix` completes its parent's subtraps, so the siblings must collapse into
+the parent supertrap.  That is a hierarchy change the incremental grow cannot express, so the
+caller regrows the component instead.  Nothing is mutated.
+
+Testing one level up suffices to trigger: the regrow's tracer cascades any further collapse.
+"""
 function _fill_subsumes(tstruct, trap_ix, full_traps)
     p = parentof(tstruct, trap_ix)
     p === nothing && return false
@@ -373,10 +434,16 @@ function apply_empty!(comps::Vector{DynNetwork}, tstruct, full_traps, trap_ix::I
 end
 
 # ----------------------------------------------------------------------------
-# The root seed cells a component was grown from: the departure points of its source-headed
-# paths (those no trap spills into).  Culvert outlets and NBS seed cells are among them (each
-# heads its own path); the trap-spill connectors are omitted, as the tracer regrows those from
-# `full_traps`.  Regrowing from these seeds reproduces the whole component.
+"""
+    _component_seeds(net) -> Vector{CartesianIndex{2}}
+
+The root seed cells `net` was grown from: the departure points of its source-headed paths, i.e.
+those no trap spills into.  Regrowing from these reproduces the whole component.
+
+Culvert outlets and NBS seed cells are among them, since each heads its own path.  The
+trap-spill connectors are deliberately omitted — the tracer regrows those from `full_traps`.
+Nothing is mutated.
+"""
 function _component_seeds(net::DynNetwork)
     spill = Set(t.spill_path for t in net.traps if t.spill_path > 0)   # paths a trap spills into
     return [net.flow_paths[k].departure_point
@@ -384,9 +451,17 @@ function _component_seeds(net::DynNetwork)
 end
 
 # ----------------------------------------------------------------------------
-# Grow a fresh network from `seeds` (with the given culverts/NBS) and split it into components
-# — the core of `setup_network` minus input validation and the NBS cell precompute (the
-# passed NBS already carry theirs).  Used to regenerate fused components.
+"""
+    _regrow(seeds, culverts, nbs, tstruct, full_traps) -> Vector{DynNetwork}
+
+Grow a fresh network from `seeds` carrying the given culverts and NBS, and split it into
+connected components.
+
+The core of [`setup_network`](@ref) minus the input validation and the NBS cell precompute —
+the placements passed here already carry theirs, and their `id`s are already stamped.  Used to
+regenerate fused or hierarchy-collapsed components.  `culverts` and `nbs` are held by reference
+on the result rather than copied.
+"""
 function _regrow(seeds, culverts::Vector{DynCulvert}, nbs::Vector{DynNBSPlacement}, tstruct, full_traps)
     net = DynNetwork(culverts, nbs)
     pathmap = Dict{Int,Int}()
@@ -396,10 +471,17 @@ function _regrow(seeds, culverts::Vector{DynCulvert}, nbs::Vector{DynNBSPlacemen
 end
 
 # ----------------------------------------------------------------------------
-# Fuse the components at indices `idxs` (coupled by a grow) into fresh, clean component(s) by
-# regrowing them from their seeds: the build tracer redoes cell overlaps, duplicate-trap
-# collapsing, and culvert/NBS assignment for free, so no bespoke surgery is needed.  Removes
-# the fused slots from `comps` and appends the regrown result (normally one component).
+"""
+    _fuse_components!(comps, idxs, tstruct, full_traps) -> comps
+
+Fuse the components at indices `idxs` — coupled by a grow — into fresh, clean component(s) by
+regrowing them from their combined seeds.  The build tracer redoes cell overlaps, duplicate-trap
+collapsing and culvert/NBS assignment for free, so no bespoke surgery is needed.
+
+**Mutates and returns `comps`**, deleting the fused slots and appending the regrown result
+(normally one component, but the regrow may legitimately split it into several).  Passing a
+single index is the idiom for regrowing one component in place.
+"""
 function _fuse_components!(comps::Vector{DynNetwork}, idxs, tstruct, full_traps)
     seeds    = CartesianIndex{2}[]
     culverts = DynCulvert[]

@@ -76,7 +76,12 @@ function setup_network(tstruct, full_traps;
 end
 
 # ----------------------------------------------------------------------------
-# Invert the flow graph: map each cell to the list of cells that drain into it.
+"""
+    _map_inverse_flow(flowgraph) -> Dict{Int, Vector{Int}}
+
+Invert the flow graph: map each cell to the list of cells draining into it.  Cells nothing
+drains into are simply absent from the result.  Nothing is mutated.
+"""
 function _map_inverse_flow(flowgraph)
     inv_flow = Dict{Int, Vector{Int}}()
     for cell in 1:Graphs.nv(flowgraph)
@@ -90,7 +95,16 @@ function _map_inverse_flow(flowgraph)
 end
 
 # ----------------------------------------------------------------------------
-# Fill each placement's inflow / outflow / internal-accumulation cell lists from its footprint.
+"""
+    _compute_nbs_inflow_outflow_cells!(nbs, tstruct) -> nothing
+
+Fill in each placement's cell lists from its footprint: the cells flow leaves the footprint
+through, the outside cells draining into it, and the trap bottoms inside it (where water would
+pond rather than pass through).
+
+**Mutates every element of `nbs`**, setting `footprint_outflow_cells`,
+`footprint_inflow_cells` and `internal_accumulation_cells`; `tstruct` is read only.
+"""
 function _compute_nbs_inflow_outflow_cells!(nbs, tstruct)
     inv_flow = _map_inverse_flow(tstruct.flowgraph)
     CI = CartesianIndices(tstruct.topography)
@@ -105,10 +119,17 @@ function _compute_nbs_inflow_outflow_cells!(nbs, tstruct)
 end
 
 # ----------------------------------------------------------------------------
-# Follow the flow path from `start_cell` to the trap it ends in; return
-# `(path, trap_ix)`, where `trap_ix == 0` means it exits the domain.  The end trap
-# is the highest full supertrap over the terminal region (or the lowest-level trap
-# if none are full); its footprint cells are stripped from `path`.
+"""
+    _trace_to_next_trap(tstruct, start_cell, full_traps) -> (path, trap_ix)
+
+Follow the flow path from `start_cell` to the trap it ends in.  `trap_ix == 0` means the flow
+exits the domain.
+
+The end trap is the highest *full* supertrap over the terminal region — a full trap pools with
+its siblings, so water arriving there is really arriving at the merged parent — or the
+lowest-level trap when none are full.  The target's own footprint cells are stripped from
+`path`, since they are trap, not flow path.  Nothing is mutated.
+"""
 function _trace_to_next_trap(tstruct, start_cell, full_traps)
 
     path = _trace_path(tstruct, start_cell)
@@ -233,9 +254,18 @@ end
 # (in network_updating.jl), the live-grow counterpart of `detach_spill!`.
 
 # ----------------------------------------------------------------------------
-# Register `path`'s cells in `pathmap` under `path_ix`, truncating it where it first
-# meets an already-claimed cell.  Returns `(isect_path, isect_cell)` of that meeting
-# point (both 0 if none).
+"""
+    _update_pathmap!(pathmap, path, path_ix) -> (isect_path, isect_cell)
+
+Claim `path`'s cells in `pathmap` for `path_ix`, truncating `path` where it meets a cell an
+earlier path already owns — flow is deterministic, so from that cell on the two coincide and
+the owner carries it.
+
+**Mutates both** `pathmap` (cells registered) and `path` (truncated in place; truncating at the
+first cell empties it, and the caller then makes a zero-length connector, its source preserved
+in `departure_point`).  Returns the meeting point as `(isect_path, isect_cell)`, both `0` if
+the path met nothing.
+"""
 function _update_pathmap!(pathmap, path::Vector{Int}, path_ix)
     # check if path intersects with any existing NBS or culvert
     isect_path, isect_cell = 0, 0
@@ -256,8 +286,13 @@ function _update_pathmap!(pathmap, path::Vector{Int}, path_ix)
 end
 
 # ----------------------------------------------------------------------------
-# The culvert inlets/outlets and NBS outlets falling inside a trap `footprint`,
-# returned as bare id lists (a trap has no along-path position).
+"""
+    _intersecting_culverts_and_nbs_outlets(footprint, culverts, nbs) -> (cv_in, cv_out, nbs_out)
+
+The culvert inlets, culvert outlets and NBS outlets falling inside a trap `footprint`, as bare
+id lists — a trap is a pool, so there is no along-path position to record (contrast
+`_intersecting_on_path`).  Nothing is mutated.
+"""
 function _intersecting_culverts_and_nbs_outlets(footprint, culverts, nbs)
     cv_in = Int[]
     cv_out = Int[]
@@ -280,12 +315,16 @@ function _intersecting_culverts_and_nbs_outlets(footprint, culverts, nbs)
 end
 
 # ----------------------------------------------------------------------------
-# For a flow path, the culvert inlets/outlets and NBS in/outlets that fall on it, each
-# paired with the 1-based position of the matching cell within `path` (routing charges
-# infiltration up to that cell, like a `merges` junction).  NBS inlets are the
-# footprint-inflow boundary cells crossed by the path (every crossing is registered; the
-# first draws the flow, later ones then see zero).  The trap form above stores bare ids
-# since a trap has no along-path position.
+"""
+    _intersecting_on_path(path, culverts, nbs) -> (cv_in, cv_out, nbs_in, nbs_out)
+
+The culvert inlets/outlets and NBS in/outlets falling on a flow `path`, each as `(id, pos)`
+with `pos` the 1-based index of the matching cell within `path`.  The position matters: routing
+charges infiltration up to that cell before applying the element, like a `merges` junction.
+
+NBS inlets are the footprint-inflow boundary cells the path crosses; every crossing is
+registered, the first drawing the flow and later ones then seeing zero.  Nothing is mutated.
+"""
 function _intersecting_on_path(path, culverts, nbs)
     cv_in   = Tuple{Int,Int}[]
     cv_out  = Tuple{Int,Int}[]
@@ -308,7 +347,13 @@ function _intersecting_on_path(path, culverts, nbs)
 end
 
 # ----------------------------------------------------------------------------
-# Error if any culvert endpoint or dyn_coord lies inside an NBS footprint.
+"""
+    _validate_network_inputs(tstruct, dyn_coords, culverts, nbs) -> nothing
+
+Error if any culvert endpoint or `dyn_coord` lies inside an NBS footprint.  An NBS replaces the
+surface flow over its footprint with its layer model, so a seed or culvert end there would have
+no well-defined flow to attach to.  Nothing is mutated.
+"""
 function _validate_network_inputs(tstruct, dyn_coords, culverts, nbs)
     nbs_footprints = vcat([n.footprint for n in nbs]...)
     LI = LinearIndices(tstruct.topography)
@@ -325,7 +370,15 @@ function _validate_network_inputs(tstruct, dyn_coords, culverts, nbs)
 end
 
 # ----------------------------------------------------------------------------
-# External cells the footprint drains into (downstream neighbours outside it).
+"""
+    _footprint_outflow_cells(tstruct, footprint) -> Vector{Int}
+
+The external cells a `footprint` drains into: the downstream neighbours of its cells that lie
+outside it.  Nothing is mutated.
+
+Warns when empty — that is a closed basin, which is legal only if the NBS placement's upper
+layers have explicit piped outlets; without them the system just submerges with no runoff.
+"""
 function _footprint_outflow_cells(tstruct, footprint::Vector{Int})
     flowgraph = tstruct.flowgraph
     outflow_cells = Set{Int}()
@@ -345,7 +398,13 @@ function _footprint_outflow_cells(tstruct, footprint::Vector{Int})
 end
 
 # ----------------------------------------------------------------------------
-# External cells that drain into the footprint (upstream neighbours outside it).
+"""
+    _footprint_inflow_cells(inv_flow, footprint) -> Vector{Int}
+
+The external cells draining into a `footprint`: the upstream neighbours of its cells, taken
+from the inverted flow map ([`_map_inverse_flow`](@ref)), that lie outside it.  These are the
+boundary cells where a flow path enters the NBS.  Nothing is mutated.
+"""
 function _footprint_inflow_cells(inv_flow::Dict{Int, Vector{Int}},
                                  footprint::Vector{Int})
     all_inflow_cells = vcat([get(inv_flow, cell, Int[]) for cell in footprint]...)
