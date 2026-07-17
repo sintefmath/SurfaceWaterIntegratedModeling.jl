@@ -216,14 +216,6 @@ end
     @test rf(net, [10.0,0.0], Bool[false,false], [0.0,0.0], [[0.0]]) ≈ [10.0,0.0]   # leaf doesn't spill
     @test rf(net, [5.0,0.0],  Bool[true,false], [0.0,0.0], [[8.0]]) ≈ [5.0,0.0]     # loss floored at 0
 
-    # path_inflow: direct inflow onto a leaf path reaches the downstream trap (after path loss)
-    @test rf(net, [0.0,0.0], Bool[false,false], [0.0,0.0], [[0.0]];
-             path_inflow=[5.0]) ≈ [0.0, 5.0]                                         # no path loss
-    @test rf(net, [0.0,0.0], Bool[false,false], [0.0,0.0], [[3.0]];
-             path_inflow=[5.0]) ≈ [0.0, 2.0]                                         # path loss applied
-    @test rf(net, [0.0,0.0], Bool[false,false], [0.0,0.0], [[8.0]];
-             path_inflow=[5.0]) ≈ [0.0, 0.0]                                         # loss exceeds inflow
-
     # tributary merge: path1(A)->trap2(C,leaf), path2(B) merges into A at pos 1 (only cell)
     net2 = DynNetwork([DynFlowPath([c(1,1)], 2, Tuple{Int,Int}[], Tuple{Int,Int}[],
                                    Tuple{Int,Int}[], [(2, 1)]),
@@ -231,21 +223,18 @@ end
                       [T(10,1), T(20,0), T(30,2)], DynCulvert[])
     # B: max(20-2,0)=18 joins A at pos 1 (no pre-junc infil); A: max((10+18)-1,0)=27 -> C
     @test rf(net2, [10.0,0.0,20.0], Bool[true,false,true], [0.0,0.0,0.0], [[1.0],[2.0]]) ≈ [10.0,27.0,20.0]
-    # path_inflow onto tributary path2: flows through path2 then path1 infiltration
-    @test rf(net2, [0.0,0.0,0.0], Bool[false,false,false], [0.0,0.0,0.0], [[1.0],[2.0]];
-             path_inflow=[0.0,7.0]) ≈ [0.0, max(7.0-2.0-1.0, 0.0), 0.0]             # 7-2(p2)-1(p1)=4
 
     # merge-fix: trib joins a 2-cell main path at junction 2 (not at head)
     # main path cells: [c(1,1), c(1,2)], infil=[1.0, 3.0]; trib at junction 2 → post-infil=3.0
-    # head=0.5 (path_inflow[1]), trib delivers 5.0 (path_inflow[2], trib infil=0.0)
+    # A(full, 0.5) heads path1; C(full, 5.0) spills down path2 (trib infil=0.0) into junction 2
     # correct:  max(0.5-1.0,0)=0  + 5.0 = 5.0;  max(5.0-3.0,0)=2.0
     # old approx would give: max(0.5+5.0-4.0,0)=1.5  (wrong)
     net_mf = DynNetwork([DynFlowPath([c(1,1), c(1,2)], 2, Tuple{Int,Int}[], Tuple{Int,Int}[],
                                      Tuple{Int,Int}[], [(2, 2)]),
                          DynFlowPath([c(5,5)], 0)],
-                        [T(10,1), T(20,0)], DynCulvert[])
-    @test rf(net_mf, [0.0,0.0], Bool[false,false], [0.0,0.0], [[1.0,3.0],[0.0]];
-             path_inflow=[0.5, 5.0]) ≈ [0.0, 2.0]
+                        [T(10,1), T(20,0), T(30,2)], DynCulvert[])
+    @test rf(net_mf, [0.5,0.0,5.0], Bool[true,false,true], [0.0,0.0,0.0],
+             [[1.0,3.0],[0.0]]) ≈ [0.5, 2.0, 5.0]
 
     # spill exits the domain
     net3 = DynNetwork([DynFlowPath([c(1,1)], 0)], [T(10,1)], DynCulvert[])
@@ -341,13 +330,12 @@ end
         @test res_zvt.kind == res.kind && res_zvt.trap == res.trap
         @test isapprox(res_zvt.time, res.time; rtol=1e-6)
 
-        # path_inflow: leaf fed only via path inflow (no trap inflow), still fills
-        state_pi = copy(caps); state_pi[leaf] = 0.0
-        path_qi  = zeros(length(net.flow_paths))
-        spill_p  = net.traps[leaf-1].spill_path
-        spill_p > 0 && (path_qi[spill_p] = 1.0)
-        res_pi = solveDynNetwork!(state_pi, ts, net, zeros(size(ts.topography)), zeros(nt);
-                                  path_inflow=path_qi)
+        # leaf fed only by the upstream trap's spill (it has no inflow of its own), still fills.
+        # The other full traps get zero inflow, so they spill nothing and stay put.
+        state_pi  = copy(caps); state_pi[leaf] = 0.0
+        inflow_up = zeros(nt);  inflow_up[leaf-1] = 1.0
+        @test net.traps[leaf-1].spill_path > 0        # the upstream trap does feed a path
+        res_pi = solveDynNetwork!(state_pi, ts, net, zeros(size(ts.topography)), inflow_up)
         @test res_pi.kind == :fill && res_pi.trap == net.traps[leaf].trap_ix
         @test isfinite(res_pi.time) && res_pi.time > 0
 
@@ -708,8 +696,9 @@ end
     pcells = [c(1,1), c(1,2), c(1,3)]
     cv  = DynCulvert(pcells[2], c(5,5), 0.5, 0.6, 0.5, 1.0, 1.7)        # D = 1
     p1  = DynFlowPath(pcells, 0, [(1, 2)], Tuple{Int,Int}[], Tuple{Int,Int}[], Tuple{Int,Int}[])
+    t0  = DynTrap(100, 1, Int[], Int[])             # full trap upstream, spills down p1
     t1  = DynTrap(101, 0, Int[], [1])               # trap hosts the culvert outlet
-    net = DynNetwork([p1], [t1], [cv])
+    net = DynNetwork([p1], [t0, t1], [cv])
     ts  = mock_ts(zeros(6, 6))                       # all inverts at 0
     plan = SWIM._build_culvert_plan(net, ts)
     cellinfil = [[0.0, 0.0, 0.0]]                    # no path infiltration
@@ -718,13 +707,14 @@ end
     Q = culvert_rate(cv; inlet_invert = 0.0, outlet_invert = 0.0, inlet_submerged = false, inlet_head = 1.0,
                      outlet_submerged = false, outlet_head = 0.0)
     @test Q > 0
-    rf(F) = SWIM._route_flow(net, [0.0], [false], [0.0], cellinfil;
-                             path_inflow = [F], cvplan = plan, trap_level = [0.0])
+    # F reaches the path as t0's spill (max(F - 0, 0)); t1 receives whatever the culvert drew
+    rf(F) = SWIM._route_flow(net, [F, 0.0], Bool[true, false], [0.0, 0.0], cellinfil;
+                             cvplan = plan, trap_level = [0.0, 0.0])
 
     # plenty of flow -> culvert abstracts its full capacity into the trap
-    @test rf(10.0)[1] ≈ Q rtol = 1e-12
+    @test rf(10.0)[2] ≈ Q rtol = 1e-12
     # little flow -> abstraction is capped at the passing flow (mass-conserving)
-    @test rf(0.3 * Q)[1] ≈ 0.3 * Q rtol = 1e-12
+    @test rf(0.3 * Q)[2] ≈ 0.3 * Q rtol = 1e-12
 end
 
 @testset "solveDynNetwork: culvert drain triggers :unspill" begin
