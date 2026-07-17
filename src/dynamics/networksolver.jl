@@ -550,22 +550,30 @@ signed-diff model).
 - `A`: footprint area (m^2), for `S_mm = V*1000/A`
 - `state_base`: 0-based offset of this element's layer block, after the `nt` trap states
 - `n_terrain`: number of top layers re-emitting at terrain rather than through a pipe
-- `O_0_total`: oblivious throughput, summed over drainage endpoints.  With zero footprint
-  infiltration this equals the background live input, so it also seeds the ODE
-- `terrain_paths`: `(carrier path, ratio_e)` per boundary-exit endpoint
-- `terrain_traps`: `(accumulation trap, ratio_e)` per internal-depression endpoint
+- `O_0_total`: the placement's oblivious throughput — read off the **input** boundary, as
+  `Σ runoff` over `footprint_inflow_cells` plus the rain landing on the footprint.  The
+  footprint has zero infiltration by contract, so nothing is lost in transit and throughput
+  equals what enters; it therefore also seeds the ODE's live input.
+- `terrain_paths`: `(carrier path, ratio_e)` per boundary outlet
+- `terrain_traps`: `(accumulation trap, ratio_e)` per internal depression
 - `piped_paths`: `(carrier path, layer index)` per piped outlet
+
+`ratio_e` is a *normalised share*, weighted by the oblivious `runoff` at each outlet cell (and
+at each ponding cell) — the receiving watercourse, not the footprint cells feeding it.  It is
+independent of `O_0_total`: several footprint cells may feed one outlet, and the outlet's own
+rain and any flow converging on it from outside the footprint are counted in its weight but
+must never be counted in the throughput.
 """
 struct NBSElement
     system    ::NBSSystem
     A         ::Float64                     # footprint area (m^2) for S_mm = V*1000/A
     state_base::Int                         # 0-based offset of its layer block after the nt trap states
     n_terrain ::Int                         # top layers re-emitting at terrain
-    O_0_total ::Float64                     # oblivious throughput = Σ Q over drainage endpoints; with
-                                            # zero footprint infiltration this equals the background live
-                                            # input (inflow + on-footprint rain), so it also seeds the ODE
-    terrain_paths::Vector{Tuple{Int,Float64}}  # (carrier path, ratio_e) per boundary-exit endpoint
-    terrain_traps::Vector{Tuple{Int,Float64}}  # (accumulation trap, ratio_e) per internal-depression endpoint
+    O_0_total ::Float64                     # oblivious throughput, from the input boundary:
+                                            # Σ runoff over footprint_inflow_cells + rain on footprint
+                                            # (exact: zero footprint infiltration => output == input)
+    terrain_paths::Vector{Tuple{Int,Float64}}  # (carrier path, ratio_e) per boundary outlet
+    terrain_traps::Vector{Tuple{Int,Float64}}  # (accumulation trap, ratio_e) per internal depression
     piped_paths  ::Vector{Tuple{Int,Int}}      # (carrier path, layer index) per piped outlet
 end
 
@@ -580,9 +588,24 @@ struct NBSPlan
     nlayer_total::Int
 end
 
-# Below this, an NBS's oblivious throughput counts as zero and the terrain diff is split evenly
-# across endpoints rather than by ratio (which would be 0/0).
+# Below this, the endpoint weights count as zero and the terrain diff is split evenly across
+# endpoints rather than by ratio (which would be 0/0).
 const _NBS_O0_EPS = 1e-12
+
+"""
+    _footprint_rain(precipitation, footprint) -> Float64
+
+Total rain landing on `footprint`, in the same units as the `runoff` grid: `watercourses` seeds
+runoff as `precipitation - infiltration` per cell and only ever sums it downstream, applying no
+area or mm conversion, so the two are directly comparable.
+
+Infiltration is not subtracted — an NBS footprint has none by contract (`fill_sequence` forces
+it to zero), so every drop of rain on it becomes flow.  `O(1)` for a uniform rate.
+"""
+_footprint_rain(precipitation::Real, footprint::Vector{Int}) =
+    Float64(precipitation) * length(footprint)
+_footprint_rain(precipitation::AbstractMatrix{<:Real}, footprint::Vector{Int}) =
+    sum(Float64[Float64(precipitation[f]) for f in footprint]; init = 0.0)
 
 """
     _nbs_state_count(p) -> Int
@@ -638,67 +661,81 @@ _attenuate_diff(runoff::AbstractVector{<:Real}, d::Float64) =
     _attenuate_range(runoff, 1, length(runoff), d)
 
 """
-    _build_nbs_plan(net, tstruct, runoff) -> NBSPlan or nothing
+    _build_nbs_plan(net, tstruct, runoff, precipitation) -> NBSPlan or nothing
 
 Build the [`NBSPlan`](@ref) for `net`, or `nothing` when it has no NBS.
 
-Reads the oblivious `runoff` grid to resolve, per placement, its oblivious output `O_0` at each
-drainage endpoint — summing to the throughput `O_0_total` that also seeds the ODE — and the
-carrier path that head-injects each output diff.  Endpoints are classified as boundary exits
-(flow crosses out of the footprint onto a carrier path) or internal depressions (a sink, whose
-share deposits into the covering trap); a domain-exit sink's share simply leaves.  The layer
-models and their ODE-state layout come straight off `net.nbs`.
+Per placement this resolves two independent quantities from the oblivious `runoff` grid and the
+cell lists `setup_network` already cached on the [`DynNBSPlacement`](@ref):
 
-Nothing is mutated.  Asserts the coupling invariants: an internal depression must be covered by
-a network trap, and a boundary-exit cell must have a carrier path departing it (it is a seed).
+- **`O_0_total`**, the throughput, off the *input* boundary — `Σ runoff` over
+  `footprint_inflow_cells` plus the rain on the footprint.  Exact, because the footprint has
+  zero infiltration by contract, so output equals input.
+- **`ratio_e`**, a normalised share per endpoint, weighted by the `runoff` at each outlet cell
+  in `footprint_outflow_cells` and each cell in `internal_accumulation_cells`.
+
+Keeping them separate matters: an outlet's weight legitimately includes its own rain and any
+flow converging on it from outside the footprint, none of which is the placement's throughput.
+The layer models and ODE-state layout come straight off `net.nbs`.
+
+Nothing is mutated.  Asserts the coupling invariants: an outlet must have a carrier path
+departing it (it is a network seed), and an internal depression must be covered by a network
+trap.
 """
-function _build_nbs_plan(net::DynNetwork, tstruct, runoff::AbstractMatrix{<:Real})
+function _build_nbs_plan(net::DynNetwork, tstruct, runoff::AbstractMatrix{<:Real},
+                         precipitation::Union{AbstractMatrix{<:Real},Real})
     isempty(net.nbs) && return nothing
-    g  = tstruct.flowgraph
+    LI = LinearIndices(tstruct.topography)
     trap_of_cell = Dict{Int,Int}()             # linear cell -> local trap index
     for (ti, t) in enumerate(net.traps), c in tstruct.footprints[t.trap_ix]
         trap_of_cell[c] = ti
     end
-    # carrier path per seed cell: the path departing from an output (exit / outlet) cell
+    # carrier path per seed cell: the path departing from an output (outlet) cell
     dep_path = Dict{CartesianIndex{2},Int}()
     for (p, fp) in enumerate(net.flow_paths)
         haskey(dep_path, fp.departure_point) || (dep_path[fp.departure_point] = p)
     end
-    CI = CartesianIndices(tstruct.topography)
 
     elems = NBSElement[]
     base  = 0
     for nb in net.nbs
         A_foot = Float64(length(nb.footprint))   # @@@ 1 m^2/cell; use real cell area when available
-        footset = Set(nb.footprint)
-        # (Q, kind, target): kind :path (boundary exit, carrier path) or :trap (internal depression)
-        endpoints = Tuple{Float64,Symbol,Int}[]
-        for f in nb.footprint
-            Qf = max(Float64(runoff[f]), 0.0)
-            Qf > 0.0 || continue
-            ds = Graphs.outneighbors(g, f)
-            if isempty(ds)                         # sink: internal depression, or a domain-exit sink
-                tr = get(trap_of_cell, f, 0)       # tr == 0 is legitimate only for a domain-exit sink
-                @assert tr != 0 || tstruct.regions[f] <= 0 "NBS internal-depression cell $f " *
-                    "(region $(tstruct.regions[f])) is covered by no network trap — coupling invariant broken"
-                push!(endpoints, (Qf, :trap, tr))
-            elseif ds[1] ∉ footset                 # boundary exit: flow crosses to ds[1]
-                carrier = get(dep_path, CI[ds[1]], 0)   # the exit cell is a seed, so a path must depart it
-                @assert carrier != 0 "NBS boundary-exit cell $(CI[ds[1]]) has no carrier path " *
-                    "(expected it to be a network seed)"
-                push!(endpoints, (Qf, :path, carrier))
-            end
+
+        # Throughput, off the INPUT boundary.  The footprint has zero infiltration by contract,
+        # so nothing is lost crossing it and output == input == (flow in) + (rain on footprint).
+        # The flowgraph is single-successor, so an inflow cell's whole runoff enters; a cell with
+        # negative runoff (spare infiltration capacity) never propagates, hence max(., 0).
+        O_0_total = _footprint_rain(precipitation, nb.footprint)
+        for ic in nb.footprint_inflow_cells
+            O_0_total += max(Float64(runoff[ic]), 0.0)
         end
-        O_0_total = sum(Float64[Q for (Q, _, _) in endpoints]; init = 0.0)
-        nend = length(endpoints)
-        ratio(Q) = O_0_total > _NBS_O0_EPS ? Q / O_0_total : (nend > 0 ? 1.0 / nend : 0.0)
+
+        # Weights: the oblivious flow at each *outlet* cell (outside the footprint) and at each
+        # ponding cell.  Only ever used as a normalised share, so the outlet's own rain and any
+        # flow converging on it from outside are harmless here (they must not, and do not, reach
+        # O_0_total above).
+        weights = Tuple{Float64,Symbol,Int}[]
+        for oc in nb.footprint_outflow_cells
+            carrier = get(dep_path, oc, 0)       # the outlet cell is a seed, so a path must depart it
+            @assert carrier != 0 "NBS outlet cell $oc has no carrier path " *
+                "(expected it to be a network seed)"
+            push!(weights, (max(Float64(runoff[oc]), 0.0), :path, carrier))
+        end
+        for pc in nb.internal_accumulation_cells
+            tr = get(trap_of_cell, LI[pc], 0)
+            @assert tr != 0 "NBS internal-depression cell $pc (region $(tstruct.regions[LI[pc]])) " *
+                "is covered by no network trap — coupling invariant broken"
+            push!(weights, (max(Float64(runoff[pc]), 0.0), :trap, tr))
+        end
+        W_total = sum(Float64[w for (w, _, _) in weights]; init = 0.0)
+        nend    = length(weights)
+        ratio(w) = W_total > _NBS_O0_EPS ? w / W_total : (nend > 0 ? 1.0 / nend : 0.0)
 
         terrain_paths = Tuple{Int,Float64}[]
         terrain_traps = Tuple{Int,Float64}[]
-        for (Q, kind, tgt) in endpoints
-            tgt == 0 && continue                   # domain-exit sink: its share leaves the domain (dropped)
-            kind === :path ? push!(terrain_paths, (tgt, ratio(Q))) :
-                             push!(terrain_traps, (tgt, ratio(Q)))
+        for (w, kind, tgt) in weights
+            kind === :path ? push!(terrain_paths, (tgt, ratio(w))) :
+                             push!(terrain_traps, (tgt, ratio(w)))
         end
 
         piped_paths = Tuple{Int,Int}[]
@@ -796,17 +833,19 @@ end
 # ----------------------------------------------------------------------------
 """
     _build_rate_params(tstruct, net, infiltration, external_inflow;
-                       runoff=nothing, zvt=nothing) -> DynNetworkRateParams
+                       runoff=nothing, precipitation=nothing, zvt=nothing) -> DynNetworkRateParams
 
 Precompute the static [`DynNetworkRateParams`](@ref) for a solve.  `zvt` is a cached
-volume↔level table; `runoff` the oblivious runoff grid, read only for the NBS plan (omit when
-the net has no NBS).
+volume↔level table.  `runoff` (the oblivious runoff grid) and `precipitation` (the period's rain
+rate, scalar or per-cell) are both read only for the NBS plan — omit both when the net has no
+NBS; both are required when it has.
 """
 function _build_rate_params(tstruct::TrapStructure,
                             net::DynNetwork,
                             infiltration::AbstractMatrix{<:Real},
                             external_inflow::AbstractVector{<:Real};
                             runoff::Union{AbstractMatrix{<:Real},Nothing} = nothing,
+                            precipitation::Union{AbstractMatrix{<:Real},Real,Nothing} = nothing,
                             zvt = nothing)
     nt = length(net.traps)
     np = length(net.flow_paths)
@@ -825,7 +864,10 @@ function _build_rate_params(tstruct::TrapStructure,
     else
         runoff === nothing &&
             error("_build_rate_params: net has NBS but no runoff grid was supplied")
-        nbsplan = _build_nbs_plan(net, tstruct, runoff)
+        precipitation === nothing &&
+            error("_build_rate_params: net has NBS but no precipitation was supplied " *
+                  "(needed for each placement's throughput: rain on the footprint + inflow)")
+        nbsplan = _build_nbs_plan(net, tstruct, runoff, precipitation)
     end
     # in-order tributary/culvert stops per path (tributaries only when there are no culverts)
     events = _path_event_templates(net)
@@ -1219,7 +1261,7 @@ end
 
 """
     solveDynNetwork!(state, tstruct, net, infiltration, inflow;
-                     tmax=Inf, runoff=nothing,
+                     tmax=Inf, runoff=nothing, precipitation=nothing,
                      abstol=1e-6, reltol=1e-4, zvt=nothing) -> (; time, trap, kind)
 
 Evolve the trap volumes of a [`DynNetwork`](@ref) forward until the first topology-changing
@@ -1242,6 +1284,8 @@ event, steady state, or `tmax`.  `state` is updated in place.
   return `kind = :none` with `state` at `tmax` — lets a caller read the volumes at an
   externally-fixed time.  Default `Inf` (run to the first event or steady state).
 - `runoff`: oblivious runoff grid, needed only when `net` has NBS
+- `precipitation`: the period's rain rate (scalar or per-cell), needed only when `net` has NBS —
+  each placement's throughput is the rain on its footprint plus the flow entering it
 - `zvt`: cached volume↔level tables ([`_compute_z_vol_tables`](@ref))
 - `abstol`, `reltol`: ODE tolerances; `abstol` also sets the steady-state |dV/dt| threshold
 
@@ -1279,6 +1323,7 @@ function solveDynNetwork!(state::AbstractVector{Float64},
                           inflow::AbstractVector{<:Real};
                           tmax = Inf,
                           runoff::Union{AbstractMatrix{<:Real},Nothing} = nothing,
+                          precipitation::Union{AbstractMatrix{<:Real},Real,Nothing} = nothing,
                           # 1e-6 m^3 (~mL) / 1e-4: enough for physical accuracy, and ~halves the
                           # step count vs 1e-8 on the culvert worst case (see PARITY_TOL in tests)
                           abstol = 1e-6, reltol = 1e-4,
@@ -1286,7 +1331,7 @@ function solveDynNetwork!(state::AbstractVector{Float64},
     nt = length(net.traps)
     # Returns an (immutable) `DynNetworkRateParams` with all the static data the ODE needs
     p  = _build_rate_params(tstruct, net, infiltration, inflow;
-                            runoff=runoff, zvt=zvt)
+                            runoff=runoff, precipitation=precipitation, zvt=zvt)
     @assert length(state) == nt + _nbs_state_count(p) """
         state must have one entry per trap in net.traps plus one per NBS layer \
         ($(nt) traps + $(_nbs_state_count(p)) NBS layer states)"""

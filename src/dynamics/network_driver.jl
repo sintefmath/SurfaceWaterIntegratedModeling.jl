@@ -20,6 +20,8 @@ Fields:
 - `vol_by_trapix`: node trap index -> committed volume at `last_time`.
 - `nbs_state`: NBS placement id -> layer states, persistent across events and periods.
 - `last_time`: absolute time the committed volumes hold at.
+- `precip`: the weather period's rain rate, handed to each context for the NBS plan.  Constant
+  for the driver's lifetime — a driver is built per weather period.
 """
 mutable struct NetworkDriver
     comps          ::Vector{DynNetwork}          # live components, mutated by apply_* (the
@@ -29,6 +31,7 @@ mutable struct NetworkDriver
     vol_by_trapix  ::Dict{Int,Float64}           # node trap_ix -> committed volume at last_time
     nbs_state      ::Dict{Int,Vector{Float64}}   # placement id -> layer states (persistent)
     last_time      ::Float64                      # absolute time the committed volumes hold at
+    precip         ::Union{Matrix{Float64},Float64}  # the period's rain rate, for the NBS plan
 end
 
 # ----------------------------------------------------------------------------
@@ -36,7 +39,7 @@ end
 """
     build_network_driver(tstruct, dyn_coords, culverts, full_traps, cur_amounts, rateinfo,
                          infiltration, z_vol_tables, cur_time, endtime;
-                         nbs_placements = DynNBSPlacement[],
+                         nbs_placements = DynNBSPlacement[], precipitation = 0.0,
                          nbs_state = Dict{Int,Vector{Float64}}()) -> NetworkDriver
 
 Build the [`NetworkDriver`](@ref) for one weather period: trace the components from the seeds,
@@ -50,6 +53,8 @@ over `[cur_time, endtime]`.
 - `cur_amounts`, `rateinfo`, `infiltration`, `z_vol_tables`: the fill-sequence state supplying
   each node's initial volume and inflow.
 - `cur_time`, `endtime`: the period the driver runs over.
+- `precipitation`: the period's rain rate; required (with `rateinfo.runoff`) when there are NBS
+  placements, since each one's throughput is the rain on its footprint plus what flows in.
 - `nbs_state`: existing NBS layer states, carried in from an earlier period.
 
 # Returns
@@ -62,6 +67,7 @@ writes each period's layer storage back through it.
 function build_network_driver(tstruct, dyn_coords, culverts, full_traps, cur_amounts,
                               rateinfo, infiltration, z_vol_tables, cur_time, endtime;
                               nbs_placements = DynNBSPlacement[],
+                              precipitation  = 0.0,
                               nbs_state      = Dict{Int,Vector{Float64}}())
     comps = setup_network(tstruct, full_traps;
                           dyn_coords = dyn_coords, culverts = culverts, nbs = nbs_placements)
@@ -72,7 +78,8 @@ function build_network_driver(tstruct, dyn_coords, culverts, full_traps, cur_amo
         vol[t.trap_ix] = cur_amounts[t.trap_ix].amount
     end
 
-    driver = NetworkDriver(comps, DynNetworkContext[], vol, nbs_state, cur_time)
+    precip = precipitation isa Real ? Float64(precipitation) : Matrix{Float64}(precipitation)
+    driver = NetworkDriver(comps, DynNetworkContext[], vol, nbs_state, cur_time, precip)
     _rebuild_contexts!(driver, tstruct, rateinfo, infiltration, z_vol_tables,
                        cur_amounts, Set(full_traps), cur_time, endtime)
     return driver
@@ -124,7 +131,8 @@ function _rebuild_contexts!(driver::NetworkDriver, tstruct, rateinfo, infiltrati
                             cur_time, z_vol_tables)
     driver.contexts = DynNetworkContext[]
     for net in driver.comps
-        ctx = _make_context(net, tstruct, rateinfo, state0, cur_time, driver.nbs_state)
+        ctx = _make_context(net, tstruct, rateinfo, state0, cur_time,
+                            driver.precip, driver.nbs_state)
         _predict_network!(ctx, tstruct, infiltration, z_vol_tables, endtime)
         push!(driver.contexts, ctx)
     end

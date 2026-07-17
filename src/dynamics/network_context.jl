@@ -24,6 +24,8 @@ Fields:
   under (cached at the last touch; the rate the commit/predict solves use).
 - `runoff`: the oblivious runoff grid (`rateinfo.runoff`), read by the solver to
   build the NBS correction plan.
+- `precip`: the weather period's rain rate (scalar or per-cell), read alongside `runoff` for
+  the same plan — each placement's throughput is the rain on its footprint plus what flows in.
 - `next_event`: cached prediction `(; time, trap, kind)` of the network's next
   event, with `time` an ABSOLUTE timestamp and `trap` a global trap index.
 """
@@ -36,6 +38,7 @@ mutable struct DynNetworkContext
     extern_inflow   ::Vector{Float64}
     runoff          ::Matrix{Float64}            # the oblivious runoff grid (rateinfo.runoff), read
                                                  # by the solver to build the NBS correction plan
+    precip          ::Union{Matrix{Float64},Float64}  # the period's rain rate, read for the same plan
     next_event      ::NamedTuple
 end
 
@@ -123,7 +126,7 @@ function _predict_network!(ctx::DynNetworkContext, tstruct, infiltration,
     res = solveDynNetwork!(copy(ctx.state), tstruct, ctx.net, infiltration,
                            ctx.extern_inflow;
                            tmax = endtime - ctx.last_solve_time, zvt = z_vol_tables,
-                           runoff = ctx.runoff)
+                           runoff = ctx.runoff, precipitation = ctx.precip)
     ctx.next_event = (; time = res.time + ctx.last_solve_time,
                         trap = res.trap, kind = res.kind)
     return ctx.next_event
@@ -145,7 +148,7 @@ function _commit_network!(ctx::DynNetworkContext, tstruct, infiltration,
     res = solveDynNetwork!(ctx.state, tstruct, ctx.net, infiltration,
                            ctx.extern_inflow;
                            tmax = T_commit - ctx.last_solve_time, zvt = z_vol_tables,
-                           runoff = ctx.runoff)
+                           runoff = ctx.runoff, precipitation = ctx.precip)
     ctx.last_solve_time = T_commit
     return res
 end
@@ -213,16 +216,19 @@ function _store_nbs_state!(nbs_state, ctx::DynNetworkContext)
 end
 
 """
-    _make_context(net, tstruct, rateinfo, state0, cur_time, nbs_state) -> DynNetworkContext
+    _make_context(net, tstruct, rateinfo, state0, cur_time, precipitation, nbs_state)
+        -> DynNetworkContext
 
 Build one context from a single network component, committed at `cur_time`.  `state0(g)`
 supplies the initial committed volume for the global trap index `g`; NBS placements travel on
-`net.nbs`, their layer states restored from the persistent `nbs_state` store.
+`net.nbs`, their layer states restored from the persistent `nbs_state` store.  `precipitation`
+is the weather period's rain rate, held for the solver's NBS plan.
 
 No argument is mutated (`nbs_state` is read only), but `net` and `rateinfo.runoff` are stored
 by reference into the returned context.
 """
 function _make_context(net::DynNetwork, tstruct, rateinfo, state0, cur_time,
+                       precipitation = 0.0,
                        nbs_state = Dict{Int,Vector{Float64}}())
     global_ix = Int[t.trap_ix for t in net.traps]
     # Trap volumes, then one appended state per NBS layer (in `net.nbs` order, matching
@@ -232,12 +238,14 @@ function _make_context(net::DynNetwork, tstruct, rateinfo, state0, cur_time,
                      _nbs_layer_block(net, nbs_state))
     # shared source for both inflow fields
     node_leaves = _node_leaf_regions(net, tstruct)
-    # `runoff` is held for the solver's NBS correction plan.
+    # `runoff` and `precip` are held for the solver's NBS correction plan.
     return DynNetworkContext(net, state, global_ix,
                              _inflow_regions(node_leaves),
                              cur_time,
                              _external_inflow(rateinfo, node_leaves),
                              rateinfo.runoff,
+                             precipitation isa Real ? Float64(precipitation) :
+                                                      Matrix{Float64}(precipitation),
                              (; time = Inf, trap = 0, kind = :none))
 end
 

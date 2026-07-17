@@ -90,7 +90,8 @@ function fill_sequence(tstruct::TrapStructure{<:Real},
                                       culverts, findall(filled_traps), cur_amounts,
                                       rateinfo, infiltration, z_vol_tables,
                                       cur_time, end_time;
-                                      nbs_placements = nbs, nbs_state = nbs_state)
+                                      nbs_placements = nbs, precipitation = we.rain_rate,
+                                      nbs_state = nbs_state)
         # initial changetime estimates (network traps overridden from their prediction)
         changetimeest = _set_initial_changetime_estimates(rateinfo, cur_amounts,
                                                           cur_time, filled_traps, tstruct,

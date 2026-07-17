@@ -96,9 +96,11 @@ function _nbs_rate_params(ts, nbs; rain = 1.0e-3)
     driver = SWIM.build_network_driver(ts,
                  SWIM._dyn_seeds(ts, CartesianIndex{2}[], SWIM.DynCulvert[]),
                  SWIM.DynCulvert[], findall(filled), cur, rate, infil, zvt, 0.0, Inf;
-                 nbs_placements = nbs, nbs_state = Dict{Int,Vector{Float64}}())
+                 nbs_placements = nbs, precipitation = rain,
+                 nbs_state = Dict{Int,Vector{Float64}}())
     ctx = only(c for c in driver.contexts if !isempty(c.net.nbs))
-    return SWIM._build_rate_params(ts, ctx.net, infil, ctx.extern_inflow; runoff = ctx.runoff, zvt = zvt)
+    return SWIM._build_rate_params(ts, ctx.net, infil, ctx.extern_inflow;
+                                   runoff = ctx.runoff, precipitation = ctx.precip, zvt = zvt)
 end
 
 @testset "NBS: layer cascade conserves mass" begin
