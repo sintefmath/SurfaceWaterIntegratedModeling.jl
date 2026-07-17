@@ -77,3 +77,37 @@ end
     # accumulated flow.  It must match the oblivious total to within rounding.
     @test isapprox(sum(max.(rn[edge], 0.0)), sum(max.(ro[edge], 0.0)); rtol = 1e-9)
 end
+
+# ---------------------------------------------------------------------------
+# A network delta must route THROUGH an already-full trap (via its spill path), exactly like the
+# oblivious baseline — not dead-end at the trap bottom.  A west-flowing plane with a pit that we
+# mark full; a culvert delivers flow just upstream of it.  The delivered flow has to cross the
+# full pit to reach the domain edge; if it were lost at the bottom, the edge total would fall short.
+# ---------------------------------------------------------------------------
+@testset "network_watercourses: delta routes through a full trap" begin
+    N    = 20
+    grid = Float64[j for i in 1:N, j in 1:N]
+    for i in 9:11, j in 6:8; grid[i, j] -= 5.0; end   # a pit that spills west
+    ts   = spillanalysis(grid, usediags = true)
+    li   = LinearIndices(size(grid))
+    @test numtraps(ts) == 1
+    pit  = ts.regions[li[10, 7]]
+    prec = 1.0e-3
+
+    full_traps = Vector{Bool}(falses(numtraps(ts))); full_traps[pit] = true
+    trap_volumes = Dict{Int,Float64}(pit => SWIM._own_capacity(ts, pit))
+    cv = DynCulvert(ts, CartesianIndex(3, 16), CartesianIndex(10, 11); r = 0.5)  # delivers east of the pit
+
+    ro, = SWIM.watercourses(ts, full_traps; precipitation = prec, infiltration = 0.0)
+    rn  = network_watercourses(ts, full_traps, trap_volumes, Dict{Int,Vector{Float64}}();
+                               culverts = [cv], precipitation = prec, infiltration = 0.0)
+
+    inlet = li[3, 16]
+    @test ro[inlet] - rn[inlet] > 0.0                 # culvert is active (draws flow at the inlet)
+
+    edge = [li[CartesianIndex(i, 1)] for i in 1:N]
+    @test isapprox(sum(max.(rn[edge], 0.0)), sum(max.(ro[edge], 0.0)); rtol = 1e-9)  # nothing lost at the full pit
+
+    westpit = [li[i, j] for i in 1:N for j in 1:5]     # cells downstream (west) of the full pit
+    @test sum(abs.(rn[westpit] .- ro[westpit])) > 0.0  # the delivered flow reached past the pit
+end

@@ -1,5 +1,3 @@
-import Graphs
-
 export network_watercourses
 
 # ----------------------------------------------------------------------------
@@ -81,8 +79,8 @@ function network_watercourses(tstruct::TrapStructure{<:Real},
     comps = setup_network(tstruct, findall(full_traps);
                           dyn_coords = seeds, culverts = culverts, nbs = nbs)
 
-    footprint_set = Set{Int}(vcat([n.footprint for n in nbs]...))
-    g = tstruct.flowgraph
+    footprint_set  = Set{Int}(vcat([n.footprint for n in nbs]...))
+    full_traps_int = findall(full_traps)
 
     for net in comps
         # --- culverts: draw at the inlet, deliver at the outlet (mass-conserving) ------------
@@ -98,8 +96,8 @@ function network_watercourses(tstruct::TrapStructure{<:Real},
                 # is available (mass conservation)
                 q = min(_culvert_flow(cvplan, net, ci, trap_level), max(runoff[inlet], 0.0))
                 q <= 0.0 && continue
-                _propagate_field_delta!(runoff, footprint_set, g, inlet,  -q)
-                _propagate_field_delta!(runoff, footprint_set, g, outlet,  q)
+                _propagate_field_delta!(runoff, footprint_set, tstruct, full_traps_int, inlet,  -q)
+                _propagate_field_delta!(runoff, footprint_set, tstruct, full_traps_int, outlet,  q)
             end
         end
 
@@ -135,7 +133,8 @@ function network_watercourses(tstruct::TrapStructure{<:Real},
             end
             diffbase = O_terrain - O_0
             for (w, cell) in wts
-                _propagate_field_delta!(runoff, footprint_set, g, cell, diffbase * ratio(w))
+                _propagate_field_delta!(runoff, footprint_set, tstruct, full_traps_int, cell,
+                                        diffbase * ratio(w))
             end
 
             # piped outlets: each lower outflowing layer delivers its output at its outlet cell
@@ -144,7 +143,8 @@ function network_watercourses(tstruct::TrapStructure{<:Real},
                 (l > nb.n_terrain && L.Kout > 0.0) || continue
                 piped += 1
                 E = compute_outflow(L.Kout, L.nout, L.Smax, layers[l] * 1000.0 / A_foot) * 1e-3
-                _propagate_field_delta!(runoff, footprint_set, g, LI[nb.outlets[piped]], E)
+                _propagate_field_delta!(runoff, footprint_set, tstruct, full_traps_int,
+                                        LI[nb.outlets[piped]], E)
             end
         end
     end
@@ -156,22 +156,19 @@ function network_watercourses(tstruct::TrapStructure{<:Real},
     return runoff
 end
 
-# Add `amount` to the field along the terrain flow path from `start_lin` downstream, stopping at
-# an NBS footprint (which intercepts surface flow) or a terrain sink/exit.  Pure additive
-# superposition over the oblivious field — valid because watercourses accumulates flow additively;
-# a culvert's -q from its inlet and +q from its outlet therefore cancel below their confluence,
-# conserving mass.
-# @@@ a delta reaching an already-full trap stops at its bottom; routing it on through the trap's
-#     spill path (as watercourses does for the baseline) is not yet handled.
-function _propagate_field_delta!(field, footprint_set, g, start_lin::Int, amount::Float64)
+# Add `amount` to the field along the downstream flow route from `start_lin`, stopping at an NBS
+# footprint (which intercepts surface flow), the first unfilled trap bottom, or the domain exit.
+# The route comes from `flow_path_from`, so — exactly like the oblivious baseline — it carries the
+# delta THROUGH already-full traps via their spill paths rather than dead-ending at a trap bottom.
+# Pure additive superposition over the baseline: a culvert's -q from its inlet and +q from its
+# outlet follow their own routes and cancel below the confluence, conserving mass.
+function _propagate_field_delta!(field, footprint_set, tstruct, full_traps_int::Vector{Int},
+                                 start_lin::Int, amount::Float64)
     amount == 0.0 && return
-    cur = start_lin
-    while true
-        (cur in footprint_set) && break
-        field[cur] += amount
-        ds = Graphs.outneighbors(g, cur)
-        isempty(ds) && break
-        cur = ds[1]
+    paths, _ = flow_path_from(tstruct, start_lin; full_traps = full_traps_int)
+    for seg in paths, c in seg
+        (c in footprint_set) && return   # intercepted by an NBS footprint
+        field[c] += amount
     end
     return
 end
