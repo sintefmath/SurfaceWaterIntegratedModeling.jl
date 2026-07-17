@@ -316,36 +316,6 @@ end
 
 # ----------------------------------------------------------------------------
 """
-    _route_flow(net, external_inflow, spilling, footprint_infil, path_cell_infil;
-                cvplan=nothing, trap_level=nothing) -> Vector{Float64}
-
-Total inflow arriving at each trap of `net` (in `net.traps` order): `external_inflow`
-(per trap) plus everything routed in from upstream spills.
-
-A spilling trap emits `max(inflow - footprint_infil, 0)` into its spill path.  Path flow is
-routed in segments between tributary junctions so each tributary is charged only the
-infiltration of the cells it actually travels (see the core method below).
-
-This convenience form computes the static routing data on the fly (tests / hand-built nets);
-the solver uses the precomputed core method via [`DynNetworkRateParams`](@ref).
-"""
-function _route_flow(net::DynNetwork,
-                     external_inflow::AbstractVector{<:Real},
-                     spilling::AbstractVector{Bool},
-                     footprint_infil::AbstractVector{<:Real},
-                     path_cell_infil::AbstractVector{<:AbstractVector{<:Real}};
-                     cvplan = nothing, trap_level = nothing)
-    order, _      = _network_order(net)
-    # No oblivious grid here (hand-built nets): cells sit at their capacity floor (-infiltration),
-    # which makes the residual rule reproduce the plain infiltration-prefix behaviour.
-    path_runoff   = [Float64[-c for c in ci] for ci in path_cell_infil]
-    path_events   = _path_event_templates(net)
-    return _route_flow(net, external_inflow, spilling, footprint_infil,
-                       path_runoff, path_events, order, _merge_targets(net),
-                       cvplan, trap_level)
-end
-
-"""
     _path_delivered!(path_runoff, head_flow, events, trib_output, culvert_actual, cvplan, net,
                      trap_level, nbs_draw) -> Float64
 
@@ -423,9 +393,9 @@ end
                 path_events, order, merge_target,
                 cvplan = nothing, trap_level = nothing, nbsrt = nothing) -> Vector{Float64}
 
-Core router: the total inflow arriving at each trap, in `net.traps` order.  All static routing
-data is pre-supplied, so this is the form the rate function calls every step (the keyword method
-above is the convenience wrapper that derives it).
+The router: the total inflow arriving at each trap, in `net.traps` order.  All static routing
+data is pre-supplied — [`_build_rate_params`](@ref) precomputes it once per solve onto
+[`DynNetworkRateParams`](@ref) — so the per-step cost here is just the walk.
 
 Walks `order` — topologically sorted, so everything upstream of a node is final when it is
 visited — accumulating into per-trap and per-path totals.  Segmented routing charges flow the

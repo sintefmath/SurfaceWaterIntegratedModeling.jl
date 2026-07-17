@@ -203,9 +203,22 @@ end
 # networksolver.jl
 # ---------------------------------------------------------------------------
 
+# Drive the router on a hand-built net: derive the static routing data that
+# `_build_rate_params` would otherwise precompute onto the rate params, and take per-cell
+# *infiltration*, negated into the residual the router charges flow against.  There is no
+# oblivious runoff grid here, so every cell sits at its capacity floor — the same convention
+# `_build_rate_params` applies when `runoff === nothing`.
+_rf(net, ext, spilling, fp_infil, cell_infil; cvplan = nothing, trap_level = nothing) =
+    SWIM._route_flow(net, ext, spilling, fp_infil,
+                     [Float64[-c for c in ci] for ci in cell_infil],
+                     SWIM._path_event_templates(net),
+                     first(SWIM._network_order(net)),
+                     SWIM._merge_targets(net),
+                     cvplan, trap_level)
+
 @testset "networksolver: flow routing (pure topology)" begin
     T(ix, sp) = DynTrap(ix, sp)
-    rf = SWIM._route_flow
+    rf = _rf
 
     # path_cell_infil is per-cell; for single-cell paths it is a 1-element vector.
     # chain  A(full) -> path -> B(leaf)
@@ -669,7 +682,7 @@ end
     net = DynNetwork(DynFlowPath[], [t1, t2], [cv])
     ts  = mock_ts([0.0 0.0])              # both culvert inverts at elevation 0
     plan = SWIM._build_culvert_plan(net, ts)
-    rf(levels) = SWIM._route_flow(net, [0.0, 0.0], [false, false], [0.0, 0.0],
+    rf(levels) = _rf(net, [0.0, 0.0], [false, false], [0.0, 0.0],
                                   Vector{Float64}[]; cvplan = plan, trap_level = levels)
 
     # trap 1 higher -> culvert flows 1 -> 2; drawn at inlet == delivered at outlet
@@ -686,7 +699,7 @@ end
     # equal surfaces -> no driving head -> no flow
     @test rf([1.0, 1.0]) == [0.0, 0.0]
     # without a culvert plan the culvert is ignored entirely
-    @test SWIM._route_flow(net, [5.0, 7.0], [false, false], [0.0, 0.0],
+    @test _rf(net, [5.0, 7.0], [false, false], [0.0, 0.0],
                            Vector{Float64}[]) == [5.0, 7.0]
 end
 
@@ -708,7 +721,7 @@ end
                      outlet_submerged = false, outlet_head = 0.0)
     @test Q > 0
     # F reaches the path as t0's spill (max(F - 0, 0)); t1 receives whatever the culvert drew
-    rf(F) = SWIM._route_flow(net, [F, 0.0], Bool[true, false], [0.0, 0.0], cellinfil;
+    rf(F) = _rf(net, [F, 0.0], Bool[true, false], [0.0, 0.0], cellinfil;
                              cvplan = plan, trap_level = [0.0, 0.0])
 
     # plenty of flow -> culvert abstracts its full capacity into the trap
