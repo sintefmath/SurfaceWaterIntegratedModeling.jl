@@ -500,26 +500,17 @@ end
 
 # ----------------------------------------------------------------------------
 """
-    _path_cell_infiltration(net, infiltration) -> Vector{Vector{Float64}}
+    _path_cell_values(net, grid) -> Vector{Vector{Float64}}
 
-Per-cell infiltration of each flow path (in `net.flow_paths` order), the grid sampled along
-each path's cells.  Used, negated, as the router's residual reference when no oblivious grid
-is supplied (cells at their capacity floor).
-"""
-function _path_cell_infiltration(net::DynNetwork, infiltration::AbstractMatrix{<:Real})
-    return [isempty(p.cells) ? Float64[] : Float64[infiltration[c] for c in p.cells]
-            for p in net.flow_paths]
-end
+`grid` sampled along each flow path's cells, in `net.flow_paths` order; empty for a zero-length
+connector.  Nothing is mutated.
 
+The caller decides what the values mean.  `_build_rate_params` passes the oblivious runoff grid
+to get the residual [`_attenuate_range`](@ref) charges all flow against, or — with no such grid —
+negated infiltration, which puts every cell at its capacity floor and reproduces the same rule.
 """
-    _path_cell_runoff(net, runoff) -> Vector{Vector{Float64}}
-
-Per-cell oblivious runoff of each flow path, in `net.flow_paths` order — the grid sampled along
-each path's cells.  This is the read-only residual [`_attenuate_range`](@ref) charges all flow
-against.  Nothing is mutated.
-"""
-function _path_cell_runoff(net::DynNetwork, runoff::AbstractMatrix{<:Real})
-    return [isempty(p.cells) ? Float64[] : Float64[runoff[c] for c in p.cells]
+function _path_cell_values(net::DynNetwork, grid::AbstractMatrix{<:Real})
+    return [isempty(p.cells) ? Float64[] : Float64[grid[c] for c in p.cells]
             for p in net.flow_paths]
 end
 
@@ -832,8 +823,8 @@ function _build_rate_params(tstruct::TrapStructure,
     # flow nothing); without one (hand-built nets) cells sit at their capacity floor (-infiltration),
     # which reproduces the plain infiltration-prefix behaviour.
     path_runoff = runoff === nothing ?
-        [Float64[-c for c in ci] for ci in _path_cell_infiltration(net, infiltration)] :
-        _path_cell_runoff(net, runoff)
+        [Float64[-c for c in ci] for ci in _path_cell_values(net, infiltration)] :
+        _path_cell_values(net, runoff)
     cvplan  = isempty(net.culverts) ? nothing : _build_culvert_plan(net, tstruct)
     if isempty(net.nbs)
         nbsplan = nothing

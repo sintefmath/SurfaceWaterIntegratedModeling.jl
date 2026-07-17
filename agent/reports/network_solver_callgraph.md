@@ -59,7 +59,7 @@ _build_rate_params
 ├─ _build_culvert_plan ───► «CulvertPlan»               endpoint owners + inverts
 ├─ _path_event_templates                                per-path ordered stops
 ├─ _footprint_infiltration                              full-trap loss per trap
-├─ _path_cell_infiltration / _path_cell_runoff          per-path residual reference
+├─ _path_cell_values                                    per-path residual reference
 └─ _build_nbs_plan ───────► «NBSElement» «NBSPlan»       ★ NBS only
 ```
 

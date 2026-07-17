@@ -157,7 +157,7 @@ identity is what makes a true pass-through NBS emit `diff ≈ 0`.
   `nbs_draw` (router output = `:nbsin` captures).
 - `_build_nbs_plan` — endpoint walk → `O_0`, `O_0_total`, `ratio_e`, carrier paths.
 - `_nbs_routing` — per-step output diffs from the live layer state → a fresh `NBSRouting`.
-- `_attenuate_range` (the one rule) / `_attenuate_diff` (whole-path), `_path_cell_runoff`,
+- `_attenuate_range` (the one rule) / `_attenuate_diff` (whole-path), `_path_cell_values`,
   `DynNetworkRateParams.path_runoff` (always present — real grid or `−infiltration`).
 - `_path_event_templates` emits `:nbsin`; `_path_delivered!` walks cells against `path_runoff`
   and handles the `:nbsin` draw; `_route_flow` seeds `trap_extra` and head-injects `path_diff`
