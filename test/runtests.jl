@@ -7,6 +7,7 @@ include("dynamics_test.jl")
 include("dynamic_membership_test.jl")  # grow/detach/fusion + apply_fill!/apply_unfill!/apply_empty!
 include("network_driver_test.jl")      # gate Phase C: build/predict/step/finalize driver
 include("nbs_routing_test.jl")         # NBS signed-diff router element (agent/NBS_ROUTING_NODE_PLAN.md)
+include("network_states_test.jl")      # network_states_at_timepoints: NBS-layer + trap-volume replay
 
 
 surf1_file = joinpath(artifact"swim_testdata", "data", "small", "mini.txt")

@@ -4,7 +4,8 @@ import Roots
 
 export flatten_grid!, raise_buildings!, identify_flat_areas, toplevel_traps,
     show_region_selection, all_subtraps_of, interpolate_timeseries,
-    trap_states_at_timepoints, compute_spillfield_graph, all_upstream_regions,
+    trap_states_at_timepoints, network_states_at_timepoints,
+    all_states_at_timepoints, compute_spillfield_graph, all_upstream_regions,
     upstream_area, current_upstream_area,
     polyline_grid_intersections, edgeset2dict, reconstruct_spillfield,
     flatten_small_traps, waterheight
@@ -146,6 +147,290 @@ function trap_states_at_timepoints(tstruct::TrapStructure{<:Real},
         push!(result, (filled, [ca.amount for ca ∈ cur_amount], ix))
     end
     return result
+end
+
+# ----------------------------------------------------------------------------
+"""
+    network_states_at_timepoints(tstruct, seq, timepoints;
+                                 dyn_traps, culverts, nbs, infiltration, verbose)
+
+Compute the exact water state of the *dynamic-network* elements (culvert/NBS
+coupled traps and NBS layered storage) at a set of timepoints.
+
+`trap_states_at_timepoints` re-projects every non-full trap with the single-trap
+analytic/ODE path, which is only correct for traps that are *not* coupled into a
+dynamic network.  For network-covered traps the volume is governed by the coupled
+multi-trap ODE, and the NBS internal per-layer volumes are not exposed at all.
+This function fills both gaps by replaying the coupled network — and only the
+network — forward from the start of the run, reusing the already-computed `seq`
+(event timestamps, external inflow, filled status, weather) as the event
+schedule, and sampling the network's state at each requested timepoint.
+
+The weather scenario is *not* a separate argument: each weather change is already
+recorded in `seq` (a boundary event carries the period's `rain_rate`, read with
+`rainrate_at`, and the runoff with `runoff_at`), so the replay recovers it from
+`seq` directly.
+
+The NBS layer storage is path-dependent (it accumulates and drains across the
+whole run), so the replay necessarily starts at the beginning; the requested
+`timepoints` are sampled in a single ascending pass.
+
+To assemble a complete, correct picture, overlay this function's `trap_volumes`
+onto a `trap_states_at_timepoints` result: the keys of `trap_volumes` are exactly
+the network-covered traps that `trap_states_at_timepoints` cannot compute
+accurately, so they identify precisely which entries to overwrite.
+
+# Arguments
+- `tstruct::TrapStructure{<:Real}`: trap structure object describing the terrain traps.
+- `seq::Vector{SpillEvent}`: the sequence of events, as computed by
+                             [`fill_sequence`](@ref) for the same scenario.
+- `timepoints::Vector{<:Real}`: the timepoints to sample.  Ascending order.
+- `dyn_traps::Vector{Int}`: the same dynamic-trap seeds passed to [`fill_sequence`](@ref)
+                             (default: empty).
+- `culverts::Vector{DynCulvert}`: the same culverts passed to [`fill_sequence`](@ref)
+                             (default: empty).
+- `nbs::Vector{DynNBSPlacement}`: the same NBS placements passed to [`fill_sequence`](@ref)
+                             (default: empty).
+- `infiltration::Union{Matrix{<:Real}, Nothing}`: the same infiltration grid passed to
+                             [`fill_sequence`](@ref) (default: `nothing`).
+- `verbose::Bool`: print progress information during computation (default: true).
+
+# Returns
+A `Vector` of named tuples, one per timepoint, each with:
+- `trap_volumes::Dict{Int,Float64}`: for every network-covered trap, its trap
+  index mapped to the exact water volume at the timepoint.
+- `nbs_layers::Dict{Int,Vector{Float64}}`: for every NBS placement, its stable
+  `id` mapped to the per-layer water volumes (upper layer first) at the timepoint.
+
+See also [`fill_sequence`](@ref), [`trap_states_at_timepoints`](@ref).
+"""
+function network_states_at_timepoints(tstruct::TrapStructure{<:Real},
+                                      seq::Vector{SpillEvent},
+                                      timepoints::Vector{<:Real};
+                                      dyn_traps::Vector{Int}=Int[],
+                                      culverts::Vector{DynCulvert}=DynCulvert[],
+                                      nbs::Vector{DynNBSPlacement}=DynNBSPlacement[],
+                                      infiltration::Union{Matrix{<:Real}, Nothing}=nothing,
+                                      verbose::Bool=true)
+
+    isempty(seq) && error("Empty spill-event sequence.")
+    (issorted(timepoints) && (isempty(timepoints) || seq[1].timestamp <= timepoints[1])) ||
+        error("Timepoint sequence should be ascending and within bounds.")
+
+    nt = numtraps(tstruct)
+
+    # infiltration map, prepared exactly as `fill_sequence` does (default 0, NBS footprints
+    # never infiltrate — the layer models own that water)
+    infil = (infiltration === nothing) ? zeros(size(tstruct.topography)) : copy(infiltration)
+    isempty(nbs) || (infil[vcat([n.footprint for n in nbs]...)] .= 0.0)
+
+    z_vol_tables = _compute_z_vol_tables(tstruct)
+    seeds        = _dyn_seeds(tstruct, dyn_traps, DynCulvert[])
+
+    # running full state, advanced incrementally from `seq` (avoids re-reconstructing per event)
+    filled  = Vector{Bool}(undef, nt)
+    amounts = Vector{FilledAmount}(undef, nt)
+    inflow  = Vector{Float64}(undef, nt)
+    runoff  = zeros(Float64, size(tstruct.topography))
+    precip  = 0.0
+
+    driver  = nothing                     # built at the first (weather-boundary) event
+    result  = Vector{@NamedTuple{trap_volumes::Dict{Int,Float64},
+                                 nbs_layers::Dict{Int,Vector{Float64}}}}()
+    tp_ix   = 1                           # next unsampled timepoint
+
+    for i in 1:length(seq)
+        ev       = seq[i]
+        t_i      = ev.timestamp
+        next_t   = (i < length(seq)) ? seq[i+1].timestamp : Inf
+        boundary = ev.rain_rate !== nothing     # a weather-period start (full snapshot)
+
+        if boundary
+            # carry the NBS storage across the gap since the last commit, then start a fresh
+            # period driver from this full snapshot
+            driver === nothing || _carry_nbs!(driver, tstruct, infil, z_vol_tables, t_i)
+            _apply_field!(filled,  ev.filled)
+            _apply_field!(amounts, ev.amount)
+            _apply_field!(inflow,  ev.inflow)
+            _apply_runoff!(runoff, ev.runoff)
+            precip = ev.rain_rate
+            nbs_state = driver === nothing ? Dict{Int,Vector{Float64}}() : driver.nbs_state
+            driver = _rebuild_replay_driver(driver, tstruct, seeds, culverts, nbs, filled,
+                                            amounts, inflow, runoff, precip, infil,
+                                            z_vol_tables, t_i, nbs_state)
+        else
+            # incremental event: advance the running state, then rebuild the network only if it
+            # is actually touched (a member trap fired or an inflow region changed)
+            touched = _event_touches_network(driver, ev)
+            _apply_field!(filled,  ev.filled)
+            _apply_field!(amounts, ev.amount)
+            _apply_field!(inflow,  ev.inflow)
+            _apply_runoff!(runoff, ev.runoff)
+            if touched
+                _carry_nbs!(driver, tstruct, infil, z_vol_tables, t_i)
+                driver = _rebuild_replay_driver(driver, tstruct, seeds, culverts, nbs, filled,
+                                                amounts, inflow, runoff, precip, infil,
+                                                z_vol_tables, t_i, driver.nbs_state)
+            end
+        end
+
+        # sample every requested timepoint that falls in this segment [t_i, next_t)
+        while tp_ix <= length(timepoints) && timepoints[tp_ix] < next_t
+            tp = timepoints[tp_ix]
+            verbose && println("Handling timepoint: ", tp)
+            push!(result, _sample_network(driver, tstruct, infil, z_vol_tables, Float64(tp)))
+            tp_ix += 1
+        end
+        tp_ix > length(timepoints) && break
+    end
+    return result
+end
+
+# ----------------------------------------------------------------------------
+"""
+    all_states_at_timepoints(tstruct, seq, timepoints;
+                             dyn_traps, culverts, nbs, infiltration, verbose)
+
+Compute the exact water state of *every* trap plus the NBS layer storage at a set of timepoints,
+combining [`trap_states_at_timepoints`](@ref) and [`network_states_at_timepoints`](@ref).
+
+`trap_states_at_timepoints` projects each trap with the single-trap path, which is inaccurate
+for traps coupled into a dynamic network.  This function overwrites exactly those entries with
+the coupled-solver volumes from `network_states_at_timepoints`, and appends the NBS layer
+volumes.  When there are no dynamic elements it is just `trap_states_at_timepoints` with empty
+NBS layers.
+
+# Arguments
+- `tstruct::TrapStructure{<:Real}`: trap structure object describing the terrain traps.
+- `seq::Vector{SpillEvent}`: the sequence of events from [`fill_sequence`](@ref).
+- `timepoints::Vector{<:Real}`: the timepoints to sample.  Ascending order.
+- `dyn_traps`, `culverts`, `nbs`, `infiltration`: the same dynamic-network inputs passed to
+  [`fill_sequence`](@ref) (all default to empty / `nothing`).
+- `verbose::Bool`: print progress information during computation (default: true).
+
+# Returns
+A `Vector` of named tuples, one per timepoint, each with:
+- `filled::Vector{Bool}`: whether each trap is filled at the timepoint.
+- `amounts::Vector{Float64}`: the water volume in each trap, with network-covered traps taken
+  from the coupled solver.
+- `nbs_layers::Dict{Int,Vector{Float64}}`: NBS placement `id` -> per-layer water volumes.
+- `ix::Int`: index of the last `SpillEvent` at or before the timepoint.
+
+See also [`trap_states_at_timepoints`](@ref), [`network_states_at_timepoints`](@ref).
+"""
+function all_states_at_timepoints(tstruct::TrapStructure{<:Real},
+                                  seq::Vector{SpillEvent},
+                                  timepoints::Vector{<:Real};
+                                  dyn_traps::Vector{Int}=Int[],
+                                  culverts::Vector{DynCulvert}=DynCulvert[],
+                                  nbs::Vector{DynNBSPlacement}=DynNBSPlacement[],
+                                  infiltration::Union{Matrix{<:Real}, Nothing}=nothing,
+                                  verbose::Bool=true)
+
+    base = trap_states_at_timepoints(tstruct, seq, timepoints; verbose = verbose)
+    net  = network_states_at_timepoints(tstruct, seq, timepoints;
+                                        dyn_traps = dyn_traps, culverts = culverts,
+                                        nbs = nbs, infiltration = infiltration,
+                                        verbose = verbose)
+    @assert length(base) == length(net)
+
+    result = Vector{@NamedTuple{filled::Vector{Bool}, amounts::Vector{Float64},
+                               nbs_layers::Dict{Int,Vector{Float64}}, ix::Int}}()
+    for (b, n) in zip(base, net)
+        filled, amounts, ix = b
+        amounts = copy(amounts)
+        for (g, v) in n.trap_volumes             # overwrite the network-covered traps
+            amounts[g] = v
+        end
+        push!(result, (; filled, amounts, nbs_layers = n.nbs_layers, ix))
+    end
+    return result
+end
+
+# ----------------------------------------------------------------------------
+# helpers for network_states_at_timepoints
+
+# apply one SpillEvent field onto a running full vector: a full snapshot replaces it, a vector
+# of IncrementalUpdate patches the changed entries.
+function _apply_field!(dst::Vector, src)
+    if eltype(src) <: IncrementalUpdate
+        for u in src; dst[u.index] = u.value; end
+    else
+        copyto!(dst, src)
+    end
+    return dst
+end
+
+# same for the runoff grid (full Matrix vs linear-indexed IncrementalUpdates).
+function _apply_runoff!(dst::Matrix, src)
+    if src isa AbstractMatrix
+        copyto!(dst, src)
+    else
+        for u in src; dst[u.index] = u.value; end
+    end
+    return dst
+end
+
+# an event touches the network when one of its member traps fired or one of its inflow regions
+# changed — the same predicate `_touch_affected_networks!` uses, read straight from the event.
+function _event_touches_network(driver, ev)
+    (driver === nothing || isempty(driver.contexts)) && return false
+    fired  = eltype(ev.filled) <: IncrementalUpdate ? Set(u.index for u in ev.filled) : nothing
+    inflow = eltype(ev.inflow) <: IncrementalUpdate ? Set(u.index for u in ev.inflow) : nothing
+    return any(driver.contexts) do ctx
+        (fired  !== nothing && any(g ∈ fired for g in ctx.global_ix)) ||
+        (inflow !== nothing && !isdisjoint(ctx.inflow_regions, inflow))
+    end
+end
+
+# commit every context to `t` under its cached inflow and harvest the advanced NBS layers into
+# the persistent store, so they survive the driver rebuild that follows.
+function _carry_nbs!(driver, tstruct, infil, z_vol_tables, t)
+    for ctx in driver.contexts
+        ctx.last_solve_time < t &&
+            _commit_network!(ctx, tstruct, infil, z_vol_tables, t)
+    end
+    _harvest!(driver)
+    return driver
+end
+
+# build a driver whose topology is `setup_network(filled)` and whose committed trap volumes are
+# `amounts` (both taken from `seq`, so they reproduce the original run's committed state) and
+# whose NBS layers come from `nbs_state`.
+function _rebuild_replay_driver(driver, tstruct, seeds, culverts, nbs, filled, amounts, inflow,
+                                runoff, precip, infil, z_vol_tables, t, nbs_state)
+    rateinfo = RateInfo(copy(runoff), zeros(numtraps(tstruct)),
+                        zeros(numtraps(tstruct)), copy(inflow))
+    return build_network_driver(tstruct, seeds, culverts, findall(filled), amounts,
+                                rateinfo, infil, z_vol_tables, t, Inf;
+                                nbs_placements = nbs, precipitation = precip,
+                                nbs_state = nbs_state)
+end
+
+# sample the network state at absolute time `tp`: for each component, integrate a COPY of its
+# committed state forward (no topology event can fall before the next seq event, which is > tp),
+# then read the trap volumes and per-placement NBS layer volumes off the result.
+function _sample_network(driver, tstruct, infil, z_vol_tables, tp::Float64)
+    trap_volumes = Dict{Int,Float64}()
+    nbs_layers   = Dict{Int,Vector{Float64}}()
+    driver === nothing && return (; trap_volumes, nbs_layers)
+    for ctx in driver.contexts
+        s = copy(ctx.state)
+        solveDynNetwork!(s, tstruct, ctx.net, infil, ctx.extern_inflow;
+                         tmax = tp - ctx.last_solve_time, runoff = ctx.runoff,
+                         precipitation = ctx.precip, zvt = z_vol_tables)
+        ntc = length(ctx.global_ix)
+        for (i, g) in enumerate(ctx.global_ix)
+            trap_volumes[g] = s[i]
+        end
+        base = 0
+        for nb in ctx.net.nbs
+            L = length(nb.system.layers)
+            nbs_layers[nb.id] = s[(ntc + base + 1):(ntc + base + L)]
+            base += L
+        end
+    end
+    return (; trap_volumes, nbs_layers)
 end
 
 # ----------------------------------------------------------------------------
