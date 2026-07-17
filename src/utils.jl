@@ -12,7 +12,8 @@ export flatten_grid!, raise_buildings!, identify_flat_areas, toplevel_traps,
 
 # ----------------------------------------------------------------------------
 """
-    interpolate_timeseries(tstruct, seq, timepoints; 
+    interpolate_timeseries(tstruct, seq, timepoints;
+                           dyn_traps, culverts, nbs, infiltration,
                            filled_color=1, trap_color=2, river_color=3)
 
 Compute the exact terrain fill states for a sequence of timepoints, given a
@@ -27,6 +28,12 @@ The result is returned as a `Vector{Matrix{Int}}`, of the same length as
 `timepoints`.  A second return value provides a corresponding `Vector{Int}` that
 for each timepoint provides the index for the latest preceding event in `seq`.
 
+If the run had dynamic networks (`dyn_traps` / `culverts` / `nbs`), pass the same
+ones here: the submergence of network-coupled traps is then taken from the
+coupled solver via [`all_states_at_timepoints`](@ref) instead of the single-trap
+projection.  With no network inputs (the default) the result is identical to the
+plain static analysis.
+
 # Arguments
 - `tstruct::TrapStructure{<:Real}`: trap structure object describing the terrain traps
 - `seq::Vector{SpillEvent}`: the sequence of events, as computed by
@@ -34,35 +41,47 @@ for each timepoint provides the index for the latest preceding event in `seq`.
 - `timepoints::Vector{<:Real}`: the timepoints for which we want to compute the exact
                                 terrain fill states.  Should be given in ascending
                                 order.
+- `dyn_traps::Vector{Int}`: dynamic-trap seeds passed to [`fill_sequence`](@ref) (default: empty).
+- `culverts::Vector{DynCulvert}`: culverts passed to [`fill_sequence`](@ref) (default: empty).
+- `nbs::Vector{DynNBSPlacement}`: NBS placements passed to [`fill_sequence`](@ref) (default: empty).
+- `infiltration::Union{Matrix{<:Real}, Nothing}`: infiltration grid passed to
+                                [`fill_sequence`](@ref) (default: `nothing`).
 - `filled_color::Int`: The 'color' value to represent filled areas (default: 1).
 - `trap_color::Int`: The 'color' to represent unfilled parts of traps (default: 2).
 - `river_color::Int`: The 'color' to represent intermittent rivers (default: 3).
 - `verbose::Bool`: Whether to print progess information during computations (default: true).
 
-See also [`spillanalysis`](@ref), [`fill_sequence`](@ref), 
-[`trap_states_at_timepoints`](@ref).
+See also [`spillanalysis`](@ref), [`fill_sequence`](@ref),
+[`all_states_at_timepoints`](@ref), [`trap_states_at_timepoints`](@ref).
 """
 function interpolate_timeseries(tstruct::TrapStructure{<:Real},
                                 seq::Vector{SpillEvent},
                                 timepoints::Vector{<:Real};
+                                dyn_traps::Vector{Int}=Int[],
+                                culverts::Vector{DynCulvert}=DynCulvert[],
+                                nbs::Vector{DynNBSPlacement}=DynNBSPlacement[],
+                                infiltration::Union{Matrix{<:Real}, Nothing}=nothing,
                                 filled_color::Int=1,
                                 trap_color::Int=2,
                                 river_color::Int=3,
                                 verbose::Bool=true)
 
-    (issorted(timepoints) && (seq[1].timestamp <= timepoints[1])) || 
+    (issorted(timepoints) && (seq[1].timestamp <= timepoints[1])) ||
         error("Timepoint sequence should be strictly increasing and within bounds.")
 
-    tstates = trap_states_at_timepoints(tstruct, seq, timepoints, verbose=verbose)
+    tstates = all_states_at_timepoints(tstruct, seq, timepoints;
+                                       dyn_traps = dyn_traps, culverts = culverts,
+                                       nbs = nbs, infiltration = infiltration,
+                                       verbose = verbose)
 
     result = Vector{Matrix{Int}}()
     tix = Vector{Int}()
     for i in 1:length(tstates)
         verbose && println("Generating timepoint: ", i)
-        filled_traps = tstates[i][1]
-        push!(result, _fill_state_to_terrainmap(tstruct, filled_traps, tstates[i][2],
+        filled_traps = tstates[i].filled
+        push!(result, _fill_state_to_terrainmap(tstruct, filled_traps, tstates[i].amounts,
                                                 filled_color, trap_color, river_color))
-        push!(tix, tstates[i][3])
+        push!(tix, tstates[i].ix)
     end
     return result, tix
 end

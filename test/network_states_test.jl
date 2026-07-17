@@ -81,3 +81,43 @@ const SWIM = SurfaceWaterIntegratedModeling
         @test both[k].filled == plain[k][1]                       # filled status from trap_states
     end
 end
+
+# ---------------------------------------------------------------------------
+# interpolate_timeseries is network-aware: passing the network inputs routes the
+# network-covered traps' submergence through the coupled solver (all_states_at_timepoints),
+# so a retained-upstream NBS leaves the downstream pit less submerged than the oblivious
+# projection while it is filling.  A graded pit bottom makes the submerged extent depend on
+# the volume, so the difference is visible in the rendered map.
+# ---------------------------------------------------------------------------
+@testset "interpolate_timeseries: network-aware submergence" begin
+    N    = 30
+    grid = Float64[j for i in 1:N, j in 1:N]
+    for i in 12:18, j in 3:6; grid[i, j] = 0.6 * (j - 3); end   # graded pit bottom
+    ts   = spillanalysis(grid, usediags = true)
+    LI   = LinearIndices(size(grid))
+    pit  = 1
+    fp   = [LI[CartesianIndex(i, j)] for i in 12:18 for j in 15:20]
+    pl   = SWIM.DynNBSPlacement(SWIM.puddle(50.0; kOUT = 0.01), fp, CartesianIndex{2}[])
+    w    = [SWIM.WeatherEvent(0.0, 1.0e-3)]
+
+    seqN = fill_sequence(ts, w; nbs = [pl])
+    seq0 = fill_sequence(ts, w)
+    f0   = seq0[findfirst(e -> e.filled isa Vector{IncrementalUpdate{Bool}} &&
+                               any(u -> u.index == pit && u.value, e.filled), seq0)].timestamp
+    tps  = filter(t -> t >= seqN[1].timestamp, sort(unique([f0 * 0.15, f0 * 0.5])))
+
+    maps_obl, tix_obl = interpolate_timeseries(ts, seqN, tps; verbose = false)             # oblivious
+    maps_net, tix_net = interpolate_timeseries(ts, seqN, tps; nbs = [pl], verbose = false) # network-aware
+
+    @test tix_obl == tix_net                                    # same event indexing
+    @test all(size(m) == size(grid) for m in maps_net)
+    # the NBS holds water back, so the pit is never MORE submerged under the network path, and is
+    # strictly less submerged at some sampled instant while it fills
+    subm(m) = count(==(1), m)
+    @test all(subm(maps_net[k]) <= subm(maps_obl[k]) for k in 1:length(tps))
+    @test any(subm(maps_net[k]) <  subm(maps_obl[k]) for k in 1:length(tps))
+
+    # with no network inputs the network-aware call reduces to the plain result
+    maps_plain, _ = interpolate_timeseries(ts, seqN, tps; verbose = false)
+    @test all(maps_plain[k] == maps_obl[k] for k in 1:length(tps))
+end
