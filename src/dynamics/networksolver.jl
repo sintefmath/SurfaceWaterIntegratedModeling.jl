@@ -180,6 +180,22 @@ the offset that splits them: node `p <= np` is flow path `p`, node `q > np` is t
 Edges follow the flow: trap → its spill path, path → its target trap, tributary → the path it
 joins, culvert inlet owner → outlet owner.  `net.traps` order alone won't do, since it doesn't
 fix the path/trap interleaving once tributaries exist.  Nothing is mutated.
+
+!!! note "Why culverts get an edge and NBS placements do not"
+    An edge is needed only for a read-after-write *within* one routing pass.  A culvert has
+    one: its inlet draws `min(capacity, current)` — what is actually available there — and its
+    outlet then delivers exactly that, so the inlet must be visited first.
+
+    An NBS has none.  Its output is `O_terrain(V)` / `E_l(V)`, a function of the **stored layer
+    state**, so [`_nbs_routing`](@ref) fixes `path_diff` / `trap_diff` before the walk begins;
+    the router only adds them, exactly as it adds `external_inflow`.  In the other direction
+    `nbs_draw` is write-only during the walk and is not read until after
+    [`_routed_inflow`](@ref) returns.  Neither direction reads what the other writes, so no
+    ordering constraint exists to encode — a carrier path may legitimately be visited before
+    the inflow path feeding the same placement.
+
+    NBS placements *do* get edges in `_coupling_graph` (`network_utils.jl`), but that is an
+    undirected graph deciding which elements must be solved **together**, not in what order.
 """
 function _network_order(net::DynNetwork)
     np = length(net.flow_paths)
@@ -743,6 +759,14 @@ while routing — hence a router output rather than a plan field.  It is signed:
 that is storing water rides a negative diff, which arrives here as a *deficit* in this
 placement's input rather than as flow that quietly bypassed it.
 
+**The two directions do not meet within a step, and must not.** The `in` fields come from the
+layer state `V`; the `out` field feeds `dV`.  So a placement's output does *not* reflect the
+draw collected alongside it — outflow follows stored volume, not what is arriving this instant,
+and the draw reaches the output only through integration.  That is what keeps the RHS free of an
+algebraic loop, and why routing needs no NBS ordering (see [`_network_order`](@ref)).  Sanity
+check: at steady state `dS/dt = 0`, so `O_terrain = I_1` and `diffbase = nbs_draw` — the
+placement passes the network draw straight through.
+
 The attenuation reference `path_runoff` is not here — it is static and lives on the rate params.
 """
 struct NBSRouting
@@ -1068,6 +1092,21 @@ Shared by the rate function and the `:unspill` condition, so the two cannot disa
 is spilling.  With NBS the signed output diffs are folded into the routing via `nbsrt`, and the
 `:nbsin` flow captured during routing comes back as `nbs_draw`.  Nothing the caller owns is
 mutated; scratch is allocated per call.
+
+!!! note "`nbs_draw` is complete on return"
+    A placement's draw is summed across every path crossing its footprint-inflow cells, so it is
+    only trustworthy once *all* of them have been walked.  Three things make that hold, and a
+    caller must not read `nbs_draw` before this function returns:
+
+    1. `_nbs_coupled_nodes` (`network_utils.jl`) forces every path crossing a footprint-inflow
+       cell into that placement's component, so no contributor can sit in another `net`.
+    2. [`_route_flow`](@ref) walks every node of `order`, so every `:nbsin` fires.
+    3. `nbs_draw` is write-only during the walk — order of contributions is irrelevant to a sum.
+
+    Point 1 is the load-bearing one: were the coupling incomplete, a path's flow would simply
+    never reach the placement.  It cannot go unnoticed, though — `_localize_path` resolves each
+    `nbs_inlet` through `nbsmap`, so a path landing in a component without its NBS throws at
+    build rather than under-counting silently.
 """
 function _routed_inflow(V, p::DynNetworkRateParams)
     geom = p.geom
