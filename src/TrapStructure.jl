@@ -52,7 +52,7 @@ mutable struct TrapStructure{T<:Real}
     agglomerations::Graphs.SimpleDiGraph # hierarchy of sub/supertraps
     clip_mask::Union{Matrix{Bool}, Nothing} # clip mask (0: active terrain, 1: clipped away)
     sinks::Vector{CartesianIndex{2}}      # list cells being sinks
-    waterbodies::Vector{CartesianIndex{2}} # list of cells belonging to waterbodies
+    waterbodies::Set{CartesianIndex{2}} # list of cells belonging to waterbodies
     cut_edges::Dict{CartesianIndex{2}, Vector{CartesianIndex{2}}} # Dict of cut edges (barriers)
 end
 

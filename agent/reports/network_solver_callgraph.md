@@ -1,111 +1,157 @@
-# Network solver — call graph
+# `networksolver.jl` — call graph
 
-The dynamic network solver lives in `src/dynamics/` and splits into two phases:
-**construction** (`elements.jl` — build the `DynNetwork` topology) and **solving**
-(`networksolver.jl` — integrate water volumes forward to the next event).
-`culvert_rate.jl` is a leaf used by both.
+The multi-trap ODE solver: evolve a `DynNetwork`'s trap volumes forward to the
+**first topology-changing event** (`:fill` / `:empty` / `:unspill`), to steady
+state, or to a `tmax` cutoff. Network *construction* is separate
+(`build_network.jl` traces it, `network_updating.jl` mutates it); this file only
+*solves* an already-built network.
 
----
+**Exports:** `solveDynNetwork!`, `dynNetworkRateFunction!`.
+**External callers:** `_predict_network!` / `_commit_network!`
+(`network_context.jl`) call `solveDynNetwork!` once per predict / commit.
 
-## Phase 1 — Network construction (`elements.jl`)
-
-```
-setup_network(tstruct, dyn_coords, full_traps; culverts)        elements.jl:181
-├─ _subnetwork(tstruct, coord, full_traps)                      :235   [per start coord]
-│  ├─ flow_path_from(tstruct, ...)                              watercourses.jl:142
-│  ├─ _unfilled_trap_at(tstruct, cell, full_traps)             :263
-│  └─ _build_network(paths, traps, starts_with_trap, tstruct)  :275
-│     └─ _merge_networks(networks)                             :301 (1-arg → 3-arg)
-├─ _expand_with_culverts(tstruct, subnets, culverts, full_traps):210   [only if culverts]
-│  ├─ _occupied_cells(tstruct, subnets)                        :191
-│  └─ _subnetwork(...)                                          (adds inlet/outlet subnets)
-└─ _merge_networks(networks, cv_objs, tstruct)                 :301
-   ├─ _combine_subnets(subnets)                                :384
-   ├─ _dedup_traps(all_paths, all_traps)                       :328
-   ├─ _resolve_cell_overlaps!(all_paths)                       :417
-   ├─ _culvert_owners(tstruct, all_paths, all_traps, cv_objs)  :359
-   ├─ _components(all_paths, all_traps, inlet_owner, outlet_owner) :454
-   │  └─ unite!(x, y)                                          :459 (union-find, nested)
-   └─ _build_component(...)                                    :559   [per connected component]
-      └─ _topological_order(...)                               :498
-         └─ Graphs.topological_sort_by_dfs / is_cyclic
-```
-
-Output: a `Vector{DynNetwork}`, each a connected component of `DynFlowPath` +
-`DynTrap` (+ `DynCulvert`) nodes.
+> Functions are cited by name only, never by line number — line refs rot on
+> every edit. Use jump-to-definition.
 
 ---
 
-## Phase 2 — Solving (`networksolver.jl`)
-
-`solveDynNetwork` is the driver; it advances to the *first topology-changing
-event*, so a full simulation calls it in a loop (see
-`examples/verification/solve_dynamic_network.jl`).
+## Big picture
 
 ```
-solveDynNetwork(tstruct, net, infiltration, inflow, state; ...)  :813
-│
-├─ _build_rate_params(tstruct, net, infiltration, inflow; ...)   :540
-│  ├─ _network_order(net)                                        :189
-│  │  ├─ _add_culvert_edges!(g, net, np)                         :257
-│  │  └─ Graphs.topological_sort_by_dfs
-│  ├─ _path_cell_infiltration(net, infiltration)                 :464
-│  ├─ _infil_prefix(cell_infil)                       [per path] :471
-│  ├─ _merge_targets(net)                                        :213
-│  ├─ _build_culvert_plan(net, tstruct)         [if culverts]    :239
-│  ├─ _build_trap_geometry(tstruct, net, infiltration; zvt)      :72
-│  │  ├─ _compute_z_vol_tables(tstruct)         [if zvt===nothing] (trapvolumes.jl)
-│  │  ├─ subtrapsof(tstruct, tix)                                (sshierarchy.jl)
-│  │  └─ Interpolations.linear_interpolation
-│  └─ _footprint_infiltration(tstruct, net, infiltration)        :450
-│
-├─ dynNetworkRateFunction!(du0, V0, p)        ── initial rate    :608
-│  └─ _routed_inflow(V, p)                                       :592
-│     ├─ _surface_level(geom[i], V[i])         [if culverts]     :136
-│     │  └─ g.v2z(...)                          (interpolant)
-│     └─ _route_flow(net, ...)  ★ CORE ROUTER ★                 :343  (9+ arg form)
-│        ├─ _culvert_flow(cvplan, net, ci, trap_level)  [if culverts] :279
-│        │  └─ culvert_rate(cv, tstruct; ...)                    culvert_rate.jl:86
-│        │     └─ _directional_capacity(...)                     culvert_rate.jl:27
-│        └─ (wetted_infiltration / water_level used by caller)
-│
-│   [the convenience _route_flow at :322 wraps the core one — only the
-│    core 9-arg form is on the hot path, via _routed_inflow]
-│
-├─ _build_event_callback(p, evolving, V0)                        :712
-│  ├─ dynNetworkRateFunction!(dv0, V0, p)   ── baseline for sign test
-│  ├─ _event_conditions(p, evolving)                             :681
-│  ├─ condition(out, V, t, integrator)      ── nested, per ODE step :724
-│  │  ├─ _routed_inflow(V, p)                  (→ _route_flow ...)
-│  │  └─ wetted_infiltration(geom[i], V[i])                      :153
-│  │     └─ water_level(g, V)                                    :127
-│  └─ affect!(integrator, ix)               ── nested; sets event, terminate! :749
-│
-└─ solve(ODEProblem(dynNetworkRateFunction!, V0, (0.0,Inf), p); callback=cb)
-   └─ [DifferentialEquations.jl repeatedly calls]
-      ├─ dynNetworkRateFunction!  →  _routed_inflow  →  _route_flow
-      └─ condition / affect!  (the callback above)
+        _predict_network! / _commit_network!          ‹network_context.jl›
+                        │
+                        ▼
+                 solveDynNetwork!                      ── the driver
+        ┌───────────────┼────────────────┬──────────────────┐
+        ▼               ▼                ▼                  ▼
+ _validate_network  _build_rate_params  _t0_fast_path    callbacks
+ (entry contract)   (static, once)      (skip the ODE)   (event + steady state)
+                        │                                   │
+                        └───────────────┬───────────────────┘
+                                        ▼
+                           dynNetworkRateFunction!           ── ODE RHS, every step
+                                        │
+                                        ▼
+                                 _routed_inflow              ── shared hot path
+                                        │
+                                   _route_flow               ★ core router ★
 ```
+
+`_routed_inflow` is the single place where "what is arriving where" is decided.
+The rate function, the event conditions and the steady-state check all funnel
+through it, so they can never disagree about whether a trap is spilling.
 
 ---
 
-## How to read this for understanding
+## Setup — `_build_rate_params`
 
-- **`_route_flow` (`:343`) is the heart.** Everything funnels through it. It does
-  one topological pass over the merged path/trap/culvert node order, propagating
-  inflow downstream while charging infiltration per-segment. Read its
-  segmented-routing loop (`:367`–`:438`) carefully — that's where mass
-  conservation lives.
-- **`_routed_inflow` (`:592`) is the shared hot path**, called both by the ODE
-  rate function and by the event `condition`. So the router runs many times per
-  solve.
-- **The two `_route_flow` methods** at `:322` and `:343`: the first is a
-  convenience wrapper that computes the static routing data on the fly (used in
-  tests); the solver always uses the 9-arg core form via precomputed
-  `DynNetworkRateParams`.
-- **Three nested closures** inside `_build_event_callback` (`condition`,
-  `affect!`) are what DiffEq drives — they're not top-level functions, easy to
-  miss when grepping.
-- **Leaf geometry helpers** — `water_level`, `_surface_level`,
-  `wetted_infiltration` (`:127`–`:162`) — are the volume↔level↔infiltration
-  conversions every step relies on.
+Everything static for one solve, bundled into `DynNetworkRateParams` so per-step
+work is just routing plus a loop over traps.
+
+```
+_build_rate_params
+├─ _build_trap_geometry ──► _compute_z_vol_tables      ‹fill_sequence.jl›
+│                           numregions, subtrapsof     ‹TrapStructure.jl›
+│                           «TrapGeometry»
+├─ _network_order ────────► _add_culvert_edges!         topological sort over
+│                                                       paths (1:np) + traps (np+1:np+nt)
+├─ _merge_targets                                       tributary → host path
+├─ _build_culvert_plan ───► «CulvertPlan»               endpoint owners + inverts
+├─ _path_event_templates                                per-path ordered stops
+├─ _footprint_infiltration                              full-trap loss per trap
+├─ _path_cell_values                                    per-path residual reference
+└─ _build_nbs_plan ───────► «NBSElement» «NBSPlan»       ★ NBS only
+```
+
+A net with no culverts gets `cvplan = nothing`; a net with no NBS gets
+`nbsplan = nothing`. `runoff` is read **only** to build the NBS plan.
+
+---
+
+## The router — `_route_flow`
+
+```
+_routed_inflow
+├─ water_level                     (culverts only — heads at each end)
+├─ _nbs_routing ──► compute_outflow ‹nbs_elements.jl›   ★ signed output diffs
+│                   «NBSRouting»
+└─ _route_flow                     ★ core ★
+   ├─ _path_delivered!             walk one path in event order
+   │  ├─ _attenuate_range          the one flow-tracking rule
+   │  └─ _culvert_flow ──► culvert_rate ‹culvert_rate.jl›
+   │                       └─► _directional_capacity
+   └─ _route_trap_node!            culvert deliver/drain, then spill if full
+      └─ _culvert_flow ↑
+```
+
+Both nodes are visited in `_network_order`, so everything upstream of a node is
+final by the time it is reached.
+
+**Mass conservation.** `_path_delivered!` records what a culvert inlet *actually
+drew* in `culvert_actual`, and that exact amount — never the requested capacity
+— is what the outlet later delivers. A full trap emits
+`max(inflow - footprint_infil, 0)` and nothing else.
+
+**Attenuation.** `_attenuate_range` charges flow against the *oblivious
+residual* `path_runoff`, not raw infiltration, so a cell the background already
+saturated is not charged twice. It is the network-side mirror of `_track_flow!`
+(`flow.jl`), which builds the very grid it reads.
+
+---
+
+## Rate function and events
+
+```
+dynNetworkRateFunction!
+├─ _routed_inflow ↑
+├─ wetted_infiltration ──► water_level     accumulating trap: wetted area only
+├─ _nbs_state_count
+└─ compute_outflow ‹nbs_elements.jl›       ★ per NBS layer
+
+_build_event_callback ──► _event_conditions ──► «EventCondition»
+│                         _routed_inflow ↑
+└─ «DynNetworkEvent»                       VectorContinuousCallback, LeftRootFind
+
+_build_steadystate_callback      ──► _routed_inflow ↑, wetted_infiltration
+_build_steadystate_callback_nbs  ──► dynNetworkRateFunction! ↑    ★ NBS only
+
+_t0_fast_path ──► _routed_inflow ↑, wetted_infiltration
+```
+
+Three conditions are monitored and all three must stay: `:fill`
+(`capacity - V`), `:empty` (`V`, parents only — a leaf at 0 is just its floor),
+`:unspill` (`inflow - loss`).
+
+The steady-state detector is a `DiscreteCallback`, not a continuous one, because
+`wetted_infiltration` is a step function of `V` and interpolated mid-step states
+would give spurious crossings. `_build_steadystate_callback_nbs` replaces it when
+NBS are present: the cheap `_routed_inflow` check cannot express the layer
+dynamics, so it evaluates the full rate function instead.
+
+`_t0_fast_path` returns an immediate event when the entry state cannot be held (a
+full trap already draining, a parent at its floor with negative inflow), letting
+the caller skip integration entirely.
+
+---
+
+## Types
+
+| Type | Role |
+|---|---|
+| `TrapGeometry` | per-trap capacity, footprint, bottom, infil, `v2z` |
+| `CulvertPlan` | per-culvert endpoint owners, inverts, diameter |
+| `NBSElement` / `NBSPlan` | ★ per-placement layer model, state offset, carrier paths |
+| `NBSRouting` | ★ per-step scratch: signed diffs in, `nbs_draw` out |
+| `DynNetworkRateParams` | everything static for one solve (the ODE `p`) |
+| `EventCondition` / `DynNetworkEvent` | one monitored event; the event that fired |
+
+## External leaves
+
+| Callee | Defined in |
+|---|---|
+| `_compute_z_vol_tables` | `fill_sequence/fill_sequence.jl` |
+| `compute_outflow` | `dynamics/nbs_elements.jl` |
+| `culvert_rate` | `dynamics/culvert_rate.jl` |
+| `numregions`, `subtrapsof` | `TrapStructure.jl` |
+| `solve`, `VectorContinuousCallback`, `DiscreteCallback` | DifferentialEquations.jl |
+| `Graphs.topological_sort_by_dfs` | Graphs.jl |

@@ -1,0 +1,25 @@
+Actually, modeling NBS systems as traps to be carved out in the terrain may not be the correct choice because:
+- This breaks for green roofs on buildings.  Buildings are meant to protrude from the terrain (nothing spills across from the terrain into the building).  If a green roof results in "carving out" the footprint of the bulding, the whole effect of the building would disappear.
+- A NBS system does not have to be level.  For instance, a permeable pavement could be along a slope.  It's a single system, but inclined.
+
+Moreover, placing "outlet leak points" inside the trap structure breaks a bit with the logic of static analysis.
+
+Here are two possible alternative ways of modeling NBS systems
+
+* Option 1
+- NBS systems are not given to the ~spillanalysis~ algorithm, and do not influence the static analysis or the TrapStructure at all.  Instead, they should be seen as sophisticated infiltration models on existing terrain.
+- One consequence is that an NBSSystem no longer has an associated watershed.  Instead, its footprint intersects with one or more watersheds, and the inflow of water into the NBSSystem will have to be calculated by adding up the direct rainfall on the footprint with the inflow of water across its boundaries.
+- The NBSSystem will act as a complex infiltration unit, where water that overflows the upper layer will be treated as runoff over the original terrain, whereas the water overflowing the bottom layer will be routed to an outlet point (treated much the same way as a culvert outlet).
+- The traps downstream of any affected spill region will have to be included in the dynamic network, since the flow might be affected by (partially) passing over the footprint of a NBSSystem.
+- This makes the static analysis trivial (NBS not even taken into consideration in ~spillanalysis~), but requires more housekeeping in the dynamic analysis (~fill_sequence~).
+
+* Option 2
+- NBS systems do have their own watersheds (and thus have to be taken into consideration by the ~spillanalysis~/~TrapStructure~, but this will not be modeled as a terrain modification, but rather by flagging the affected terrain cells already in "spillfield" and treating them as a special case that seeds a spill region without being a proper trap bottom.
+- If we can do this, computing NBS inflow becomes trivial (since it is the inflow resulting from an associated spillregion).
+- NBS systems are not traps and do not have spillpoints.  Instead, for the purpose of the static analysis, all the water is routed directly to an 'outlet' (similar to the "infinitie capacity culverts" that ~spillanalysis~ already supports).  So only by changing the topology of the flow field will they affect the trapping hierarchies and flow paths - they play no direct role in these hierarchies themselves.
+
+
+* Note
+We must be careful to consider what happens when a NBS becomes (partially or wholly) submerged.  In option 1 this may happen since NBS footprint may intersect with the footprints of traps that may be filled up.  In option 2, the NBS system will not intersect the lowest-level traps, but may still be contained in supertraps.
+
+If a NBS system becomes submerged, we should treat it as such when computing infiltration and outlet flow.  Also, if the outlet is submerged in the same trap, all flow through outlet should probably cease.

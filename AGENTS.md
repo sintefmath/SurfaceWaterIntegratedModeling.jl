@@ -21,7 +21,7 @@ Key subsystems:
 | Trap volumes & hierarchy    | `trapvolumes.jl`, `sshierarchy.jl` |
 | Full static analysis        | `spillanalysis.jl`                 |
 | Dynamic fill sequencing     | `fill_sequence/` (six files)       |
-| Capacity-limited elements (culverts and NBS) | `dynamics/` (five files) |
+| Dynamic networks (culverts, NBS, ODE solve) | `dynamics/` (nine files) |
 | Flow intensity over terrain | `watercourses.jl`                  |
 | IO & visualisation          | `IOandplot.jl`                     |
 
@@ -45,6 +45,11 @@ standing guidance.
 - No linter is enforced, but the codebase uses 4-space indentation throughout.
 - Exported public API is documented with docstrings; internal helpers are
   prefixed with `_` and are not exported.
+- Document functions consistently, exported or not. Exported functions use a full
+  docstring: call signature, a 2–3 line description, then `# Arguments` and
+  `# Returns` sections. Internal (`_`-prefixed) helpers carry a brief comment in the
+  same spirit — what it does and, where not obvious from the signature, its inputs and
+  return value — kept terse (a few lines), without the section headings.
 - Type parameters use `{T<:Real}` / `{<:Real}` consistently; avoid
   introducing concrete-type constraints in new function signatures.
 - Parallelism is not used yet (commented-out tiling tests exist in
@@ -101,6 +106,43 @@ This is the most algorithmically complex subsystem. Key invariants to preserve:
   `DifferentialEquations.jl`. The ODE terminates via `VectorContinuousCallback`
   with three conditions: trap full, trap empty, or rate sign-change. Do not
   remove any of these three conditions.
+
+## Dynamic networks (`dynamics/`)
+
+When `dyn_traps`, `culverts`, or `nbs` are supplied to `fill_sequence`, the
+affected traps are solved as coupled multi-trap ODE **networks** instead of the
+constant-rate analytic path. The architecture (the "gate" — see
+`agent/GATE_INTEGRATION_PLAN.md`):
+
+- `elements.jl` — the data structures only (`DynFlowPath`, `DynTrap`,
+  `DynCulvert`, `DynNBSPlacement`, `DynNetwork`). NBS is one type end-to-end
+  (`DynNBSPlacement`); the old `DynNBS` overlay element was removed.
+- `build_network.jl` — `setup_network(tstruct, full_traps; dyn_coords, culverts,
+  nbs)` traces the network via `_grow_network_from_seed!`. Seeds are the
+  `dyn_coords`, **both** culvert endpoints, and NBS outflow cells.
+- `network_updating.jl` — the incremental membership layer: `apply_fill!`,
+  `apply_unfill!`, `apply_empty!` mutate the live `Vector{DynNetwork}` in place
+  (grow / detach / subsume / de-subsume / fuse) rather than rebuilding.
+- `network_driver.jl` — `NetworkDriver` owns the components + committed node
+  volumes + persistent NBS layer store; per event it commits, applies the
+  structural change, reconciles the spillgraph, and rebuilds contexts. This is
+  the sole network path `fill_sequence` uses (`build_network_driver` /
+  `_touch_networks_driver!`); the old full-retrace path was retired.
+- `network_context.jl` — the reusable context helpers (`_make_context`,
+  `_predict_network!` / `_commit_network!`, `_finalize_networks!`,
+  `_reconcile_spillgraph!`, external-inflow / covered-set / changetime helpers).
+- `networksolver.jl` — `solveDynNetwork!`, the multi-trap ODE (routing, culvert
+  and NBS rate functions, submergence). Returns one of `:fill` / `:unspill` /
+  `:empty` / `:none`, mapping 1:1 to the `apply_*` entry points.
+- `nbs_elements.jl` — `NBSSystem` / `NBSLayer` layered-storage models (`puddle`,
+  `elhadiGreenRoof`, `mantillaRRmodel`). `culvert_rate.jl`, `network_utils.jl`
+  round out the folder.
+
+Invariants: a **full** trap has `spill_path != 0` (`> 0` downstream, `-1` out of
+domain); a **transitory** frontier has `spill_path == 0` and must hold
+`V < capacity` (the driver clamps a non-full seed to `prevfloat(C)`). A
+terrain-re-emit NBS (`n_terrain ≥ 1`) needs a footprint with a downhill terrain
+exit; a closed-basin footprint needs piped outlets.
 
 ## Dos and don'ts for agents
 

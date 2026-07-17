@@ -39,6 +39,7 @@ correpsonding neighbor downstream cell, using either a 4-element or 8-element st
 ```@autodocs
 Modules=[SurfaceWaterIntegratedModeling]
 Pages = ["spillfield.jl"]
+Private = false
 ```
 
 ### Spillregions
@@ -95,6 +96,8 @@ The `Domain2D` struct represent a rectangular subpart of a terrain grid.  It is
 mainly used to specify subsets of a terrain that should be updated or processed
 in parallel.
 
+<!-- No `Private = false` here, unlike the other blocks: `size`/`min`/`max` are public
+     `Base` methods on `Domain2D`, but Documenter classifies by export and would drop them. -->
 ```@autodocs
 Modules=[SurfaceWaterIntegratedModeling]
 Pages = ["domain.jl"]

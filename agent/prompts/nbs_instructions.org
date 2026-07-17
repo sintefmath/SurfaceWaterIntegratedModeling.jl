@@ -1,0 +1,289 @@
+The purpose of this task is to have NBS systems integrated into dynamic network part of the SurfaceWaterIntegratedModeling (SWIM) codebase, similar to how rate-limited culverts are a part today.
+
+* Description of the NBS system code
+
+The code is found in the ~nbs_elements.jl~ file.  ~NBSLayer~ describes a single layer, and ~NBSSystem~ describes a system consisting of multiple layers.  Each layer has its own properties regarding its own hold ing capacity, how quickly water is transfered trhough outflow or infiltration, evapotranspiration, soil moisture threshold and layer area.
+
+The code in the twin project SUrbArea (file: ~NBS.jl~) shows how rates can be calculated from the layer parameters.  We disregard evapotranspiration for now.
+
+In a ~NBSSystem~, water may flow between layers, or overflow a particular layer, in which case the water is routed back into the surrounding terrain as specified by ~NBSPlacement~ (see further below).
+
+Three examples of NBS system constructors are provided: ~elhadiGreenRoof~, ~mantillaRRmodel~ and ~puddle~.
+
+The NBSPlacement is the element connecting a NBSSystem with a SWIM terrain surface.  It consists of the system itself, a footprint (indices to the cells in the terrian surface covered by the NBSSystem, and a number of outlets, giving the index to the cell where the overflow from each NBSLayer goes.  There are two rules that must be enforced:
+- The NBSLayer area must correspond to the area described by the footprint.
+- The outlet cells must _not_ be part of the NBSPlacement's footprint's drainage area, and must, in fact, be downstream of it.  Otherwise, an error should be flagged.
+
+Like rate-limited culverts, NBSSystems involve non-fixed water flow rates and they must therefore be made part of DynNetworks in order to properly model their impact in the larger terrain.  
+
+
+* Integration considerations
+
+Since NBSPlacements need to have their proper watersheds attributed (so that they can be integrated into a DynNetwork in the same way as selected lakes currently are), they need to be taken into consideration from the start, i.e., when the TrapStructure object is generated using ~spillanalysis()~.  As such, the ~spillanalysis()~ function should be able to take an optional vector of ~NBSPlacement~.  Likewise, the resulting ~tstruct~ needs to contain an this optional vector as an additional entry.  Adding this is an exception to the general rule that we should refrain from adding stuff to TrapStrucure.
+
+From the point of view of a spillpoint analysis and the resulting trap structure, NBS systems should be handled as traps.  This could be achieved by modifying the terrain prior to running ~spillfield()~ and ~spillregions~ by setting the elevation of the affected areas to some fixed, low value, and modifying its spillpoint to match the outlet cell of the lowermost layer.
+- Again, if the outlet cell has been specified to lie within the NBSSystem's spill region, an error should be raised
+- On the other hand, if the outlet cell has not been specified at all (index 0), it could be set to the actual spill point of the NBSSystem's "trap".
+
+From the point of view of an DynNetwork, an NBSSystem should behave much like a trap.  When running `fill_sequence` the presence of NBSSystems (and possible presence of rate-limited culverts provided as separate argument to fill_sequence) should trigger the generation of corresponding DynNetwork, to be used when computing the actual fill sequence.
+
+NB: THere are two types of culverts: those that are rate-limited and those who are not.  The culverts not limited by rate are given as a argument to ~spillanalysis~ when the trap structure is generated.  These culverts only modifidy the static flow field, and do not have to be separately accounted for by DynNetworks.  On the other hand, there are the truly rate-limited culverts - these have to be given as a vector of ~DynCulvert~ when calling ~fill_sequence~.
+
+NNB: The SURbArea project contains its own NBS network implementation.  There may be hints there on how to deal with particular intricacies.
+
+* Open questions from Claude (to be answered before detailed planning)
+
+The task description is clear on the static-analysis side, but leaves several
+design decisions open on the DynNetwork side, plus a few smaller consistency
+gaps.  Each question is a subheading below; please answer by adding a subheading
+(e.g. "** Answer") under the relevant question.  Claude may add further
+clarifying subheadings under an answer if needed.
+
+** Q1: Multi-layer state vs single-trap scalar state
+
+SWIM's network solver models each trap as a *single* scalar state ~V~ (stored
+volume) — see ~dynNetworkRateFunction!~ in ~networksolver.jl~.  An ~NBSSystem~,
+however, has N layers, i.e. N state variables, with an internal cascade
+(infiltration from layer ~i~ feeds layer ~i+1~; each layer may also have its own
+outflow).  The layered dynamics are the whole point of an NBS, so they cannot be
+collapsed to one scalar.
+
+Decision needed: should each ~NBSPlacement~ expand the solver's state vector by a
+block of per-layer states, folded into the *same* ~V~ vector and integrated by the
+*same* rate function (so NBS inflow comes from terrain routing and NBS outflow
+feeds back into it, all in one coupled ODE)?  Or is another structure intended?
+Note that ~NBSNetworkRateFunction!~ in SUrbArea runs standalone on a
+self-contained network with its own inflow ~I~; in SWIM the inflow must instead
+arrive from the surrounding terrain routing and the outflow must re-enter it.
+*** Answer
+Inflow to an NBSSystem should come from the "trap"'s full and active spill area.  It should enter the *topmost* NBSLayer only.
+
+An NBSSystem with n layers have n separate states; these must all have their own entry in the V-vector.  The outflow targets with their flow paths and downstream non-filled traps (or NBSSystems) will also have to be part of the DynNetwork.
+
+**** Claude follow-up Q1a: dedicated network element type for an NBS?
+
+Consequence of this answer: an NBS node in the DynNetwork does *not* behave like
+a ~DynTrap~ at all.  A ~DynTrap~ fills geometrically and only spills once full; an
+NBS instead has n internal states with continuous per-layer outflow
+(~compute_outflow~ is a smooth power law, active whenever ~S > Smax~), and its
+"spill" is not a single overflow event.
+
+This suggests introducing a dedicated network element type (e.g. ~DynNBS~,
+alongside ~DynTrap~ and ~DynCulvert~) that carries the ~NBSPlacement~ plus the
+indices of its n layer-states in the V-vector, rather than shoehorning an NBS
+into ~DynTrap~.  Do you agree with adding a new element type, or is reuse of
+~DynTrap~ intended?
+
+***** Answer
+
+Yes, a dedicated network element type is probably warranted.  Also, it is probably not necessary to have termination triggers associated with a DynNBS, since there is no single point in its saturation state that triggers a change in network topology.
+
+** Q2: Multiple layer outlets vs a single trap spill path
+
+A ~DynTrap~ has exactly one ~spill_path~.  An ~NBSPlacement~ has one outlet per
+layer, and different layers may discharge to different terrain cells (e.g. in
+~mantillaRRmodel~ the surface layer overflows to the environment while the
+drainage layer discharges to the outlet).  The static step (§ above) only uses
+the lowermost layer's outlet to set the "trap" spillpoint.
+
+Decision needed: where do the overflows of the non-lowermost layers route in the
+DynNetwork?  Are all per-layer outlets routed dynamically (while the static
+analysis only sees the bottom one), or is only a single discharge point
+permitted per NBS?
+
+*** Answer
+All per-layer outlets are routed dynamically, and their target flow paths / downstream traps/NBSSystems/culverts must also be part of the DynNetwork.
+
+**** Claude follow-up Q2a: fate of the lowest layer's infiltration
+
+Each layer produces two fluxes: outflow (to its own outlet cell) and
+infiltration (which in ~NBSNetworkRateFunction!~ feeds the *next layer down*).
+For the *lowest* layer there is no next layer.  Where does its infiltration go?
+
+Options: (a) it leaves the modelled system entirely (deep infiltration into the
+ground, i.e. water that simply disappears — acceptable only if intended, since
+mass conservation is otherwise paramount); or (b) a non-zero ~Kinf~ on the bottom
+layer is disallowed / treated as an error.  In the example constructors the
+bottom layer has ~Kinf = 0~, so the case does not arise there — but the general
+rule should be stated.  Which is it?
+***** Answer
+Infiltration from the lowest layer is treated like infiltration in the rest of the terrain - it is water that is "lost" and leave sthe modelled system entirely.
+
+** Q3: Units and mass conservation (mm-storage vs m³-volume)
+
+The NBS math works in mm of storage, with a per-layer area ~A~, and divides rates
+by ~A~ (so ~dS~ is in mm).  SWIM's DynNetwork works in water *volume* (m³).  Mass
+conservation is paramount (see AGENTS.md).
+
+Decision needed: confirm the mm↔m³ conversion to apply at the NBS/terrain
+boundary.  Also: flattening the terrain (§ above) gives the NBS "trap" a
+*geometric* volume capacity, but the NBS's real capacity is ~Smax·A~ per layer —
+which of the two governs the trap's capacity, and how are they reconciled?
+
+*** Answer
+
+All calculations should be made in the unit (gridcell surface area) x (grid topography height unit).  In practice this is usually m2 x m = m3, though this does depend on the units used to define the grid.  If this leads to ambiguities, assume m as height unit for now, and add a comment
+
+**** Claude follow-up Q3a: interpretation of the NBSLayer parameter units
+
+The NBSLayer docstrings state storage thresholds (~Smin~, ~Smax~) in mm and the
+rate coefficients (~Kout~, ~Kinf~) carry matching mm-based units.  If everything
+in SWIM is done in grid volume units (cell-area × height), there are two ways to
+read the layer parameters:
+
+(a) interpret them *directly* in grid height units (so ~Smax~ is a depth in the
+grid's height unit, e.g. metres, and no mm→m conversion is applied); or
+(b) keep them as mm and convert at the NBS/terrain boundary (× 1e-3 × A).
+
+(a) is simpler and keeps the layer definition self-consistent with the grid, but
+reinterprets the docstrings.  Which interpretation do you want?  (I will update
+the nbs_elements.jl docstrings to match.)
+
+***** Answer
+I suggest keeping the mm unit, and do the conversion at the NBS/terrain boundary (with a clear comment explaining what's going on).  It is not a good idea to change the unit here, since the sister Julia project SUrbArea is also using these elements.
+
+**** Claude follow-up Q3b: is the flattened trap's geometric capacity ignored dynamically?
+
+Given Q1 (the NBS is n layer-states, not one geometric fill), the volume capacity
+that the terrain-flattening trick gives the NBS "trap" appears to be irrelevant
+to the dynamics — capacity is governed entirely by the layers' ~Smax·A~.  Confirm
+that the flattened geometric capacity is used *only* to attribute a spill region
+in the static analysis and is otherwise ignored by the solver (so there is no
+double-counting of storage).
+***** Answer
+You are exactly right.  The reason to 'dig' a (artificial) trap in the terrain here is solely to determine what the spill region will be (as well as identifying the spill point in case the user has not provided any - or provided an erroneous one.
+
+** Q4: Outlet-validation ordering (drainage area not yet known)
+
+The outlet must be downstream of, and not inside, the NBS's drainage area
+(§ above).  But that drainage region only exists *after* ~spillregions~ runs,
+whereas the terrain is flattened and the spillpoint is set *before*
+~spillfield~/~spillregions~.
+
+Please confirm the intended sequencing: flatten terrain and set a provisional
+spillpoint → run ~spillregions~ → validate the outlet against the newly-computed
+region → for an unspecified (index-0) outlet, backfill the natural spillpoint.
+
+*** Answer
+
+Yes, that sounds about right.  Make sure to output some kind of warning if the suggested spillpoint location ends up being moved.
+
+** Q5: NBS→trap-index mapping and automatic dyn_trap registration
+
+An NBS should automatically become a dynamic trap and trigger DynNetwork
+generation (§ above).  Currently ~dyn_traps~ is a user-supplied ~Vector{Int}~ passed
+to ~fill_sequence~.  The trap index each NBS collapses into is only known after
+~spillregions~.
+
+Decision needed: where should the NBS→trap-index mapping live?  Presumably in
+~tstruct~ alongside the new ~NBSPlacement~ vector, so ~fill_sequence~ can auto-add
+those traps to its dynamic set — please confirm.
+
+*** Answer
+The NBS/trap correspondence should be immediate since the NBSPlacement contains the footprint in question (so the corresponding spill region could be immediately looked up using the `regions` field of the TrapStructure).  Let me know if, for some reason, this solution is not good enough.
+
+** Q6: Layer area vs footprint area, and cell size
+
+The description says the NBS layer area must correspond to the footprint area
+(singular), but a system has N layers, each with its own ~A~ (the example
+constructors take a single ~area~ and apply it to all layers).
+
+Please confirm: all layers share ~A~ = (number of footprint cells) × (cell area)?
+Also note that cell size is still hardcoded to 1 m/cell in the codebase (see the
+~@@@~ note in the ~DynCulvert~ constructor in ~elements.jl~); the footprint→area
+computation depends on the real cell size.
+
+*** Answer
+
+For now, we can assume that all layers share the same "A".  As for the cell size, see response above.  
+
+** Q7: Sentinel for an unspecified outlet
+
+The description allows an outlet to be given as "index 0" meaning "unspecified,
+use the natural spillpoint".  But ~NBSPlacement.outlets~ is currently
+~Vector{CartesianIndex{2}}~, which has no natural zero.
+
+Decision needed: what sentinel encodes an unspecified outlet — e.g.
+~CartesianIndex(0, 0)~ — or should the field type change (e.g. to ~Vector{Int}~
+of linear indices, or a ~Union~ allowing a "none" marker)?
+
+*** Answer
+
+How about using CartesianIndex(0,0) to denote an unspecified outlet
+
+**** Claude follow-up Q7a: default for an unspecified non-lowermost outlet
+
+§26 and Q4 describe backfilling an unspecified *lowermost*-layer outlet with the
+NBS trap's natural spillpoint.  With per-layer outlets (Q2), an *upper* layer's
+outlet may also be given as ~CartesianIndex(0,0)~.  What is the default there —
+route it to the same natural spillpoint as the bottom layer, or raise an error
+requiring upper-layer outlets to be specified explicitly?
+***** Answer
+If an upper layer lacks a specified outlet, it should be set to the same cell as the lowermost layer.  If this happens, a warning message should be issued.
+
+** Q8: Terrain infiltration over the NBS footprint cells
+
+SWIM applies an infiltration map over the whole grid; a trap loses water to
+infiltration on its footprint cells (~wetted_infiltration~ / footprint loss in
+~networksolver.jl~).  For an NBS, water fate on the footprint is instead governed
+entirely by the layer model (per-layer infiltration is the NBS's own business,
+and Q2a says the lowest layer's infiltration is the "lost to ground" term).
+
+If the terrain infiltration map is *also* applied to the NBS footprint cells,
+the same water is infiltrated twice — once by the terrain map, once by the NBS
+layers — breaking mass conservation.
+
+Decision needed: should terrain infiltration be *disabled* (zeroed) over NBS
+footprint cells, so the NBS layer model is the sole authority on water fate
+there?  (I believe yes, but want to confirm before wiring it.)
+
+Claude's recommendation: yes — zero the terrain infiltration map over every NBS
+footprint cell.
+
+*** Answer
+The terrain underlying a NBSSystem (or a DynNetwork element in general) footprint should be completely inactive and not participate in the simulation/modeling at all.  Its role is completely superceded by the DynNetwork element.  As a consequence, there should be no infiltration associated with terrain covered by a DynNetwork footprint.
+
+**** Claude follow-up Q8a: does this change existing ordinary-trap behaviour?
+
+Careful reading needed here.  An ordinary ~DynTrap~ (e.g. a lake picked as a
+~dyn_trap~) *is* real terrain: today it legitimately loses water through its
+footprint via ~wetted_infiltration~ (water infiltrating through the pooled-water
+bed).  That is existing, tested behaviour and is *not* double-counting.
+
+So I read "no infiltration under a DynNetwork footprint" as applying to *NBS*
+footprints specifically (artificial dug terrain whose fate is wholly governed by
+the layer model), and I will *leave ordinary ~DynTrap~ ~wetted_infiltration~
+untouched*.  Confirm that is what you mean, and that I should not remove
+footprint infiltration from ordinary traps.
+
+***** Answer
+You are right.  In this case, the behavior is the same as if this was a regular trap.  It is still handled by the code in ~dynamics~, though, so in that sense it is a parallel implementation of the same behavior.
+
+** Q9: Assigning layer area A from the footprint
+
+§14 requires the NBSLayer area to correspond to the footprint area, and Q6 says
+all layers share one ~A~.  The example constructors default ~area = 1.0~, so a
+freshly-built ~NBSSystem~ generally will *not* already have ~A~ = footprint area.
+
+Decision needed: when an ~NBSPlacement~ is created/validated, should the code
+*overwrite* every layer's ~A~ with (number of footprint cells) × (cell area)
+— treating the footprint as the single source of truth — or should it instead
+*validate* that the constructor-supplied ~A~ already matches and raise an error on
+mismatch?  (Overwrite is less error-prone for the user; validate is stricter.)
+
+Claude's recommendation: overwrite each layer's ~A~ from the footprint area at
+placement time (footprint = single source of truth).
+
+*** Answer
+Yes, overwrite A.
+
+** Q10: Dig depth for the artificial NBS trap
+
+§24 says flatten the footprint to "some fixed, low value" to form the artificial
+trap.  How low, and is it per-footprint or global?
+
+*** Answer (from discussion)
+The exact depth is not important for analytic purposes, but must be deep enough
+that a trap with *nonzero* volume is guaranteed to form.  Use one *common* value
+for all NBS footprints, so they are easy to recognise when inspecting the
+surface.

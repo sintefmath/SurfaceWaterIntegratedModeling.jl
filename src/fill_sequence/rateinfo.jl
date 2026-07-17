@@ -225,14 +225,3 @@ function getinflowupdates(ri::RateInfo)
             for k in keys(ri.stored_inflow_values)]
 end
 
-"""
-A copy of a RateInfo object is always a deep copy.
-"""
-Base.copy(ri::RateInfo) = RateInfo(deepcopy(ri.runoff),
-                                   deepcopy(ri.Smax),
-                                   deepcopy(ri.Smin),
-                                   deepcopy(ri.stored_runoff_values),
-                                   deepcopy(ri.stored_Smin_values),
-                                   deepcopy(ri.stored_Smax_values),
-                                   deepcopy(ri.stored_inflow_values),
-                                   ri.save_active)

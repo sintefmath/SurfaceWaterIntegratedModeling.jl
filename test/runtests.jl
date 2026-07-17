@@ -4,6 +4,9 @@ using LazyArtifacts
 include("basicTestFuns.jl")
 include("watercourses_test.jl")
 include("dynamics_test.jl")
+include("dynamic_membership_test.jl")  # grow/detach/fusion + apply_fill!/apply_unfill!/apply_empty!
+include("network_driver_test.jl")      # gate Phase C: build/predict/step/finalize driver
+include("nbs_routing_test.jl")         # NBS signed-diff router element (agent/NBS_ROUTING_NODE_PLAN.md)
 
 
 surf1_file = joinpath(artifact"swim_testdata", "data", "small", "mini.txt")

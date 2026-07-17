@@ -6,7 +6,8 @@ import Images
 # @@@ NB: Domain currently only implemented for spillfield!
 """
     spillanalysis(grid; usediags=true, clip_mask=nothing, sinks=Vector{CartesianIndex{2}}(),
-                  lengths=nothing, domain=nothing, merge_outregions=false, verbose=false,
+                  waterbodies=nothing, lengths=nothing, domain=nothing,
+                  merge_outregions=false, verbose=false,
                   culverts=Vector{Tuple{CartesianIndex{2}, CartesianIndex{2}}}(),
                   barriers=Vector{Vector{CartesianIndex{2}}}())
 
@@ -29,7 +30,11 @@ documentation for details.
 - `sinks::Union{Vector{CartesianIndex{2}}, Matrix{Bool}}=Vector{CartesianIndex{2}}()`:
       vector containing (i, j) grid coordinates of any point sinks in the grid, if any.
       Can also be a Matrix{Bool} of same size as `grid`, indicating the sink locations.
-- `lengths::Union{Tuple{<:Real}, Nothing}=nothing`: 
+- `waterbodies::Union{Matrix{<:Bool}, Nothing}=nothing`:
+      if present, a mask (same size as `grid`) of cells already covered by standing
+      water.  Each connected water region is flattened to a uniform height before the
+      analysis so it forms a single body rather than spurious sub-traps.
+- `lengths::Union{Tuple{<:Real}, Nothing}=nothing`:
       tuple expressing the length and width of the grid (used to compute aspect ratios)
 - `domain::Union{Domain2D, Nothing}=nothing`: 
       restrict computation to the specified domain of the grid.  @@@ Note that this is not
@@ -43,7 +48,7 @@ documentation for details.
       vector of culverts, each defined by a pair of grid coordinates. Culverts allow flow
       between two cells that would otherwise be blocked by terrain.
 - `barriers::Vector{Vector{CartesianIndex{2}}}=Vector{Vector{CartesianIndex{2}}}()`:
-      vector of barriers, where each barrier is a polyline defined by a sequence of grid 
+      vector of barriers, where each barrier is a polyline defined by a sequence of grid
       coordinates. Barriers block flow between cells along the polyline.
 
 See also [`TrapStructure`](@ref), [`fill_sequence`](@ref).
@@ -66,8 +71,8 @@ function spillanalysis(grid::Matrix{<:Real};
 
     # a copy of the grid will be returned by the TrapStructure, and there may be
     # modifications to it if waterbodies are provided
-    gridcpy = copy(grid) 
-    
+    gridcpy = copy(grid)
+
     # ensure `sinks` is a vector of CartesianIndex
     if typeof(sinks) <: Matrix
         sinks = [CartesianIndex(i[1], i[2]) for i in findall(sinks)]
@@ -79,7 +84,7 @@ function spillanalysis(grid::Matrix{<:Real};
     if waterbodies !== nothing
         _flatten_waterbody_regions!(gridcpy, waterbodies)
     end
-    
+
     # ensure culverts are directed from higher to lower elevation
     directed_culverts = [ gridcpy[x[1]] >= gridcpy[x[2]] ? x : (x[2], x[1]) for x in culverts ]
     
@@ -108,9 +113,6 @@ function spillanalysis(grid::Matrix{<:Real};
     spoints, regbnd = spillpoints(gridcpy, regions, usediags=usediags,
                                   cut_edges=cut_edge_dict)
 
-    # verbose && println("Eliminating flat traps")
-    # _eliminate_flat_traps!(regions, spoints, flowgraph, trap_bottoms, gridcpy)
-    
     verbose && println("entering sshierarchy")
     subtrapgraph, lowest_regions = sshierarchy!(gridcpy, regions, spoints, regbnd)
     
@@ -141,8 +143,8 @@ function spillanalysis(grid::Matrix{<:Real};
         end
     end
 
-    wbody_cells = isnothing(waterbodies) ? Vector{CartesianIndex{2}}() : findall(waterbodies)
-    
+    wbody_cells = isnothing(waterbodies) ? Set{CartesianIndex{2}}() : Set(findall(waterbodies))
+
     return TrapStructure{eltype(grid)}(gridcpy,
                                        flowgraph,
                                        trap_bottoms,

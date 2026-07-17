@@ -1,6 +1,6 @@
 using Printf
 
-export NBSLayer, NBSSystem, NBSPlacement
+export NBSLayer, NBSSystem
 export mantillaRRmodel, elhadiGreenRoof, puddle
 export compute_outflow
 
@@ -25,15 +25,15 @@ linearly with storage up to the threshold `EVS11`, and at full rate above it.
 - `layer_name`: display name used in printing
 """
 mutable struct NBSLayer
-    Smin    # minimum capacity limit
-    Smax    # maximum capacity limit
-    Kout    # outflow rate coefficient
-    Kinf    # infiltration rate coefficient
-    nout    # outflow exponent
-    ninf    # infiltration exponent
-    EVCoeff # evapotranspiration coefficient
-    EVS11   # soil moisture threshold
-    A       # area of the layer
+    Smin::Float64    # minimum capacity limit
+    Smax::Float64    # maximum capacity limit
+    Kout::Float64    # outflow rate coefficient
+    Kinf::Float64    # infiltration rate coefficient
+    nout::Float64    # outflow exponent
+    ninf::Float64    # infiltration exponent
+    EVCoeff          # evapotranspiration coefficient (scalar or Function(t)) — left untyped
+    EVS11::Float64   # soil moisture threshold
+    A::Float64       # area of the layer
     layer_name::String
 end
 
@@ -269,27 +269,5 @@ function compute_outflow(K, n, Smax, S; mollifier=0.0)
     return K * tmp^n
 end
 
-# ----------------------------------------------------------------------------
-"""
-       NBSPlacement(system, footprint, outlets)
-
-Represent a Nature-Based Solution (NBS) installation placed on the terrain,
-governed by the layered storage model `system` (an [`NBSSystem`](@ref)).
-
-`footprint` is the set of grid cells (linear indices, matching
-`TrapStructure.footprints`'s convention) covered by the installation.
-`outlets` are the grid cells (geometry — matching `DynCulvert`'s `inlet`/
-`outlet` convention) where the system's discharge re-enters the terrain.
-
-!!! note
-    @@@ Wiring an `NBSPlacement` into the network rate function (analogous to
-    `culvert_rate` → `_culvert_flow` → `_route_flow`) is not yet implemented.
-    The per-layer rate behaviour should follow `NBSNetworkRateFunction!` in the
-    standalone NBS package (outflow/infiltration cascade via `compute_outflow`);
-    evapotranspiration is deferred for now.
-"""
-struct NBSPlacement <: DynObject
-    system::NBSSystem
-    footprint::Vector{Int}             # grid cells covered (linear indices)
-    outlets::Vector{CartesianIndex{2}} # grid cells where discharge re-enters the terrain
-end
+# This file holds only the layer-storage model, so it can be included before elements.jl;
+# the placement type (`DynNBSPlacement`) lives with the other Dyn* elements in elements.jl.

@@ -21,20 +21,20 @@ grid with the corresponding values.
 - `precipitation::Matrix{<:Real}`: A grid expressing precipitation rate per grid cell.
                                     If left empty, it will be substituted by a grid 
                                     filled with ones.
-- `infiltration::Matrix{<:Real}`: A grid expressing the maximum infiltration rate 
+- `infiltration::Matrix{<:Real}`: A grid expressing the maximum infiltration rate
                                   per grid cell.  If left empty, it will be substituted
                                   by a grid filled with zeros.
 
 # Returns
-- `runoff::Matrix{Float64}`: Grid expressing infiltration excess runoff rate 
-                             (positive values) 
+- `runoff::Matrix{Float64}`: Grid expressing infiltration excess runoff rate
+                             (positive values)
                              or remaining infiltration capacity (negative values)
 - `region_accum::Vector{Float64}`: Vector with one entry per spill region, indicating
                           net water accumulation rate for that region (also including
-                          water spilling into the region from upstream filled traps). 
-                          Note that if the region is associated with a filled trap, 
+                          water spilling into the region from upstream filled traps).
+                          Note that if the region is associated with a filled trap,
                           the accumulation value is set to zero, unless it spills into
-                          a filled 'sibling' trap.  The logic is in any case such that 
+                          a filled 'sibling' trap.  The logic is in any case such that
                           the accumulation of any still unfilled trap should equal
                           the sum of accumulation of its regions.
 - `offregion_runoff::Float64`: Total rate of water flowing off the domain
@@ -42,19 +42,19 @@ grid with the corresponding values.
 """
 function watercourses(tstruct::TrapStructure{<:Real},
                       full_traps::Vector{Bool};
-                      precipitation::Union{Matrix{<:Real}, Real} = 1.0, 
+                      precipitation::Union{Matrix{<:Real}, Real} = 1.0,
                       infiltration::Union{Matrix{<:Real}, Real} = 0.0)
 
     # expand `precipitation` and `infiltration` to matrices if necessary
     gridres = size(tstruct.topography)
     (typeof(precipitation) <: Real) && (precipitation = fill(precipitation, gridres...))
     (typeof(infiltration) <: Real) && (infiltration = fill(infiltration, gridres...))
-    
+
     # The following three variables constitute the return values
     runoff = precipitation - infiltration;
     region_accum = zeros(Float64, max(maximum(tstruct.regions), 0))
     offregion_runoff = Ref(0.0)
-    
+
     # Compute basic flow field intensity, as if all traps were empty
     #g = compute_spillfield_graph(tstruct.spillfield)
     g = tstruct.flowgraph
@@ -65,7 +65,7 @@ function watercourses(tstruct::TrapStructure{<:Real},
         if runoff[cur_node] >= 0
             # there is infiltration excess flow across this node.  Propagate downstream
             ds_node = Graphs.outneighbors(g, cur_node)
-            
+
             if !isempty(ds_node)
                 @assert length(ds_node) == 1
                 ds_node = ds_node[1]
@@ -110,9 +110,35 @@ function watercourses(tstruct::TrapStructure{<:Real},
         remaining_infil_capacity[tstruct.footprints[tt]] .= 0.0;
     end
     used_infiltration = sum(infiltration - remaining_infil_capacity)
-    
+
     return runoff, region_accum, offregion_runoff[], used_infiltration
 
+end
+
+# ----------------------------------------------------------------------------
+# helper function tracing a path donwstream from a given node until we hit a
+# trap bottom or exit the domain
+function _trace_path(tstruct, node)
+
+    CI = CartesianIndices(size(tstruct.topography))
+    CL = LinearIndices(size(tstruct.topography))
+
+    path = [node]
+    while true
+        ds_nodes = Graphs.outneighbors(tstruct.flowgraph, path[end])
+        if isempty(ds_nodes)
+            break;
+        end
+        @assert length(ds_nodes) == 1
+        c1, c2 = CI[path[end]], CI[ds_nodes[1]]
+        if !_are_connected(c1, c2) && c2 ∉ tstruct.waterbodies
+            line_ixs = _connect_cells(c1, c2)
+            append!(path, CL[line_ixs])
+        else
+            push!(path, ds_nodes[1])
+        end
+    end
+    return path
 end
 
 # ----------------------------------------------------------------------------
@@ -143,36 +169,12 @@ function flow_path_from(tstruct::TrapStructure{<:Real},
                         start_node::Int;
                         full_traps::Union{Nothing, Vector{Int}}=nothing)
 
-    # helper function tracing a path donwstream from a given node until we hit a
-    # trap bottom or exit the domain
-    CI = CartesianIndices(size(tstruct.topography))
-    CL = LinearIndices(size(tstruct.topography))
-    wbodies = Set(tstruct.waterbodies)
-    function _trace_path(node)
-        path = [node]
-        while true
-            ds_nodes = Graphs.outneighbors(tstruct.flowgraph, path[end])
-            if isempty(ds_nodes)
-                break;
-            end
-            @assert length(ds_nodes) == 1
-            c1, c2 = CI[path[end]], CI[ds_nodes[1]]
-            if !_are_connected(c1, c2) && c2 ∉ wbodies
-                line_ixs = _connect_cells(c1, c2)
-                append!(path, CL[line_ixs])
-            else
-                push!(path, ds_nodes[1])
-            end
-        end
-        return path
-    end
-
     cur_node = start_node
     paths = Vector{Vector{Int64}}() # list of paths traced downstream from start_node
     downstream_filled_traps = Vector{Int64}() # list of filled traps downstream of start_node
     first_segment = true # the leading segment (traced from start_node)
     while cur_node > 0
-        push!(paths, _trace_path(cur_node))
+        push!(paths, _trace_path(tstruct, cur_node))
 
         cur_reg = tstruct.regions[paths[end][end]] # region where we ended up
         if cur_reg <= 0

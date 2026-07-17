@@ -590,7 +590,6 @@ function show_region_selection(tstruct::TrapStructure{<:Real};
     end
 
     # trace rivers
-    wbodies = Set(tstruct.waterbodies) # convert to set for faster lookup
     if river_color != 0
         CI = CartesianIndices(size(grid))
         for reg in selection
@@ -606,7 +605,7 @@ function show_region_selection(tstruct::TrapStructure{<:Real};
                     # cell might not be directly connected to the previous
                     # cell.  In this case, trace the line connecting the two cells.
                     cell_new = CI[rix]
-                    if cell_new ∈ wbodies
+                    if cell_new ∈ tstruct.waterbodies
                         finished = true # always finished when reaching a water body
                     elseif !_are_connected(cell_old, cell_new)
                         line_ixs = _connect_cells(cell_old, cell_new)

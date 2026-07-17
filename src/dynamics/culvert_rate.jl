@@ -1,9 +1,7 @@
 # Culvert flow-rate hydraulics.
 #
 # Computes the volumetric flow (m^3/s, SI) through a `DynCulvert` given the water
-# level at each end.  Simplified FHWA HDS-5 model (see
-# agent/reports/culvert_hydraulics_reference.md and the "Clarifications" heading in
-# agent/prompts/culvert_rate_implementation.org):
+# level at each end.  Simplified FHWA HDS-5 model:
 #
 #   * Inlet control: a hard switch on the upstream end's submergence -- weir below,
 #     orifice once submerged.  No weir<->orifice transition blend.
@@ -20,10 +18,18 @@
 
 export culvert_rate
 
-# Non-negative capacity for a single flow direction, from the upstream end to the
-# downstream end.  Each end is (submerged?, head above invert, invert elevation),
-# but only the *upstream* submergence matters -- it selects weir vs orifice at the
-# entrance.  The entrance-loss coefficient cv.Ke is used symmetrically.
+"""
+    _directional_capacity(cv, up_submerged, up_head, up_z, down_head, down_z) -> Float64
+
+Non-negative flow capacity (m^3/s) for a single direction, from the upstream end to the
+downstream end.  Each end is given as a head above its invert and that invert's elevation.
+
+Returns `min(Q_inlet, Q_outlet)` — the more restrictive of inlet and outlet control, i.e. the
+bottleneck that physically governs.  Only the *upstream* submergence matters: it selects weir
+(free entrance) versus orifice (submerged entrance) at the inlet.  The entrance-loss
+coefficient `cv.Ke` is applied symmetrically, so callers get a hydraulically symmetric culvert
+by swapping the ends.  Pure; nothing is mutated.
+"""
 function _directional_capacity(cv::DynCulvert,
                                up_submerged::Bool, up_head, up_z,
                                down_head, down_z)
@@ -60,14 +66,13 @@ function _directional_capacity(cv::DynCulvert,
 end
 
 """
-    culvert_rate(cv, tstruct;
-                 inlet_submerged,  inlet_head,
-                 outlet_submerged, outlet_head,
+    culvert_rate(cv;
+                 inlet_submerged,  inlet_head,  inlet_invert,
+                 outlet_submerged, outlet_head, outlet_invert,
                  allow_reverse = false) -> Float64
 
-Volumetric flow through culvert `cv` in m^3/s (SI), given the submergence state and
-water head (metres above the cell invert) at each end.  `tstruct` supplies the
-inlet/outlet invert elevations.
+Volumetric flow through culvert `cv` in m^3/s (SI), given the submergence state, water head
+(metres above the invert), and invert elevation at each end.
 
 A positive result is flow from the inlet to the outlet.  By default
 (`allow_reverse = false`) the culvert is downhill-only: if the outlet pool stands
@@ -83,14 +88,14 @@ bottleneck that physically governs.  See the module header for the assumptions.
     routing layer still assumes downhill flow (see `CLAUDE.md`/`AGENTS.md`).  Use
     `allow_reverse = true` only where the caller is prepared to handle it.
 """
-function culvert_rate(cv::DynCulvert, tstruct;
-                      inlet_submerged::Bool,  inlet_head::Real,
-                      outlet_submerged::Bool, outlet_head::Real,
+function culvert_rate(cv::DynCulvert;
+                      inlet_submerged::Bool,  inlet_head::Real,  inlet_invert::Real,
+                      outlet_submerged::Bool, outlet_head::Real, outlet_invert::Real,
                       allow_reverse::Bool = false)
     hi = max(float(inlet_head),  0.0)   # head above inlet invert
     ho = max(float(outlet_head), 0.0)   # head above outlet invert
-    z_in  = tstruct.topography[cv.inlet]
-    z_out = tstruct.topography[cv.outlet]
+    z_in  = float(inlet_invert)
+    z_out = float(outlet_invert)
 
     # Flow runs from the higher water surface to the lower one.  The downhill-only
     # default always treats the inlet as upstream; if the outlet pool is actually
