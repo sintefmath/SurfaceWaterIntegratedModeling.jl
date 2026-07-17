@@ -120,4 +120,14 @@ end
     # with no network inputs the network-aware call reduces to the plain result
     maps_plain, _ = interpolate_timeseries(ts, seqN, tps; verbose = false)
     @test all(maps_plain[k] == maps_obl[k] for k in 1:length(tps))
+
+    # NBS footprints are marked with their own colour (default 4), and nbs_color=0 disables it
+    m4, _ = interpolate_timeseries(ts, seqN, tps; nbs = [pl], verbose = false)
+    m0, _ = interpolate_timeseries(ts, seqN, tps; nbs = [pl], nbs_color = 0, verbose = false)
+    off = setdiff(1:length(m4[1]), fp)
+    for k in 1:length(tps)
+        @test all(m4[k][fp] .== 4)                 # footprint cells carry nbs_color
+        @test !any(m0[k][fp] .== 4)                # disabled: no footprint colour
+        @test m4[k][off] == m0[k][off]             # colouring touches only the footprint
+    end
 end

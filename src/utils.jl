@@ -49,6 +49,8 @@ plain static analysis.
 - `filled_color::Int`: The 'color' value to represent filled areas (default: 1).
 - `trap_color::Int`: The 'color' to represent unfilled parts of traps (default: 2).
 - `river_color::Int`: The 'color' to represent intermittent rivers (default: 3).
+- `nbs_color::Int`: The 'color' marking the footprint cells of every NBS placement in `nbs`
+                    (default: 4).  Set to 0 to leave footprints uncoloured.
 - `verbose::Bool`: Whether to print progess information during computations (default: true).
 
 See also [`spillanalysis`](@ref), [`fill_sequence`](@ref),
@@ -64,6 +66,7 @@ function interpolate_timeseries(tstruct::TrapStructure{<:Real},
                                 filled_color::Int=1,
                                 trap_color::Int=2,
                                 river_color::Int=3,
+                                nbs_color::Int=4,
                                 verbose::Bool=true)
 
     (issorted(timepoints) && (seq[1].timestamp <= timepoints[1])) ||
@@ -80,7 +83,8 @@ function interpolate_timeseries(tstruct::TrapStructure{<:Real},
         verbose && println("Generating timepoint: ", i)
         filled_traps = tstates[i].filled
         push!(result, _fill_state_to_terrainmap(tstruct, filled_traps, tstates[i].amounts,
-                                                filled_color, trap_color, river_color))
+                                                filled_color, trap_color, river_color,
+                                                nbs, nbs_color))
         push!(tix, tstates[i].ix)
     end
     return result, tix
@@ -516,9 +520,11 @@ end
 
 # ----------------------------------------------------------------------------
 function _fill_state_to_terrainmap(tstruct::TrapStructure{<:Real},
-                                   filled::Vector{Bool}, 
+                                   filled::Vector{Bool},
                                    trapwater::Vector{<:Real},
-                                   filled_color::Int, trap_color::Int, river_color::Int)
+                                   filled_color::Int, trap_color::Int, river_color::Int,
+                                   nbs::Vector{DynNBSPlacement}=DynNBSPlacement[],
+                                   nbs_color::Int=0)
 
     # if a trap is filled, show it along with the river running out of it.
     # Ignore any "trap" with zero volume
@@ -552,7 +558,15 @@ function _fill_state_to_terrainmap(tstruct::TrapStructure{<:Real},
             result[covered_trapcells] .= filled_color
         end
     end
-    
+
+    # mark each NBS footprint with its own colour (the NBS occupies these cells, so this takes
+    # precedence over the terrain rendering underneath)
+    if nbs_color != 0
+        for n in nbs
+            result[n.footprint] .= nbs_color
+        end
+    end
+
     return result
 end
 
