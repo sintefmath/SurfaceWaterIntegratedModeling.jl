@@ -899,6 +899,11 @@ function _build_nbs_plan(net::DynNetwork, tstruct, runoff::AbstractMatrix{<:Real
             push!(weights, (max(Float64(runoff[pc]), 0.0), :trap, tr))
         end
         W_total = sum(Float64[w for (w, _, _) in weights]; init = 0.0)
+        # Invariant: the exit weights are the footprint's own throughput, so they sum to O_0.
+        # If they don't, the terrain diff is misallocated (over-/under-removed at the exits).
+        @assert isapprox(W_total, O_0_total; rtol = 1e-6, atol = 1e-9) ||
+                (W_total < _NBS_O0_EPS && O_0_total < _NBS_O0_EPS) """
+            NBS exit weights ($W_total) must sum to the throughput O_0_total ($O_0_total)"""
         nend    = length(weights)
         ratio(w) = W_total > _NBS_O0_EPS ? w / W_total : (nend > 0 ? 1.0 / nend : 0.0)
 

@@ -142,6 +142,10 @@ function network_watercourses(tstruct::TrapStructure{<:Real},
             W = sum(Float64[w for (w, _) in wts]; init = 0.0)
             n = length(wts)
             ratio(w) = W > _NBS_O0_EPS ? w / W : (n > 0 ? 1.0 / n : 0.0)
+            # Exit weights are the footprint's own throughput, so they sum to O_0.
+            @assert isapprox(W, O_0; rtol = 1e-6, atol = 1e-9) ||
+                    (W < _NBS_O0_EPS && O_0 < _NBS_O0_EPS) """
+                NBS exit weights ($W) must sum to the throughput O_0 ($O_0)"""
 
             # terrain re-emission: (O_terrain(state) - O_0) shared across the terrain exits
             O_terrain = 0.0
@@ -150,6 +154,11 @@ function network_watercourses(tstruct::TrapStructure{<:Real},
                 O_terrain += compute_outflow(L.Kout, L.nout, L.Smax, layers[l] * 1000.0 / A_foot) * A_foot * 1e-3
             end
             diffbase = O_terrain - O_0
+            # A downward correction removes -diffbase, shared by w/W; since w sums to W, no exit
+            # loses more than its own oblivious outflow. Guard against that being violated.
+            @assert diffbase >= -W - 1e-9 """
+                NBS correction ($(-diffbase)) exceeds the footprint outflow ($W) — would remove
+                downstream water that never crossed the footprint"""
             for (w, cell) in wts
                 _propagate_field_delta!(runoff_live, footprint_set, tstruct, full_traps_int, cell,
                                         diffbase * ratio(w))
