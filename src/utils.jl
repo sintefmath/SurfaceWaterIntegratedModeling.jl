@@ -285,12 +285,28 @@ function network_states_at_timepoints(tstruct::TrapStructure{<:Real},
             # incremental event: advance the running state, then rebuild the network only if it
             # is actually touched (a member trap fired or an inflow region changed)
             touched = _event_touches_network(driver, ev)
+            if touched
+                # Commit the network ODE up to this event and carry the accumulated node
+                # volumes into `amounts` BEFORE applying the event's incremental update.
+                # A network-covered node's authoritative volume is the ODE-accumulated one,
+                # not the stale seq snapshot in `amounts` (the seq's incremental `amount`
+                # updates carry only structural changes, not mid-period network accumulation).
+                # Without this, the rebuild below re-seeds each node from the stale snapshot,
+                # discarding the water the ODE had accumulated since the last full snapshot —
+                # which shows up as a trap volume that collapses to ~0 and re-accumulates at
+                # each network event.  The event's own `ev.amount` update (applied next) then
+                # overrides the traps that structurally changed at this instant (e.g. a fired
+                # `:empty` node -> 0, its exposed children -> capacity).
+                _carry_nbs!(driver, tstruct, infil, z_vol_tables, t_i)
+                for (g, v) in driver.vol_by_trapix
+                    amounts[g] = FilledAmount(v, t_i)
+                end
+            end
             _apply_field!(filled,  ev.filled)
             _apply_field!(amounts, ev.amount)
             _apply_field!(inflow,  ev.inflow)
             _apply_runoff!(runoff, ev.runoff)
             if touched
-                _carry_nbs!(driver, tstruct, infil, z_vol_tables, t_i)
                 driver = _rebuild_replay_driver(driver, tstruct, seeds, culverts, nbs, filled,
                                                 amounts, inflow, runoff, precip, infil,
                                                 z_vol_tables, t_i, driver.nbs_state)
