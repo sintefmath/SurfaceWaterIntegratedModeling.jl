@@ -74,8 +74,14 @@ function network_watercourses(tstruct::TrapStructure{<:Real},
     infil  = infiltration  isa Real ? fill(Float64(infiltration),  gridres) : Float64.(infiltration)
     isempty(nbs) || (infil[vcat([n.footprint for n in nbs]...)] .= 0.0)
 
-    # the network-oblivious baseline field, fully routed by terrain
-    runoff, = watercourses(tstruct, full_traps; precipitation = precip, infiltration = infil)
+    # the network-oblivious baseline field, fully routed by terrain. `runoff_live`
+    # accumulates the network corrections; `runoff_orig` keeps the untouched
+    # oblivious field. Culvert draws read the *live* flow (what is actually there,
+    # matching the solver's min(capacity, current)); NBS corrections are measured
+    # against the *oblivious* field (matching the solver's precomputed O_0_total),
+    # so a downstream placement is never contaminated by an upstream correction.
+    runoff_live, = watercourses(tstruct, full_traps; precipitation = precip, infiltration = infil)
+    runoff_orig  = copy(runoff_live)
 
     # build the network components: topology, cached NBS cell lists, culvert owners.
     # `z_vol_tables` depends only on `tstruct`, so a caller sampling many timepoints
@@ -98,12 +104,12 @@ function network_watercourses(tstruct::TrapStructure{<:Real},
             for ci in eachindex(net.culverts)
                 inlet  = LI[net.culverts[ci].inlet]
                 outlet = LI[net.culverts[ci].outlet]
-                # capacity capped by the flow actually reaching the inlet — never draw more than
-                # is available (mass conservation)
-                q = min(_culvert_flow(cvplan, net, ci, trap_level), max(runoff[inlet], 0.0))
+                # capacity capped by the LIVE flow actually reaching the inlet — never draw more
+                # than is available (mass conservation), including any upstream network corrections
+                q = min(_culvert_flow(cvplan, net, ci, trap_level), max(runoff_live[inlet], 0.0))
                 q <= 0.0 && continue
-                _propagate_field_delta!(runoff, footprint_set, tstruct, full_traps_int, inlet,  -q)
-                _propagate_field_delta!(runoff, footprint_set, tstruct, full_traps_int, outlet,  q)
+                _propagate_field_delta!(runoff_live, footprint_set, tstruct, full_traps_int, inlet,  -q)
+                _propagate_field_delta!(runoff_live, footprint_set, tstruct, full_traps_int, outlet,  q)
             end
         end
 
@@ -113,19 +119,21 @@ function network_watercourses(tstruct::TrapStructure{<:Real},
             A_foot = Float64(length(nb.footprint))
             layers = get(nbs_layers, nb.id, zeros(Float64, length(nb.system.layers)))
 
-            # throughput off the input boundary (footprint has zero infiltration, so out == in)
+            # throughput off the input boundary (footprint has zero infiltration, so out == in).
+            # Measured on the OBLIVIOUS field: what enters equals what leaves + accumulates, so
+            # the correction is exact and cannot remove flow that never crossed the footprint.
             O_0 = _footprint_rain(precip, nb.footprint)
             for ic in nb.footprint_inflow_cells
-                O_0 += max(Float64(runoff[ic]), 0.0)
+                O_0 += max(Float64(runoff_orig[ic]), 0.0)
             end
 
             # endpoint weights: oblivious flow at each terrain exit (outlet / ponding) cell
             wts = Tuple{Float64,Int}[]
             for oc in nb.footprint_outflow_cells
-                push!(wts, (max(Float64(runoff[oc]), 0.0), LI[oc]))
+                push!(wts, (max(Float64(runoff_orig[oc]), 0.0), LI[oc]))
             end
             for pc in nb.internal_accumulation_cells
-                push!(wts, (max(Float64(runoff[pc]), 0.0), LI[pc]))
+                push!(wts, (max(Float64(runoff_orig[pc]), 0.0), LI[pc]))
             end
             W = sum(Float64[w for (w, _) in wts]; init = 0.0)
             n = length(wts)
@@ -139,7 +147,7 @@ function network_watercourses(tstruct::TrapStructure{<:Real},
             end
             diffbase = O_terrain - O_0
             for (w, cell) in wts
-                _propagate_field_delta!(runoff, footprint_set, tstruct, full_traps_int, cell,
+                _propagate_field_delta!(runoff_live, footprint_set, tstruct, full_traps_int, cell,
                                         diffbase * ratio(w))
             end
 
@@ -149,7 +157,7 @@ function network_watercourses(tstruct::TrapStructure{<:Real},
                 (l > nb.n_terrain && L.Kout > 0.0) || continue
                 piped += 1
                 E = compute_outflow(L.Kout, L.nout, L.Smax, layers[l] * 1000.0 / A_foot) * A_foot * 1e-3
-                _propagate_field_delta!(runoff, footprint_set, tstruct, full_traps_int,
+                _propagate_field_delta!(runoff_live, footprint_set, tstruct, full_traps_int,
                                         LI[nb.outlets[piped]], E)
             end
         end
@@ -157,9 +165,9 @@ function network_watercourses(tstruct::TrapStructure{<:Real},
 
     # surface flow is undefined inside NBS footprints — mark them, after all propagation
     for c in footprint_set
-        runoff[c] = NaN
+        runoff_live[c] = NaN
     end
-    return runoff
+    return runoff_live
 end
 
 # Add `amount` to the field along the downstream flow route from `start_lin`, stopping at an NBS
