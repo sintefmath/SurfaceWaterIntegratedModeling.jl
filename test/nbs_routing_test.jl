@@ -123,9 +123,9 @@ end
     O_surface = 0.0; ground = 0.0; sum_dV = 0.0
     for (l, L) in enumerate(el.system.layers)
         S_mm = V[nt + el.state_base + l] * 1000.0 / el.A
-        O_surface += SWIM.compute_outflow(L.Kout, L.nout, L.Smax, S_mm) * 1e-3   # every layer's overflow leaves
-        (l == length(el.system.layers)) &&                                      # only the bottom infiltrates to ground
-            (ground = SWIM.compute_outflow(L.Kinf, L.ninf, L.Smin, S_mm) * 1e-3)
+        O_surface += SWIM.compute_outflow(L.Kout, L.nout, L.Smax, S_mm) * el.A * 1e-3   # overflow leaves (mm→m³ via A)
+        (l == length(el.system.layers)) &&                                             # only the bottom infiltrates to ground
+            (ground = SWIM.compute_outflow(L.Kinf, L.ninf, L.Smin, S_mm) * el.A * 1e-3)
         sum_dV += dV[nt + el.state_base + l]
     end
     # storage rate = in − out − to-ground: no mass created or lost in the cascade

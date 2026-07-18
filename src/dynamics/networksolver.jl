@@ -1663,11 +1663,14 @@ function solveDynNetwork!(state::AbstractVector{Float64},
     end
     # finite cap so DiffEq never gets Inf as a tspan endpoint (its internal range(t,Inf,n) rejects it)
     tmax_ode = min(tmax, 1e12)
-    # Explicit Tsit5: the RHS has C0 kinks (culvert regime switches, routing `min`) but isn't
-    # stiff.  The auto-switcher misreads the kinks as stiffness and pays for dense Jacobians
-    # (~4x slower, no accuracy gain).
-    # @@@ revisit with an auto-switching solver + sparse Jacobian if a genuinely stiff config appears
-    sol = solve(ODEProblem(dynNetworkRateFunction!, V0, (0.0, tmax_ode), p), Tsit5();
+    # Auto-switching Tsit5/Rodas5P. A NBS layer's overflow k*(S-Smax) is a fast decaying mode
+    # (eigenvalue ~ -k), so an explicit method is stability-capped at dt ~ 3.3/k regardless of
+    # accuracy — over a long tmax (a last-period solve with no next event marching to a distant
+    # trap fill) that means ~1e6 tiny steps. The stiff switch integrates that mode A-stably, so
+    # dt is accuracy-bound and grows; Tsit5 still handles the easy segments. Finite-diff Jacobian
+    # because the RHS (_nbs_routing) allocates Float64 and isn't Dual-safe for ForwardDiff.
+    sol = solve(ODEProblem(dynNetworkRateFunction!, V0, (0.0, tmax_ode), p),
+                AutoTsit5(Rodas5P(autodiff = AutoFiniteDiff()));
                 callback = callback,
                 abstol = abstol, reltol = reltol)
 
