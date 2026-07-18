@@ -73,8 +73,11 @@ function network_watercourses(tstruct::TrapStructure{<:Real},
     # the network-oblivious baseline field, fully routed by terrain
     runoff, = watercourses(tstruct, full_traps; precipitation = precip, infiltration = infil)
 
-    # build the network components: topology, cached NBS cell lists, culvert owners
-    z_vol_tables = _compute_z_vol_tables(tstruct)
+    # build the network components: topology, cached NBS cell lists, culvert owners.
+    # `z_vol_tables` is only needed to size culvert trap geometry (below), so skip
+    # its O(#traps) construction entirely when there are no culverts — this matters
+    # because network_watercourses is called once per sampled timepoint.
+    z_vol_tables = isempty(culverts) ? nothing : _compute_z_vol_tables(tstruct)
     seeds = _dyn_seeds(tstruct, dyn_traps, DynCulvert[])
     comps = setup_network(tstruct, findall(full_traps);
                           dyn_coords = seeds, culverts = culverts, nbs = nbs)
