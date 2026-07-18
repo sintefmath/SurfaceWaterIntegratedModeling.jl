@@ -954,7 +954,7 @@ function _nbs_routing(V, p, nt::Int, np::Int)
         @inbounds for l in 1:el.n_terrain
             L = el.system.layers[l]
             O_terrain += compute_outflow(L.Kout, L.nout, L.Smax,
-                                         V[nt + base + l] * 1000.0 / el.A) * 1e-3
+                                         V[nt + base + l] * 1000.0 / el.A) * el.A * 1e-3
         end
         diffbase = O_terrain - el.O_0_total
         for (pth, r) in el.terrain_paths; path_diff[pth]  += diffbase * r; end
@@ -962,7 +962,7 @@ function _nbs_routing(V, p, nt::Int, np::Int)
         for (pth, l) in el.piped_paths
             L = el.system.layers[l]
             E = compute_outflow(L.Kout, L.nout, L.Smax,
-                                V[nt + base + l] * 1000.0 / el.A) * 1e-3
+                                V[nt + base + l] * 1000.0 / el.A) * el.A * 1e-3
             path_diff[pth] += E
         end
     end
@@ -1185,8 +1185,9 @@ function dynNetworkRateFunction!(dV, V, p::DynNetworkRateParams, t = 0.0)
             prev_qi = max(el.O_0_total + nbs_draw[k], 0.0)
             for (l, L) in enumerate(el.system.layers)
                 S_mm = V[nt + base + l] * 1000.0 / el.A
-                qo   = compute_outflow(L.Kout, L.nout, L.Smax, S_mm) * 1e-3
-                qi   = compute_outflow(L.Kinf, L.ninf, L.Smin, S_mm) * 1e-3
+                # depth-rate (mm/time) -> volume-rate (m^3/time): * A / 1000
+                qo   = compute_outflow(L.Kout, L.nout, L.Smax, S_mm) * el.A * 1e-3
+                qi   = compute_outflow(L.Kinf, L.ninf, L.Smin, S_mm) * el.A * 1e-3
                 # @@@ evapotranspiration deferred: ET is an explicit 0.0 placeholder, so
                 #     wiring it in (from EVCoeff/EVS11) is a one-line change per layer.
                 ET = 0.0

@@ -129,7 +129,7 @@ function network_watercourses(tstruct::TrapStructure{<:Real},
             O_terrain = 0.0
             for l in 1:nb.n_terrain
                 L = nb.system.layers[l]
-                O_terrain += compute_outflow(L.Kout, L.nout, L.Smax, layers[l] * 1000.0 / A_foot) * 1e-3
+                O_terrain += compute_outflow(L.Kout, L.nout, L.Smax, layers[l] * 1000.0 / A_foot) * A_foot * 1e-3
             end
             diffbase = O_terrain - O_0
             for (w, cell) in wts
@@ -142,7 +142,7 @@ function network_watercourses(tstruct::TrapStructure{<:Real},
             for (l, L) in enumerate(nb.system.layers)
                 (l > nb.n_terrain && L.Kout > 0.0) || continue
                 piped += 1
-                E = compute_outflow(L.Kout, L.nout, L.Smax, layers[l] * 1000.0 / A_foot) * 1e-3
+                E = compute_outflow(L.Kout, L.nout, L.Smax, layers[l] * 1000.0 / A_foot) * A_foot * 1e-3
                 _propagate_field_delta!(runoff, footprint_set, tstruct, full_traps_int,
                                         LI[nb.outlets[piped]], E)
             end
