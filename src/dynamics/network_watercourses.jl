@@ -127,10 +127,14 @@ function network_watercourses(tstruct::TrapStructure{<:Real},
                 O_0 += max(Float64(runoff_orig[ic]), 0.0)
             end
 
-            # endpoint weights: oblivious flow at each terrain exit (outlet / ponding) cell
+            # exit weights. Outflow cells: weight by the footprint's interior throughput to each
+            # (see _footprint_outflow_weights), not the external cell's runoff — the latter also
+            # carries rain landing on that cell, inflating W above O_0 and leaving a residual.
+            # Accumulation cells are interior (footprint ∩ trap bottoms), so already exact.
+            outw = _footprint_outflow_weights(tstruct, nb.footprint, runoff_orig)
             wts = Tuple{Float64,Int}[]
             for oc in nb.footprint_outflow_cells
-                push!(wts, (max(Float64(runoff_orig[oc]), 0.0), LI[oc]))
+                push!(wts, (get(outw, LI[oc], 0.0), LI[oc]))
             end
             for pc in nb.internal_accumulation_cells
                 push!(wts, (max(Float64(runoff_orig[pc]), 0.0), LI[pc]))

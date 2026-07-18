@@ -658,11 +658,11 @@ signed-diff model).
 - `terrain_traps`: `(accumulation trap, ratio_e)` per internal depression
 - `piped_paths`: `(carrier path, layer index)` per piped outlet
 
-`ratio_e` is a *normalised share*, weighted by the oblivious `runoff` at each outlet cell (and
-at each ponding cell) — the receiving watercourse, not the footprint cells feeding it.  It is
-independent of `O_0_total`: several footprint cells may feed one outlet, and the outlet's own
-rain and any flow converging on it from outside the footprint are counted in its weight but
-must never be counted in the throughput.
+`ratio_e` is a *normalised share* of the footprint's throughput to each endpoint: for an outlet,
+the interior footprint runoff delivered to it (`_footprint_outflow_weights`), NOT the outlet
+cell's own runoff — that also carries the outlet's rain / outside convergence, which never
+crossed the footprint and would misallocate the diff. For a ponding cell (interior) it is just
+its oblivious `runoff`. So the shares sum to `O_0_total`.
 """
 struct NBSElement
     system    ::NBSSystem
@@ -838,12 +838,13 @@ cell lists `setup_network` already cached on the [`DynNBSPlacement`](@ref):
 - **`O_0_total`**, the throughput, off the *input* boundary — `Σ runoff` over
   `footprint_inflow_cells` plus the rain on the footprint.  Exact, because the footprint has
   zero infiltration by contract, so output equals input.
-- **`ratio_e`**, a normalised share per endpoint, weighted by the `runoff` at each outlet cell
-  in `footprint_outflow_cells` and each cell in `internal_accumulation_cells`.
+- **`ratio_e`**, a normalised share per endpoint: for an outlet, the footprint's interior
+  throughput to it (`_footprint_outflow_weights`); for an `internal_accumulation_cells` cell, its
+  oblivious `runoff`. So the shares sum to `O_0_total` and the terrain diff cancels exactly.
 
-Keeping them separate matters: an outlet's weight legitimately includes its own rain and any
-flow converging on it from outside the footprint, none of which is the placement's throughput.
-The layer models and ODE-state layout come straight off `net.nbs`.
+An outlet's *own* runoff must NOT be used — it carries rain landing on the outlet cell and flow
+converging from outside, neither of which is throughput. The layer models and ODE-state layout
+come straight off `net.nbs`.
 
 Nothing is mutated.  Asserts the coupling invariants: an outlet must have a carrier path
 departing it (it is a network seed), and an internal depression must be covered by a network
@@ -877,16 +878,19 @@ function _build_nbs_plan(net::DynNetwork, tstruct, runoff::AbstractMatrix{<:Real
             O_0_total += max(Float64(runoff[ic]), 0.0)
         end
 
-        # Weights: the oblivious flow at each *outlet* cell (outside the footprint) and at each
-        # ponding cell.  Only ever used as a normalised share, so the outlet's own rain and any
-        # flow converging on it from outside are harmless here (they must not, and do not, reach
-        # O_0_total above).
+        # Weights per exit endpoint. Outlets: weight by the footprint's interior throughput
+        # delivered to each (see `_footprint_outflow_weights`), NOT the outlet cell's own runoff.
+        # The outlet is outside the footprint, so its runoff also carries rain landing on it and
+        # flow converging from outside — none of it footprint throughput. Weighting by that
+        # inflates the exit total above `O_0_total` and misallocates the terrain diff, leaving a
+        # residual at high-flow exits. Ponding cells are interior, hence already exact.
+        outw = _footprint_outflow_weights(tstruct, nb.footprint, runoff)
         weights = Tuple{Float64,Symbol,Int}[]
         for oc in nb.footprint_outflow_cells
             carrier = get(dep_path, oc, 0)       # the outlet cell is a seed, so a path must depart it
             @assert carrier != 0 "NBS outlet cell $oc has no carrier path " *
                 "(expected it to be a network seed)"
-            push!(weights, (max(Float64(runoff[oc]), 0.0), :path, carrier))
+            push!(weights, (get(outw, LI[oc], 0.0), :path, carrier))
         end
         for pc in nb.internal_accumulation_cells
             tr = get(trap_of_cell, LI[pc], 0)

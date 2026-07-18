@@ -426,3 +426,28 @@ function _footprint_inflow_cells(inv_flow::Dict{Int, Vector{Int}},
     return collect(setdiff(Set(all_inflow_cells), Set(footprint)))
 end
 
+# ----------------------------------------------------------------------------
+"""
+    _footprint_outflow_weights(tstruct, footprint, runoff) -> Dict{Int,Float64}
+
+Oblivious throughput the footprint delivers to each of its outflow cells: single-successor
+forward sweep — each footprint cell credits its downstream (if outside the footprint) with its
+oblivious runoff; several cells may feed one outflow cell (accumulated).
+
+Terrain-exit corrections must be weighted by THIS, not by `runoff` at the outflow cell itself:
+the outflow cell sits outside the footprint, so its own runoff also carries the rain landing on
+it, which never crossed the footprint. Weighting by it inflates the exit total above `O_0` and
+leaves a residual at the exits. Weighting by the interior throughput makes the exit weights sum
+to `O_0`, so the correction cancels the footprint's outflow exactly.
+"""
+function _footprint_outflow_weights(tstruct, footprint::Vector{Int}, runoff::AbstractMatrix{<:Real})
+    fpset = Set(footprint)
+    w = Dict{Int,Float64}()
+    for fc in footprint
+        ds, terminus = _downstream_cell(tstruct.flowgraph, fc)
+        (terminus || ds in fpset) && continue
+        w[ds] = get(w, ds, 0.0) + max(Float64(runoff[fc]), 0.0)
+    end
+    return w
+end
+
