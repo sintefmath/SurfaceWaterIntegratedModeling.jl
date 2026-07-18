@@ -42,9 +42,9 @@ which the caller supplies.  That state is exactly what the timepoint-query funct
 - `precipitation::Union{Matrix{<:Real}, Real}`: precipitation rate per grid cell (default: 1.0).
 - `infiltration::Union{Matrix{<:Real}, Real}`: maximum infiltration rate per grid cell
   (default: 0.0).
-- `zvt`: optional precomputed z-volume tables (`_compute_z_vol_tables(tstruct)`). Only used
-  when culverts are present; pass it to avoid rebuilding this `tstruct`-only structure on every
-  call when sampling many timepoints (default: `nothing`, built on demand).
+- `zvt`: optional precomputed z-volume tables (`_compute_z_vol_tables(tstruct)`). This depends
+  only on `tstruct`; pass it to avoid rebuilding it on every call when sampling many timepoints
+  (default: `nothing`, built on demand).
 
 # Returns
 - `runoff::Matrix{Float64}`: the network-aware flow-intensity field — infiltration-excess runoff
@@ -78,12 +78,9 @@ function network_watercourses(tstruct::TrapStructure{<:Real},
     runoff, = watercourses(tstruct, full_traps; precipitation = precip, infiltration = infil)
 
     # build the network components: topology, cached NBS cell lists, culvert owners.
-    # `z_vol_tables` is only needed to size culvert trap geometry (below). It depends
-    # only on `tstruct`, so a caller sampling many timepoints should compute it once
-    # and pass it via `zvt`; otherwise build it here, and skip it entirely when there
-    # are no culverts (it would go unused).
-    z_vol_tables = zvt !== nothing ? zvt :
-                   (isempty(culverts) ? nothing : _compute_z_vol_tables(tstruct))
+    # `z_vol_tables` depends only on `tstruct`, so a caller sampling many timepoints
+    # should compute it once and pass it via `zvt`; otherwise it is built here.
+    z_vol_tables = zvt !== nothing ? zvt : _compute_z_vol_tables(tstruct)
     seeds = _dyn_seeds(tstruct, dyn_traps, DynCulvert[])
     comps = setup_network(tstruct, findall(full_traps);
                           dyn_coords = seeds, culverts = culverts, nbs = nbs)
