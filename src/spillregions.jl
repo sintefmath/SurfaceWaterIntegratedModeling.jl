@@ -294,18 +294,25 @@ function _process_domain!(regions::Matrix{Int64},
     # an edge between these two points, directed from highest (p1) to lowest
     # (p2) elevation, and remove any edges flowing out from p1.
     LI = LinearIndices(size(spilldomain))
-    edges_to_remove = Set{Tuple{Int, Int}}()
     @assert gdomain != nothing || isempty(directed_culverts) "Culverts only supported if grid is present, since we need to identify the direction of flow through the culvert"
-    for c in directed_culverts
-        p1, p2 = LI[c[1]], LI[c[2]]
 
-        # identify any edges flowing out from p1
-        existing_edges = filter(e->e[1] == p1, edges)
-        if !isempty(existing_edges)
-            push!(edges_to_remove, existing_edges...)             
-        end
+    # The flow graph defines a unique path out of a cell, so an inlet takes one
+    # culvert; a second one (often the same passage recorded twice) is ignored.
+    culverts = Dict{Int, Tuple{CartesianIndex{2}, CartesianIndex{2}}}()
+    for c in directed_culverts
+        get!(culverts, LI[c[1]], c)
+    end
+    ignored = length(directed_culverts) - length(culverts)
+    ignored > 0 &&
+        @info "Ignored $ignored culvert(s) sharing an inlet with an earlier one"
+
+    # Out-edges of an inlet are replaced by its culvert edge.  Remove them first:
+    # deleting afterwards would also take a culvert edge that coincides with one.
+    setdiff!(edges, Set(e for e in edges if haskey(culverts, e[1])))
+
+    for (p1, c) in culverts
         # add edge from p1 to p2
-        push!(edges, (p1, p2))
+        push!(edges, (p1, LI[c[2]]))
 
         # a sloping culvert can serve as a leak edge.  A completely flat
         # culvert should not be considered a leak edge, since this may cause loops
@@ -315,8 +322,6 @@ function _process_domain!(regions::Matrix{Int64},
             push!(leak_edges, (p1, p1)) # map directy to top (not bottom!) of culvert
         end
     end
-    
-    setdiff!(edges, edges_to_remove)
 
     # identify regions connected by streamlines
     union!(all_connections, edges)
