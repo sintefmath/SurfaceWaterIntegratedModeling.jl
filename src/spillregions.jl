@@ -351,7 +351,7 @@ function _process_domain!(regions::Matrix{Int64},
             # blindly add edges from all bottom cells of that region to e[2], as this
             # would also assign edges from the cells that are _actual_ bottom cells of
             # the region.  Hence the elevation comparison below.
-            for bc in reg_bcells[src_reg]
+            for bc in get(reg_bcells, src_reg, CartesianIndex{2}[])
                 (gdomain[bc] == gdomain[e[1]]) && push!(edges, (LI[bc], LI[e[2]]))
             end
         end

@@ -2,6 +2,7 @@ using Test, SurfaceWaterIntegratedModeling
 using LazyArtifacts
 
 include("basicTestFuns.jl")
+include("culvert_regions_test.jl")   # culvert inlets and region bottom cells
 include("watercourses_test.jl")
 include("dynamics_test.jl")
 include("dynamic_membership_test.jl")  # grow/detach/fusion + apply_fill!/apply_unfill!/apply_empty!
