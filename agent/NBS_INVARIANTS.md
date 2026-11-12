@@ -2,6 +2,8 @@
 
 This is the authoritative description of how Nature-Based Solutions are coupled to SWIM. Code comments refer here rather than repeating it. Older design documents are in `agent/archive/` and are obsolete.
 
+New to the NBS code? Start with `NBS_INTRO_OVERVIEW.md` (main logic and workflow), then `NBS_INTRO_DETAILED.md` (function-by-function walkthrough).
+
 ## Model
 
 **The base stays NBS-oblivious.** `watercourses`, `spillanalysis` and the constant-rate `fill_sequence` machinery never see an NBS. They route water *through* a footprint as if it were bare terrain. This field is the **baseline** (called *oblivious* in the code), and the traps' `external_inflow` comes from it.

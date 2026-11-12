@@ -142,7 +142,8 @@ constant-rate analytic path. The architecture (the "gate" — see
   `network_watercourses.jl` round out the folder.
 
 **NBS model, code map and invariants: `agent/NBS_INVARIANTS.md`** (authoritative;
-the older NBS design notes in `agent/archive/` are obsolete).
+the older NBS design notes in `agent/archive/` are obsolete).  Introductions for readers
+new to the NBS code: `agent/NBS_INTRO_OVERVIEW.md`, `agent/NBS_INTRO_DETAILED.md`.
 
 Invariants: a **full** trap has `spill_path != 0` (`> 0` downstream, `-1` out of
 domain); a **transitory** frontier has `spill_path == 0` and must hold

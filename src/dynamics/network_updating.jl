@@ -456,8 +456,8 @@ end
 Grow a fresh network from `seeds` carrying the given culverts and NBS, and split it into
 connected components.
 
-The core of [`setup_network`](@ref) minus the input validation and the NBS cell precompute —
-the placements passed here already carry theirs, and their `id`s are already stamped.  Used to
+The core of [`setup_network`](@ref) minus the input validation and [`_prepare_nbs!`](@ref) —
+the placements passed here already carry their `link` and `id`.  Used to
 regenerate fused or hierarchy-collapsed components.  `culverts` and `nbs` are held by reference
 on the result rather than copied.
 """
