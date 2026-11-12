@@ -120,7 +120,7 @@ fill_sequence(tstruct, weather_events; infiltration, dyn_traps, culverts, nbs)
 `_rebuild_contexts!` creates a context per component with `_make_context(net, tstruct, rateinfo, state0, cur_time, infiltration, z_vol_tables, precipitation, nbs_state)`.
 
 1. **The state (S1).**
-   - The trap volumes: `state0(trap)`, which returns the trap's committed volume (or its capacity, if it is full).
+   - The trap volumes: `state0(trap)` (`_driver_state0`). A full trap gets its capacity. A trap already in the network gets its committed volume. A trap newly brought in has no committed volume yet, so its last recorded amount is projected to the current time with `fill_trap_until`. A trap that is not full is capped just below capacity.
    - Then `_nbs_layer_block(net, nbs_state)`: each placement's layer volumes in `net.nbs` order, top first. A layer never stored starts empty.
 2. **`params = _build_rate_params(...)`.** These are the context's *frozen rates* (S5):
    - per-trap geometry: volume↔level tables, infiltration per cell of the trap footprint;
@@ -161,7 +161,7 @@ Each iteration:
       - detach traps that are no longer reached;
       - or merge with another component it now reaches.
 
-      Merging, and the restructuring `apply_empty!` and `apply_fill!` need when a parent trap absorbs or releases its sub-traps, rebuild the component from its seeds (`_regrow`); placements keep their `link` and `id`. A component is never split: if it becomes disconnected after `apply_unfill!`, it stays one ODE, which gives the same result.
+      Merging, and the restructuring `apply_empty!` and `apply_fill!` need when a parent trap absorbs or releases its sub-traps, rebuild the component from its seeds (`_regrow`); placements keep their `link` and `id`. `apply_unfill!` does not split a component that becomes disconnected: it stays one ODE, which gives the same result. A regrow does split it into connected pieces.
    4. **Reconcile the spill graph** (`_reconcile_spillgraph!`). Base SWIM's spill graph must contain exactly the full traps that are not covered. A trap that has just become covered has its spill withdrawn from the baseline, and one that has just left coverage gets it back.
    5. **Rebuild and predict.** Every context is rebuilt, with new frozen rates from the current `rateinfo`, and predicts again.
 4. **Record.** `_collect_amount_updates` gathers the new volumes: those of non-covered traps whose inflow changed (projected at constant rate), those of traps that just changed status (at their capacity), and those of network traps (from the driver). They are stored as incremental updates in a new `SpillEvent`. NBS layer volumes are **not** stored in `SpillEvent`.
@@ -223,7 +223,7 @@ The next period's driver restores the layers from `nbs_state`.
 
 **`network_states_at_timepoints(tstruct, seq, times; nbs, culverts, dyn_traps, infiltration)`.** `seq` holds no layer volumes, so this replays the network forward through `seq`:
 - at each weather-period start, it rebuilds a driver from that event's full snapshot (`_rebuild_replay_driver`), carrying the layer volumes (`_carry_nbs!`);
-- at events that touch a component, it commits, then rebuilds the network from scratch with `setup_network` (not with the incremental `apply_*` updates of the run). Component boundaries can therefore differ from the run's (the run never splits a component); the covered traps and paths should be the same, so the volumes agree up to solver tolerance;
+- at events that touch a component, it commits, then rebuilds the network from scratch with `setup_network` (not with the incremental `apply_*` updates of the run). Component boundaries can therefore differ from the run's (the run postpones splitting a component after a trap stops spilling); the covered traps and paths should be the same, so the volumes agree up to solver tolerance;
 - it samples each requested time with `_sample_network`, which integrates a copy of the state.
 
 The result, per time, is `trap_volumes` (network traps) and `nbs_layers` (per `id`, top layer first).
