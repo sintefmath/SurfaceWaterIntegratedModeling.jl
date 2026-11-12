@@ -31,7 +31,7 @@ The NBS module then corrects the baseline, but only inside the dynamic network s
 3. **Integration.** The layer ODE runs and gives the NBS's actual outflow.
 4. **Correction.** Downstream, the network replaces the baseline throughput by the actual outflow. It adds `(actual − O_0)` at the footprint's exits, and adds the pipe flow at the outlets. The difference is split over the exits in the same proportions as the baseline flow left through them; these fractions are the **exit shares**.
 
-Since a downstream trap's inflow already contains `O_0` from the baseline, adding the difference gives it exactly what the NBS really releases.
+Why add only the difference? In the network solver, each trap starts from its **`external_inflow`**: base SWIM's inflow to that trap from its own catchment. Because the baseline routes water straight through the footprint, the downstream trap's `external_inflow` already contains the footprint's throughput `O_0`. Adding `(actual − O_0)` therefore leaves the trap with exactly what the NBS really releases. Note that `external_inflow` belongs to a trap, not to the footprint: it is not the flow entering the footprint.
 
 This difference, `actual − O_0`, can be negative (the NBS is holding water back) or positive (it is releasing stored water). It travels downstream like any other network flow. Cells with spare infiltration absorb added water, and a removal can never push a cell below zero flow. That is the same rule `_track_flow!` uses in base SWIM.
 

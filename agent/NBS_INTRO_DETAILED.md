@@ -22,6 +22,7 @@ Function names are stable; line numbers are not given because they drift.
 | **ponds** | Trap bottoms inside the footprint. Water arriving there belongs to that trap. |
 | **piped layers** | `_piped_layers(system, n_terrain)`: the layers below the top `n_terrain` with `Kout > 0`. Layer `k` of this list discharges at `outlets[k]`. |
 | **`O_0`** | Baseline throughput of a footprint: rain on it plus baseline flow entering it. |
+| **`external_inflow`** | Per *network trap*: its baseline inflow, i.e. `rateinfo.trap_inflow` summed over the trap's leaf regions (`_external_inflow`). It includes the throughput of any footprint upstream (after infiltration on the way), because the baseline routes water through footprints. Not the flow entering a footprint. |
 | **draw** | Network flow (signed) reaching a placement's inflow cells during one routing pass. |
 | **injection** | What a placement adds to the routing: `(O_t − O_0)·share` at exits/ponds, and pipe flow at outlets. |
 | **context** | A `DynNetworkContext`: one component with its committed state, the time of that state, and its frozen rates (`params`). |
@@ -184,7 +185,7 @@ One rate evaluation:
    - The `max` only absorbs rounding, since `I_1 ≥ 0` analytically. The mass balance per placement is S3.
 
 **Why the downstream trap gets the right amount:**
-- Its `external_inflow` already holds the baseline `O_0` share.
+- Its `external_inflow` already holds the baseline `O_0·share`, as it arrived after the path's infiltration.
 - The carrier adds `(O_t − O_0)·share`, giving `O_t·share` in total.
 - The pipe flow arrives separately via its own carrier.
 

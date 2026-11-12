@@ -6,7 +6,9 @@ New to the NBS code? Start with `NBS_INTRO_OVERVIEW.md` (main logic and workflow
 
 ## Model
 
-**The base stays NBS-oblivious.** `watercourses`, `spillanalysis` and the constant-rate `fill_sequence` machinery never see an NBS. They route water *through* a footprint as if it were bare terrain. This field is the **baseline** (called *oblivious* in the code), and the traps' `external_inflow` comes from it.
+**The base stays NBS-oblivious.** `watercourses`, `spillanalysis` and the constant-rate `fill_sequence` machinery never see an NBS. They route water *through* a footprint as if it were bare terrain. This field is the **baseline** (called *oblivious* in the code).
+
+**`external_inflow`** is a property of each *network trap*, not of a footprint. It is the trap's baseline inflow: base SWIM's `rateinfo.trap_inflow` summed over the trap's leaf regions (`_external_inflow`). It contains everything the baseline routes into the trap from its catchment: rain (including rain on the flow paths), minus infiltration along the way, plus spills from full traps outside the network. Because the baseline routes water straight through footprints, it also contains each upstream footprint's throughput `O_0`, reduced by any infiltration between the footprint and the trap. The network solver starts every trap from `external_inflow` and adds only what the network changes.
 
 **The NBS module corrects the baseline**, inside the dynamic network solver only. For each placement, at every rate evaluation:
 
@@ -27,7 +29,7 @@ E_k   = overflow of the k-th piped layer                     → its outlet cell
 
 `share_e` is the fraction of the baseline throughput `O_0` that leaves the footprint through endpoint `e`, where an endpoint is an exit or a pond. For an exit, it is the baseline flow of the footprint cells that drain straight out to that exit cell, divided by `O_0`. The exit cell's own runoff is not used, because it also includes water that never crossed the footprint. For a pond, it is the baseline flow arriving at the pond, divided by `O_0`. The shares sum to 1. If `O_0 ≈ 0`, they are set equal. So the NBS output leaves the footprint in the same proportions as the baseline flow did (`_nbs_baseline`, L2).
 
-Because `external_inflow` already contains `O_0`, a downstream trap ends up receiving `O_t` instead of `O_0`.
+Because the downstream trap's `external_inflow` already contains the baseline `O_0·share_e` (as it arrives after the path's infiltration), adding the difference along the same path, with the same per-cell rule, makes the trap receive the NBS's actual output `O_t·share_e` instead.
 
 **Carrying a flow change downstream.** Any change of flow `d` travels down a path cell by cell, with `d ← max(V+d,0) − max(V,0)` at each cell (`V` = the cell's baseline value). Spare infiltration absorbs added water, and a removal cannot take a cell below zero flow. This is the same rule as base SWIM's `_track_flow!`, and it is used by both the solver and `network_watercourses`.
 
