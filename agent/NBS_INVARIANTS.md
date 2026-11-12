@@ -141,3 +141,31 @@ Each invariant names where it is enforced.
 - **Cell area.** The footprint area is the cell count, i.e. 1 m² per cell.
 - **Evapotranspiration (ET).** Not modelled. The layers' `EVCoeff`/`EVS11` are carried but unused.
 - **Ponds and the field.** In `network_watercourses`, a pond's share stays in its trap, even when that trap is full and spilling.
+
+## Open follow-ups (as of 2026-11-12, to be picked up)
+
+1. **Field vs solver: how NBS output is split over exits.**
+   - **The difference.** The two use different baselines:
+     - the solver's (`rateinfo.runoff`) does not route full network traps' spills; those reach an NBS as draw;
+     - `network_watercourses`' field (`watercourses` with all full traps) does route them, through the footprint, so its `O_0'` and shares `share'_e` include them.
+   - **Effect.** Totals agree, since both release `O_t` in total and the per-cell rule composes additively. But the field gives exit `e` `O_t·share'_e` where the solver gives `O_t·share_e`.
+   - **When it matters.** Only when a full network trap spills into a footprint that has several exits, entering it unevenly.
+   - **Proposed fix, field only.** In `network_watercourses`, also build the solver's baseline (`watercourses` with only the full traps that are *not* covered). Take the shares from it, and apply `O_t·share_e − O_0'·share'_e` at each exit, so the field matches the solver exit by exit.
+   - **Alternative.** Use spill-inclusive shares in both. This changes solver results, so it is not preferred.
+   - **To do.** Measure the size of the effect on the SUrbArea synthetic case first.
+2. **Pond shares in the field.** See "Known simplifications": the share should continue along a full pond trap's spill path.
+3. **Remaining NBS items from the 2026-11 review.** They are in `agent/reports/perf_memory_review_2026-11.md`, §6.0 (NBS track), and §4 for the details.
+   - **C3:** the steady-state stop can end a *commit* early and drop slow flow; the sign test can wrongly settle a layer that drains then refills.
+   - **C4:** commit results are unchecked.
+   - **C5:** re-rooting drops co-located tributaries (`network_updating.jl`, `_promote_tributary!`, the `p != j` filter).
+   - **C6:** culvert draw from a trap is not capped by the water available.
+   - **D1:** the ODE solve keeps the full trajectory.
+   - **D2:** a touch recommits and rebuilds every component; only the touched ones need it.
+   - **D3:** RHS allocations, and a dense finite-difference Jacobian.
+   - C7 and C14 are fixed; D2's per-context params caching is done.
+4. **`Pkg.test()` stops early.** `test/dynamic_membership_test.jl` uses `Random`, which is not a test dependency, and `runtests.jl` stops at the first failing testset. The deprecated `MaskingTests` and the known bay-grid failures then hide everything after them. To fix, add `Random` to `[extras]`/`[targets]` in `Project.toml`, and isolate or retire the known-broken testsets.
+   - Meanwhile, run the NBS/dynamics tests with `julia --project=. scratch/nbs_debug/run_tests.jl`. It isolates the known-broken testsets. It lives in the untracked `scratch/` folder in this checkout.
+5. **Repro material**, also in the untracked `scratch/nbs_debug/`:
+   - `setup.jl`, `run1.jl`, `run2.jl`: the SUrbArea synthetic case, run outside the webapp, with a mass-balance check;
+   - `run9.jl`: the C14 proof.
+   - The case's inputs are in `SUrbArea/debug/` (`synthetic_dtm*`, `synthetic_userdefined*.geojson`).
