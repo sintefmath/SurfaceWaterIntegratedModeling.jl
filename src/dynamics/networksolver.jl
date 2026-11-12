@@ -642,39 +642,18 @@ end
 """
     NBSElement
 
-One NBS placement, resolved into router terms for a solve (see the section header above for the
-signed-diff model).
-
-# Fields
-- `system`: the layered storage model ([`NBSSystem`](@ref))
-- `A`: footprint area (m^2), for `S_mm = V*1000/A`
-- `state_base`: 0-based offset of this element's layer block, after the `nt` trap states
-- `n_terrain`: number of top layers re-emitting at terrain rather than through a pipe
-- `O_0_total`: the placement's oblivious throughput — read off the **input** boundary, as
-  `Σ runoff` over `footprint_inflow_cells` plus the rain landing on the footprint.  The
-  footprint has zero infiltration by contract, so nothing is lost in transit and throughput
-  equals what enters; it therefore also seeds the ODE's live input.
-- `terrain_paths`: `(carrier path, ratio_e)` per boundary outlet
-- `terrain_traps`: `(accumulation trap, ratio_e)` per internal depression
-- `piped_paths`: `(carrier path, layer index)` per piped outlet
-
-`ratio_e` is a *normalised share* of the footprint's throughput to each endpoint: for an outlet,
-the interior footprint runoff delivered to it (`_footprint_outflow_weights`), NOT the outlet
-cell's own runoff — that also carries the outlet's rain / outside convergence, which never
-crossed the footprint and would misallocate the diff. For a ponding cell (interior) it is just
-its oblivious `runoff`. So the shares sum to `O_0_total`.
+One NBS placement resolved into router terms for a solve, built by [`_build_nbs_plan`](@ref).
+`O_0_total` and the shares come from [`_nbs_baseline`](@ref).
 """
 struct NBSElement
     system    ::NBSSystem
-    A         ::Float64                     # footprint area (m^2) for S_mm = V*1000/A
-    state_base::Int                         # 0-based offset of its layer block after the nt trap states
-    n_terrain ::Int                         # top layers re-emitting at terrain
-    O_0_total ::Float64                     # oblivious throughput, from the input boundary:
-                                            # Σ runoff over footprint_inflow_cells + rain on footprint
-                                            # (exact: zero footprint infiltration => output == input)
-    terrain_paths::Vector{Tuple{Int,Float64}}  # (carrier path, ratio_e) per boundary outlet
-    terrain_traps::Vector{Tuple{Int,Float64}}  # (accumulation trap, ratio_e) per internal depression
-    piped_paths  ::Vector{Tuple{Int,Int}}      # (carrier path, layer index) per piped outlet
+    A         ::Float64                        # footprint area (m^2)
+    state_base::Int                            # layers occupy state nt+state_base+1 ... (top first)
+    n_terrain ::Int                            # top layers overflowing onto the terrain
+    O_0_total ::Float64                        # oblivious throughput
+    terrain_paths::Vector{Tuple{Int,Float64}}  # (carrier path, share) per exit
+    terrain_traps::Vector{Tuple{Int,Float64}}  # (trap, share) per pond
+    piped_paths  ::Vector{Tuple{Int,Int}}      # (carrier path, layer) per piped outlet
 end
 
 """
@@ -691,32 +670,6 @@ struct NBSPlan
     elems       ::Vector{NBSElement}
     nlayer_total::Int
 end
-
-# Below this, the endpoint weights count as zero and the terrain diff is split evenly across
-# endpoints rather than by ratio (which would be 0/0).
-const _NBS_O0_EPS = 1e-12
-
-"""
-    _footprint_rain(precipitation, footprint) -> Float64
-
-Total rain landing on a footprint.
-
-# Arguments
-- `precipitation`: the period's rain rate — a uniform scalar, or a per-cell grid.
-- `footprint`: the placement's cells (linear indices).
-
-# Returns
-The rain summed over `footprint`, in the same units as the `runoff` grid: `watercourses` seeds
-runoff as `precipitation - infiltration` per cell and only ever sums it downstream, applying no
-area or mm conversion, so the two are directly comparable.  `O(1)` for a uniform rate.
-
-Infiltration is not subtracted — an NBS footprint has none by contract (`fill_sequence` forces
-it to zero), so every drop of rain on it becomes flow.
-"""
-_footprint_rain(precipitation::Real, footprint::Vector{Int}) =
-    Float64(precipitation) * length(footprint)
-_footprint_rain(precipitation::AbstractMatrix{<:Real}, footprint::Vector{Int}) =
-    sum(Float64[Float64(precipitation[f]) for f in footprint]; init = 0.0)
 
 """
     _nbs_state_count(p) -> Int
@@ -821,112 +774,35 @@ _attenuate_diff(runoff::AbstractVector{<:Real}, d::Float64) =
 """
     _build_nbs_plan(net, tstruct, runoff, precipitation) -> NBSPlan or nothing
 
-Resolve every NBS placement in `net` into router terms, once per solve.
+Resolve every NBS placement in `net` into router terms (`nothing` if there are none): its
+baseline throughput and shares ([`_nbs_baseline`](@ref)), the carrier path leaving each exit and
+piped outlet, and the trap under each pond.  Nothing is mutated.
 
-# Arguments
-- `net`: supplies the placements (`net.nbs`), and the paths/traps their outputs target.
-- `tstruct`: supplies trap footprints, for mapping a ponding cell to its covering trap.
-- `runoff`: the oblivious runoff grid.  Read only.
-- `precipitation`: the period's rain rate (scalar or per-cell).
-
-# Returns
-The [`NBSPlan`](@ref), or `nothing` when `net` has no NBS.
-
-Per placement this resolves two independent quantities, from `runoff`, `precipitation`, and the
-cell lists `setup_network` already cached on the [`DynNBSPlacement`](@ref):
-
-- **`O_0_total`**, the throughput, off the *input* boundary — `Σ runoff` over
-  `footprint_inflow_cells` plus the rain on the footprint.  Exact, because the footprint has
-  zero infiltration by contract, so output equals input.
-- **`ratio_e`**, a normalised share per endpoint: for an outlet, the footprint's interior
-  throughput to it (`_footprint_outflow_weights`); for an `internal_accumulation_cells` cell, its
-  oblivious `runoff`. So the shares sum to `O_0_total` and the terrain diff cancels exactly.
-
-An outlet's *own* runoff must NOT be used — it carries rain landing on the outlet cell and flow
-converging from outside, neither of which is throughput. The layer models and ODE-state layout
-come straight off `net.nbs`.
-
-Nothing is mutated.  Asserts the coupling invariants: an outlet must have a carrier path
-departing it (it is a network seed), and an internal depression must be covered by a network
-trap.
+Every exit and outlet is a network seed, so a path departs from it; that is asserted.
 """
 function _build_nbs_plan(net::DynNetwork, tstruct, runoff::AbstractMatrix{<:Real},
                          precipitation::Union{AbstractMatrix{<:Real},Real})
     isempty(net.nbs) && return nothing
-    LI = LinearIndices(tstruct.topography)
-    trap_of_cell = Dict{Int,Int}()             # linear cell -> local trap index
-    for (ti, t) in enumerate(net.traps), c in tstruct.footprints[t.trap_ix]
-        trap_of_cell[c] = ti
-    end
-    # carrier path per seed cell: the path departing from an output (outlet) cell
-    dep_path = Dict{CartesianIndex{2},Int}()
+    departing = Dict{CartesianIndex{2},Int}()           # cell -> first path departing from it
     for (p, fp) in enumerate(net.flow_paths)
-        haskey(dep_path, fp.departure_point) || (dep_path[fp.departure_point] = p)
+        get!(departing, fp.departure_point, p)
+    end
+    function carrier(cell)
+        p = get(departing, cell, 0)
+        @assert p != 0 "NBS exit/outlet $cell has no carrier path (expected it to be a network seed)"
+        return p
     end
 
     elems = NBSElement[]
     base  = 0
     for nb in net.nbs
-        A_foot = Float64(length(nb.footprint))   # @@@ 1 m^2/cell; use real cell area when available
-
-        # Throughput, off the INPUT boundary.  The footprint has zero infiltration by contract,
-        # so nothing is lost crossing it and output == input == (flow in) + (rain on footprint).
-        # The flowgraph is single-successor, so an inflow cell's whole runoff enters; a cell with
-        # negative runoff (spare infiltration capacity) never propagates, hence max(., 0).
-        O_0_total = _footprint_rain(precipitation, nb.footprint)
-        for ic in nb.footprint_inflow_cells
-            O_0_total += max(Float64(runoff[ic]), 0.0)
-        end
-
-        # Weights per exit endpoint. Outlets: weight by the footprint's interior throughput
-        # delivered to each (see `_footprint_outflow_weights`), NOT the outlet cell's own runoff.
-        # The outlet is outside the footprint, so its runoff also carries rain landing on it and
-        # flow converging from outside — none of it footprint throughput. Weighting by that
-        # inflates the exit total above `O_0_total` and misallocates the terrain diff, leaving a
-        # residual at high-flow exits. Ponding cells are interior, hence already exact.
-        outw = _footprint_outflow_weights(tstruct, nb.footprint, runoff)
-        weights = Tuple{Float64,Symbol,Int}[]
-        for oc in nb.footprint_outflow_cells
-            carrier = get(dep_path, oc, 0)       # the outlet cell is a seed, so a path must depart it
-            @assert carrier != 0 "NBS outlet cell $oc has no carrier path " *
-                "(expected it to be a network seed)"
-            push!(weights, (get(outw, LI[oc], 0.0), :path, carrier))
-        end
-        for pc in nb.internal_accumulation_cells
-            tr = get(trap_of_cell, LI[pc], 0)
-            @assert tr != 0 "NBS internal-depression cell $pc (region $(tstruct.regions[LI[pc]])) " *
-                "is covered by no network trap — coupling invariant broken"
-            push!(weights, (max(Float64(runoff[pc]), 0.0), :trap, tr))
-        end
-        W_total = sum(Float64[w for (w, _, _) in weights]; init = 0.0)
-        # Invariant: the exit weights are the footprint's own throughput, so they sum to O_0.
-        # If they don't, the terrain diff is misallocated (over-/under-removed at the exits).
-        @assert isapprox(W_total, O_0_total; rtol = 1e-6, atol = 1e-9) ||
-                (W_total < _NBS_O0_EPS && O_0_total < _NBS_O0_EPS) """
-            NBS exit weights ($W_total) must sum to the throughput O_0_total ($O_0_total)"""
-        nend    = length(weights)
-        ratio(w) = W_total > _NBS_O0_EPS ? w / W_total : (nend > 0 ? 1.0 / nend : 0.0)
-
-        terrain_paths = Tuple{Int,Float64}[]
-        terrain_traps = Tuple{Int,Float64}[]
-        for (w, kind, tgt) in weights
-            kind === :path ? push!(terrain_paths, (tgt, ratio(w))) :
-                             push!(terrain_traps, (tgt, ratio(w)))
-        end
-
-        piped_paths = Tuple{Int,Int}[]
-        piped = 0
-        for (l, L) in enumerate(nb.system.layers)
-            (l > nb.n_terrain && L.Kout > 0.0) || continue
-            piped += 1
-            carrier = get(dep_path, nb.outlets[piped], 0)   # the outlet cell is a seed too
-            @assert carrier != 0 "NBS piped outlet $(nb.outlets[piped]) has no carrier path " *
-                "(expected it to be a network seed)"
-            push!(piped_paths, (carrier, l))
-        end
-
-        push!(elems, NBSElement(nb.system, A_foot, base, nb.n_terrain, O_0_total,
-                                terrain_paths, terrain_traps, piped_paths))
+        O_0, exit_shares, pond_shares = _nbs_baseline(nb, tstruct, runoff, precipitation)
+        push!(elems, NBSElement(nb.system,
+                                Float64(length(nb.footprint)),   # @@@ 1 m^2/cell; use the real cell area
+                                base, nb.n_terrain, O_0,
+                                [(carrier(c), s) for (c, s) in zip(nb.link.exits, exit_shares)],
+                                [(_pond_trap(net, tstruct, c), s) for (c, s) in zip(nb.link.ponds, pond_shares)],
+                                [(carrier(o), l) for (o, l) in zip(nb.outlets, _piped_layers(nb.system, nb.n_terrain))]))
         base += length(nb.system.layers)
     end
     return NBSPlan(elems, base)

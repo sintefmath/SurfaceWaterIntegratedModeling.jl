@@ -78,9 +78,9 @@ cell is crossed mid-path, so it is matched anywhere in `cells`.  Nothing is muta
 """
 function _nbs_coupled_nodes(net::DynNetwork, tstruct, np::Int)
     coupled = [Int[] for _ in net.nbs]
-    outflow = [Set(n.footprint_outflow_cells) for n in net.nbs]
+    outflow = [Set(n.link.exits) for n in net.nbs]
     inflow_of = Dict{CartesianIndex{2},Int}()          # inflow cell -> the NBS it feeds
-    for (n, nb) in enumerate(net.nbs), c in nb.footprint_inflow_cells
+    for (n, nb) in enumerate(net.nbs), c in nb.link.inflow_cells
         inflow_of[c] = n
     end
     for (p, fp) in enumerate(net.flow_paths)
@@ -99,21 +99,12 @@ end
 """
     _add_accumulation_traps!(coupled, net, tstruct, np) -> nothing
 
-Unite each NBS with the network trap holding its internal-accumulation cells — water ponding
-inside the footprint is that trap's, so the two must solve together.
-
-Cells map to lowest-level regions by direct `regions` lookup (dedup absorbs flat, many-celled
-bottoms), and each region to the single network trap in its supertrap hierarchy; that
-uniqueness is asserted.  **Mutates `coupled`**, appending the trap node to each NBS's list.
+Unite each NBS with the network trap under each of its ponds: water ponding inside the footprint
+is that trap's, so the two must solve together.  **Mutates `coupled`**.
 """
 function _add_accumulation_traps!(coupled, net::DynNetwork, tstruct, np::Int)
-    tnode = Dict(t.trap_ix => np + l for (l, t) in enumerate(net.traps))
-    for (n, nb) in enumerate(net.nbs)
-        for r in unique(tstruct.regions[c] for c in nb.internal_accumulation_cells)
-            covering = [tnode[st] for st in tstruct.supertraps_of[r] if haskey(tnode, st)]
-            @assert length(covering) == 1 "NBS accumulation region $r maps to $(length(covering)) network traps (expected 1)"
-            push!(coupled[n], covering[1])
-        end
+    for (n, nb) in enumerate(net.nbs), c in nb.link.ponds
+        push!(coupled[n], np + _pond_trap(net, tstruct, c))
     end
 end
 

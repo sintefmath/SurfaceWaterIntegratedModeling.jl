@@ -113,60 +113,22 @@ function network_watercourses(tstruct::TrapStructure{<:Real},
             end
         end
 
-        # --- NBS: re-emit the layers' current output as a signed diff over the oblivious
-        #         baseline, distributed by the SAME weighted ratios as the network solver -----
+        # --- NBS: the layers' current output replaces the oblivious throughput (as in the solver)
         for nb in net.nbs
-            A_foot = Float64(length(nb.footprint))
+            A      = Float64(length(nb.footprint))
             layers = get(nbs_layers, nb.id, zeros(Float64, length(nb.system.layers)))
-
-            # throughput off the input boundary (footprint has zero infiltration, so out == in).
-            # Measured on the OBLIVIOUS field: what enters equals what leaves + accumulates, so
-            # the correction is exact and cannot remove flow that never crossed the footprint.
-            O_0 = _footprint_rain(precip, nb.footprint)
-            for ic in nb.footprint_inflow_cells
-                O_0 += max(Float64(runoff_orig[ic]), 0.0)
-            end
-
-            # exit weights. Outflow cells: weight by the footprint's interior throughput to each
-            # (see _footprint_outflow_weights), not the external cell's runoff — the latter also
-            # carries rain landing on that cell, inflating W above O_0 and leaving a residual.
-            # Accumulation cells are interior (footprint ∩ trap bottoms), so already exact.
-            outw = _footprint_outflow_weights(tstruct, nb.footprint, runoff_orig)
-            wts = Tuple{Float64,Int}[]
-            for oc in nb.footprint_outflow_cells
-                push!(wts, (get(outw, LI[oc], 0.0), LI[oc]))
-            end
-            for pc in nb.internal_accumulation_cells
-                push!(wts, (max(Float64(runoff_orig[pc]), 0.0), LI[pc]))
-            end
-            W = sum(Float64[w for (w, _) in wts]; init = 0.0)
-            n = length(wts)
-            ratio(w) = W > _NBS_O0_EPS ? w / W : (n > 0 ? 1.0 / n : 0.0)
-            # Exit weights are the footprint's own throughput, so they sum to O_0.
-            @assert isapprox(W, O_0; rtol = 1e-6, atol = 1e-9) ||
-                    (W < _NBS_O0_EPS && O_0 < _NBS_O0_EPS) """
-                NBS exit weights ($W) must sum to the throughput O_0 ($O_0)"""
-
-            # terrain re-emission: (O_terrain(state) - O_0) shared across the terrain exits
-            diffbase = _nbs_terrain_outflow(nb.system, layers, A_foot, nb.n_terrain) - O_0
-            # A downward correction removes -diffbase, shared by w/W; since w sums to W, no exit
-            # loses more than its own oblivious outflow. Guard against that being violated.
-            @assert diffbase >= -W - 1e-9 """
-                NBS correction ($(-diffbase)) exceeds the footprint outflow ($W) — would remove
-                downstream water that never crossed the footprint"""
-            for (w, cell) in wts
-                _propagate_field_delta!(runoff_live, footprint_set, tstruct, full_traps_int, cell,
-                                        diffbase * ratio(w))
-            end
-
-            # piped outlets: each lower outflowing layer delivers its output at its outlet cell
-            piped = 0
-            for (l, L) in enumerate(nb.system.layers)
-                (l > nb.n_terrain && L.Kout > 0.0) || continue
-                piped += 1
-                E = first(_layer_fluxes(L, layers[l], A_foot))
+            # measured on the untouched oblivious field, so stacked placements stay independent
+            O_0, exit_shares, _ = _nbs_baseline(nb, tstruct, runoff_orig, precip)
+            diff = _nbs_terrain_outflow(nb.system, layers, A, nb.n_terrain) - O_0
+            for (c, sh) in zip(nb.link.exits, exit_shares)
                 _propagate_field_delta!(runoff_live, footprint_set, tstruct, full_traps_int,
-                                        LI[nb.outlets[piped]], E)
+                                        LI[c], diff * sh)
+            end
+            # @@@ pond shares stay in the trap under the footprint (field undefined there); if
+            #     that trap is full they should continue along its spill path
+            for (o, l) in zip(nb.outlets, _piped_layers(nb.system, nb.n_terrain))
+                _propagate_field_delta!(runoff_live, footprint_set, tstruct, full_traps_int,
+                                        LI[o], first(_layer_fluxes(nb.system.layers[l], layers[l], A)))
             end
         end
     end
@@ -178,19 +140,21 @@ function network_watercourses(tstruct::TrapStructure{<:Real},
     return runoff_live
 end
 
-# Add `amount` to the field along the downstream flow route from `start_lin`, stopping at an NBS
-# footprint (which intercepts surface flow), the first unfilled trap bottom, or the domain exit.
-# The route comes from `flow_path_from`, so — exactly like the oblivious baseline — it carries the
-# delta THROUGH already-full traps via their spill paths rather than dead-ending at a trap bottom.
-# Pure additive superposition over the baseline: a culvert's -q from its inlet and +q from its
-# outlet follow their own routes and cancel below the confluence, conserving mass.
+# Carry a flow change `amount` downstream from `start_lin` with the solver's per-cell rule (as
+# `_track_flow!`): each cell's value changes by what arrives, and what passes on is
+# `max(V+d,0) - max(V,0)` — spare infiltration absorbs added water, a removal stops at zero flow.
+# Stops at an NBS footprint (it intercepts surface flow), when nothing is left, or where the
+# route ends.  The route (`flow_path_from`) passes through full traps via their spill paths.
 function _propagate_field_delta!(field, footprint_set, tstruct, full_traps_int::Vector{Int},
                                  start_lin::Int, amount::Float64)
     amount == 0.0 && return
     paths, _ = flow_path_from(tstruct, start_lin; full_traps = full_traps_int)
     for seg in paths, c in seg
-        (c in footprint_set) && return   # intercepted by an NBS footprint
-        field[c] += amount
+        (c in footprint_set) && return
+        V = field[c]
+        field[c] = V + amount
+        amount = max(V + amount, 0.0) - max(V, 0.0)
+        amount == 0.0 && return
     end
     return
 end

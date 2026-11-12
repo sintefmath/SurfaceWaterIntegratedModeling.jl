@@ -159,6 +159,19 @@ end
 
 # ----------------------------------------------------------------------------
 """
+    NBSLink
+
+The cells through which an NBS footprint exchanges water with the terrain (see
+[`_nbs_link`](@ref)): `inflow_cells` drain into it from outside, `exits` are the outside cells
+it drains to, `ponds` are the trap bottoms inside it.
+"""
+struct NBSLink
+    inflow_cells::Vector{CartesianIndex{2}}
+    exits       ::Vector{CartesianIndex{2}}
+    ponds       ::Vector{CartesianIndex{2}}
+end
+
+"""
        DynNBSPlacement(system, footprint, n_terrain, outlets)
        DynNBSPlacement(system, footprint, outlets)          # n_terrain defaults to 1
 
@@ -168,47 +181,43 @@ governed by the layered storage model `system` (an [`NBSSystem`](@ref)).
 `footprint` is the set of grid cells (linear indices, matching
 `TrapStructure.footprints`'s convention) covered by the installation.
 
-`n_terrain` is the number of *topmost* layers whose overflow re-emits at the
-footprint's lower-edge exit boundary.  Every outflowing layer (`Kout > 0`) *below*
-the top `n_terrain` requires one explicit piped `outlet`, in top-to-bottom layer
-order.  `outlets` are grid cells (geometry — matching `DynCulvert`'s
-`inlet`/`outlet` convention) where that piped discharge re-enters the terrain; the
-terrain-re-emit targets of the top `n_terrain` layers are derived from the
-footprint geometry at network-build time.
+Each layer's overflow leaves either onto the terrain or through a pipe.  The top `n_terrain`
+layers overflow onto the terrain, across the footprint's natural exits.  Every lower layer that
+overflows (`Kout > 0`) needs a piped outlet: `outlets[k]` is the grid cell where the k-th such
+layer, counted top-down, discharges ([`_piped_layers`](@ref)).
 
-The `footprint_*`/`internal_accumulation_cells` and `id` fields are filled in at
-network-build time (`setup_network`), when the `TrapStructure` is available.
+`link` and `id` are set by `setup_network` ([`_prepare_nbs!`](@ref)), once the terrain is known.
 """
 mutable struct DynNBSPlacement <: DynObject
     system::NBSSystem
     footprint::Vector{Int}             # grid cells covered (linear indices)
-    n_terrain::Int                     # topmost layers re-emitting at the exit boundary
-    outlets::Vector{CartesianIndex{2}} # piped-outlet cells for the outflowing layers below the top n
+    n_terrain::Int                     # top layers overflowing onto the terrain
+    outlets::Vector{CartesianIndex{2}} # piped outlet per layer in _piped_layers(system, n_terrain)
 
-    # filled in at network-build time, when the TrapStructure is available
-    footprint_inflow_cells::Vector{CartesianIndex{2}}      # cells feeding into the footprint from outside
-    footprint_outflow_cells::Vector{CartesianIndex{2}}     # external cells the footprint drains to
-    internal_accumulation_cells::Vector{CartesianIndex{2}} # footprint cells that pond (trap bottoms)
-
-    # @@@ stable identity for cross-event layer-state persistence (the key for restoring
-    #     each placement's layer state across rebuilds).  Assigned by the caller/distributor;
-    #     0 until then.
-    id::Int
+    link::Union{NBSLink,Nothing}       # derived from the terrain by _prepare_nbs!
+    id::Int                            # key of the layer storage across events; set by _prepare_nbs!
 
     function DynNBSPlacement(system::NBSSystem, footprint::Vector{Int}, n_terrain::Integer,
                              outlets::Vector{CartesianIndex{2}})
         nlayer = length(system.layers)
         0 <= n_terrain <= nlayer ||
             error("DynNBSPlacement: n_terrain must be in 0:$nlayer (layer count), got $n_terrain")
-        # every outflowing layer (Kout > 0) below the top n_terrain needs one piped outlet
-        npiped = count(l -> system.layers[l].Kout > 0.0, (n_terrain + 1):nlayer)
+        npiped = length(_piped_layers(system, n_terrain))
         length(outlets) == npiped ||
-            error("DynNBSPlacement: expected $npiped piped outlet(s) for the outflowing layer(s) " *
+            error("DynNBSPlacement: expected $npiped piped outlet(s) for the overflowing layer(s) " *
                   "below the top n_terrain=$n_terrain, got $(length(outlets))")
-        new(system, footprint, n_terrain, outlets, Vector{CartesianIndex{2}}(),
-            Vector{CartesianIndex{2}}(), Vector{CartesianIndex{2}}(), 0)
+        new(system, footprint, n_terrain, outlets, nothing, 0)
     end
 end
+
+"""
+    _piped_layers(system, n_terrain) -> Vector{Int}
+
+The layers that overflow through a pipe: those below the top `n_terrain` with `Kout > 0`, top
+first.  The k-th of them discharges at the placement's `outlets[k]`.
+"""
+_piped_layers(system::NBSSystem, n_terrain::Integer) =
+    [l for l in (n_terrain + 1):length(system.layers) if system.layers[l].Kout > 0.0]
 
 # Backward-compatible tail: no explicit n_terrain defaults to 1 (topmost layer re-emits at terrain).
 DynNBSPlacement(system::NBSSystem, footprint::Vector{Int}, outlets::Vector{CartesianIndex{2}}) =

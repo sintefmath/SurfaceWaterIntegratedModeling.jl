@@ -25,10 +25,8 @@ domain or reaches a trap already in the network.
 `nbs` are held by reference on the components, not copied.
 
 !!! note
-    Despite the name, this **mutates `nbs`**: each placement is stamped with its stable `id`
-    (its position in `nbs`, which keys its persistent layer storage) and has its inflow,
-    outflow and internal-accumulation cells filled in.  `tstruct`, `full_traps` and
-    `dyn_coords` are read only.
+    Despite the name, this **mutates `nbs`**: [`_prepare_nbs!`](@ref) sets each placement's
+    `id` and terrain `link`.  `tstruct`, `full_traps` and `dyn_coords` are read only.
 """
 function setup_network(tstruct, full_traps;
                        dyn_coords::Vector{CartesianIndex{2}}=CartesianIndex{2}[],
@@ -38,22 +36,17 @@ function setup_network(tstruct, full_traps;
     # Input validation (no culverts or dyn_coords inside NBS footprints)
     _validate_network_inputs(tstruct, dyn_coords, culverts, nbs)
 
-    # Stamp each placement's stable id = its position in this nbs vector, so its layer
-    # storage persists across events (keyed by `nb.id` in the driver's nbs_state store).
-    for (i, nb) in enumerate(nbs); nb.id = i; end
+    _prepare_nbs!(nbs, tstruct)
 
-    # Compute inflow and outflow cells for each NBS footprint
-    _compute_nbs_inflow_outflow_cells!(nbs, tstruct)
-    
     # seeds for tracking dynamic flows are the dyn_coords, BOTH culvert endpoints (the outlet
     # so its downstream chain is traced, the inlet so its host trap is an evolving node the
-    # culvert can draw from — not just fill statically), and all NBS outflow points
+    # culvert can draw from — not just fill statically), and every cell an NBS emits water at
     seeds = union(Set(dyn_coords),
                   Set([culvert.inlet  for culvert in culverts]),
                   Set([culvert.outlet for culvert in culverts]),
                   Set(vcat([n.outlets for n in nbs]...)),
-                  Set(vcat([n.internal_accumulation_cells for n in nbs]...)),
-                  Set(vcat([n.footprint_outflow_cells for n in nbs]...)))
+                  Set(vcat([n.link.ponds for n in nbs]...)),
+                  Set(vcat([n.link.exits for n in nbs]...)))
 
     # Generate map to keep track of all existing network elements on terrain
     pathmap = Dict{Int, Int}() # terrain cell -> flow path index
@@ -73,49 +66,6 @@ function setup_network(tstruct, full_traps;
     networks = split_network_into_connected_components(monolithic_network, tstruct)
 
     return networks
-end
-
-# ----------------------------------------------------------------------------
-"""
-    _map_inverse_flow(flowgraph) -> Dict{Int, Vector{Int}}
-
-Invert the flow graph: map each cell to the list of cells draining into it.  Cells nothing
-drains into are simply absent from the result.  Nothing is mutated.
-"""
-function _map_inverse_flow(flowgraph)
-    inv_flow = Dict{Int, Vector{Int}}()
-    for cell in 1:Graphs.nv(flowgraph)
-        ds = Graphs.outneighbors(flowgraph, cell)
-        for d ∈ ds
-            inv_flow[d] = get(inv_flow, d, Int[]) # initialize if not present
-            push!(inv_flow[d], cell)
-        end
-    end
-    return inv_flow
-end
-
-# ----------------------------------------------------------------------------
-"""
-    _compute_nbs_inflow_outflow_cells!(nbs, tstruct) -> nothing
-
-Fill in each placement's cell lists from its footprint: the cells flow leaves the footprint
-through, the outside cells draining into it, and the trap bottoms inside it (where water would
-pond rather than pass through).
-
-**Mutates every element of `nbs`**, setting `footprint_outflow_cells`,
-`footprint_inflow_cells` and `internal_accumulation_cells`; `tstruct` is read only.
-"""
-function _compute_nbs_inflow_outflow_cells!(nbs, tstruct)
-    inv_flow = _map_inverse_flow(tstruct.flowgraph)
-    CI = CartesianIndices(tstruct.topography)
-    LI = LinearIndices(tstruct.topography)
-    tbottoms = Set(LI[tstruct.trap_bottoms])
-    
-    for n in nbs
-        n.footprint_outflow_cells = CI[_footprint_outflow_cells(tstruct, n.footprint)]
-        n.footprint_inflow_cells = CI[_footprint_inflow_cells(inv_flow, n.footprint)]
-        n.internal_accumulation_cells = CI[collect(intersect(Set(n.footprint), tbottoms))]
-    end
 end
 
 # ----------------------------------------------------------------------------
@@ -336,7 +286,7 @@ function _intersecting_on_path(path, culverts, nbs)
     end
     for (ix, n) in enumerate(nbs)
         for (pos, cell) in enumerate(path)
-            cell in n.footprint_inflow_cells && push!(nbs_in, (ix, pos))
+            cell in n.link.inflow_cells && push!(nbs_in, (ix, pos))
         end
         for outlet in n.outlets
             p = findfirst(==(outlet), path)
@@ -354,9 +304,9 @@ Error if a culvert endpoint, a `dyn_coord`, or a sink lies inside an NBS footpri
 replaces the surface flow over its footprint with its layer model, so nothing else may claim
 water there.  Nothing is mutated.
 
-The sink rule is load-bearing, not hygiene: `_build_nbs_plan` takes a placement's ponding
-endpoints from `internal_accumulation_cells`, which is `footprint ∩ trap_bottoms` — and a sink
-is deliberately *not* a trap bottom (`_is_trap_bottom` excludes it).  A sink inside a footprint
+The sink rule is load-bearing, not hygiene: a placement's ponding endpoints are its link's
+`ponds`, which is `footprint ∩ trap_bottoms` — and a sink is deliberately *not* a trap bottom
+(`_is_trap_bottom` excludes it).  A sink inside a footprint
 would therefore terminate flow at a cell the plan never sees, silently dropping it from the
 placement's endpoints while it still counted toward the throughput.
 """
@@ -378,76 +328,8 @@ function _validate_network_inputs(tstruct, dyn_coords, culverts, nbs)
         if LI[sink] in nbs_footprints
             error("Sink cell $sink is inside an NBS footprint.  An NBS footprint must not " *
                   "contain a sink: water terminating there is invisible to the placement's " *
-                  "ponding endpoints (internal_accumulation_cells covers trap bottoms only).")
+                  "ponding endpoints (its link's ponds cover trap bottoms only).")
         end
     end
     return nothing
 end
-
-# ----------------------------------------------------------------------------
-"""
-    _footprint_outflow_cells(tstruct, footprint) -> Vector{Int}
-
-The external cells a `footprint` drains into: the downstream neighbours of its cells that lie
-outside it.  Nothing is mutated.
-
-Warns when empty — that is a closed basin, which is legal only if the NBS placement's upper
-layers have explicit piped outlets; without them the system just submerges with no runoff.
-"""
-function _footprint_outflow_cells(tstruct, footprint::Vector{Int})
-    flowgraph = tstruct.flowgraph
-    outflow_cells = Set{Int}()
-    for cell in footprint
-        ds, terminus = _downstream_cell(flowgraph, cell)   # utils.jl: (downstream cell, is-terminus?)
-        if !terminus && !(ds in footprint)
-            push!(outflow_cells, ds)
-        end
-    end
-    # if there are no outflow cells, that is OK, but if upper NBS layers do not
-    # have other, explicitly given outlets, this NBS system will become
-    # submerged with no runoff.
-    if isempty(outflow_cells)
-        @warn "NBS placement footprint has no outflow cells."
-    end
-    return collect(outflow_cells)
-end
-
-# ----------------------------------------------------------------------------
-"""
-    _footprint_inflow_cells(inv_flow, footprint) -> Vector{Int}
-
-The external cells draining into a `footprint`: the upstream neighbours of its cells, taken
-from the inverted flow map ([`_map_inverse_flow`](@ref)), that lie outside it.  These are the
-boundary cells where a flow path enters the NBS.  Nothing is mutated.
-"""
-function _footprint_inflow_cells(inv_flow::Dict{Int, Vector{Int}},
-                                 footprint::Vector{Int})
-    all_inflow_cells = vcat([get(inv_flow, cell, Int[]) for cell in footprint]...)
-    return collect(setdiff(Set(all_inflow_cells), Set(footprint)))
-end
-
-# ----------------------------------------------------------------------------
-"""
-    _footprint_outflow_weights(tstruct, footprint, runoff) -> Dict{Int,Float64}
-
-Oblivious throughput the footprint delivers to each of its outflow cells: single-successor
-forward sweep — each footprint cell credits its downstream (if outside the footprint) with its
-oblivious runoff; several cells may feed one outflow cell (accumulated).
-
-Terrain-exit corrections must be weighted by THIS, not by `runoff` at the outflow cell itself:
-the outflow cell sits outside the footprint, so its own runoff also carries the rain landing on
-it, which never crossed the footprint. Weighting by it inflates the exit total above `O_0` and
-leaves a residual at the exits. Weighting by the interior throughput makes the exit weights sum
-to `O_0`, so the correction cancels the footprint's outflow exactly.
-"""
-function _footprint_outflow_weights(tstruct, footprint::Vector{Int}, runoff::AbstractMatrix{<:Real})
-    fpset = Set(footprint)
-    w = Dict{Int,Float64}()
-    for fc in footprint
-        ds, terminus = _downstream_cell(tstruct.flowgraph, fc)
-        (terminus || ds in fpset) && continue
-        w[ds] = get(w, ds, 0.0) + max(Float64(runoff[fc]), 0.0)
-    end
-    return w
-end
-

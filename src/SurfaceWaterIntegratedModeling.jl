@@ -28,6 +28,7 @@ include("fill_sequence/fill_sequence.jl")
 include("watercourses.jl")
 include("dynamics/culvert_rate.jl")
 include("utils.jl")
+include("dynamics/nbs_terrain.jl")     # NBS placement <-> terrain: link cells and baseline
 include("dynamics/networksolver.jl")
 include("dynamics/network_context.jl")
 include("dynamics/network_utils.jl")
