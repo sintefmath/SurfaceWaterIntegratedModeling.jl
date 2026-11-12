@@ -127,6 +127,7 @@ Each invariant names where it is enforced.
 - **S3.** Per placement, `Σ dV = Q_in − O_t − Σ E_k − bottom percolation`. *Unit test "NBS: layer cascade conserves mass".*
 - **S4.** A layer that is empty, or at or below a threshold, emits nothing through that flux. No rate is clamped ("floored") after the fact. *`compute_outflow`, `_layer_fluxes`.*
 - **S5.** A commit uses the context's frozen rates. *`DynNetworkContext.params`; fixed in `d0e296a` (review item C14); test "a network commit is not altered by the event that triggers it".*
+- **S6.** Base SWIM's spill graph contains exactly the full traps that are not covered, so a covered trap's spill is routed only by its network, never twice. *`_reconcile_spillgraph!` at every touch that changes coverage. When a weather period's network is built, `fill_sequence` asserts it: only a trap full from t = 0 could break it, and `spillanalysis` leaves no zero-volume traps (`spillregions` merges them into their downstream region).*
 
 **Persistence**
 - **P1.** Layer volumes cross touches and weather periods only through `nbs_state[id]`. They are written at every harvest and finalize, and read at every rebuild.
@@ -136,7 +137,3 @@ Each invariant names where it is enforced.
 - **Cell area.** The footprint area is the cell count, i.e. 1 m² per cell.
 - **Evapotranspiration (ET).** Not modelled. The layers' `EVCoeff`/`EVS11` are carried but unused.
 - **Ponds and the field.** In `network_watercourses`, a pond's share stays in its trap, even when that trap is full and spilling.
-
-## Open question (to verify)
-
-- **Possible double count at a weather-period start.** Base SWIM's spill graph should exclude covered traps (`_reconcile_spillgraph!`). That reconciliation runs when coverage changes at an event, but not when a weather period's network is first built. If a trap is already full at that moment and covered by a network, its spill may be routed both by the baseline and by the network. An example would be a zero-volume trap downstream of an NBS, which counts as full from the start.

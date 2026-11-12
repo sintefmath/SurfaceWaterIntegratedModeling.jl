@@ -91,11 +91,15 @@ function fill_sequence(tstruct::TrapStructure{<:Real},
                                       cur_time, end_time;
                                       nbs_placements = nbs, precipitation = we.rain_rate,
                                       nbs_state = nbs_state)
+        covered = _net_covered_set(driver.contexts, tstruct)
+        # A covered trap's spill is routed by its network only.  Touches keep the spill graph
+        # free of covered traps; at a build only a trap full from t = 0 could break that, and
+        # spillanalysis leaves no zero-volume traps (invariant S6, agent/NBS_INVARIANTS.md).
+        @assert isdisjoint(keys(sgraph.edges), covered) "a network-covered trap is also in the spill graph"
         # initial changetime estimates (network traps overridden from their prediction)
         changetimeest = _set_initial_changetime_estimates(rateinfo, cur_amounts,
                                                           cur_time, filled_traps, tstruct,
-                                                          driver.contexts,
-                                                          _net_covered_set(driver.contexts, tstruct))
+                                                          driver.contexts, covered)
 
         # the weather event's start is itself a full spill event
         push!(seq, SpillEvent(cur_time, copy(cur_amounts), copy(filled_traps),
