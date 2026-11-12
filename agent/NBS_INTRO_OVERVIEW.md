@@ -59,6 +59,7 @@ Before anything else, infiltration is set to zero on every footprint, because th
    - From every exit, outlet and pond, SWIM traces the flow downhill, trap to trap. That builds a network of flow paths and traps.
    - Paths that cross an inflow cell are tied to the NBS too.
    - Everything an NBS touches ends up in one **network component**, solved as one coupled ODE.
+   - The traps in it are the **network traps**: every trap reached by tracing downhill from an exit, outlet or pond, continuing through full traps along their spill paths. Their volumes are ODE states. All other traps stay with base SWIM.
 3. **Run the event loop.** This is base SWIM's loop: find the next trap that fills or empties, update the spill graph and the rates, record a `SpillEvent`.
    - Traps inside a network are not estimated by base SWIM. Their next event is *predicted* by integrating the network's ODE.
    - When an event concerns a network (one of its traps filled, or its inflow changed), the network is advanced to that time, its membership is updated (it may grow, shrink or merge), and it is rebuilt with the new rates. Then its next event is predicted.

@@ -15,6 +15,8 @@ Function names are stable; line numbers are not given because they drift.
 |---|---|
 | **baseline** (*oblivious* in code) | The flow field and trap inflows that base SWIM computes, routing water through footprints as if no NBS existed. `rateinfo.runoff` and `rateinfo.trap_inflow` are baseline quantities. |
 | **network** / **component** | A `DynNetwork`: traps and flow paths solved together as one ODE. A component is one connected piece. |
+| **network trap** (*node*) | A trap in some `DynNetwork.traps`: one reached by tracing downhill from a seed, continuing through full traps along their spill paths. Its volume is an ODE state, and its events come from the network solver, not from base SWIM's estimates. The set grows when a network trap fills (its spill path is traced further) and shrinks when traps are no longer reached. |
+| **covered trap** | A network trap, or a full sub-trap inside one. Base SWIM excludes covered traps from its own changetime estimates and spill graph. |
 | **seed** | A cell from which a network is traced downhill (NBS exits, piped outlets, ponds; also culvert ends and `dyn_traps`). |
 | **carrier path** | The network path that departs from an exit or outlet cell. NBS output enters at its head. |
 | **inflow cells** | Outside cells whose flow-graph successor lies in the footprint. |
