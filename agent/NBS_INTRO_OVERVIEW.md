@@ -29,7 +29,7 @@ The NBS module then corrects the baseline, but only inside the dynamic network s
 1. **Throughput.** It computes how much water the baseline sends through the footprint. This is `O_0`: the rain on the footprint plus the flow entering it.
 2. **Input.** The NBS receives that water as input, plus any extra water the network currently delivers to it, such as a spilling trap upstream.
 3. **Integration.** The layer ODE runs and gives the NBS's actual outflow.
-4. **Correction.** Downstream, the network replaces the baseline throughput by the actual outflow. It adds `(actual − O_0)` at the footprint's exits, and adds the pipe flow at the outlets.
+4. **Correction.** Downstream, the network replaces the baseline throughput by the actual outflow. It adds `(actual − O_0)` at the footprint's exits, and adds the pipe flow at the outlets. The difference is split over the exits in the same proportions as the baseline flow left through them; these fractions are the **exit shares**.
 
 Since a downstream trap's inflow already contains `O_0` from the baseline, adding the difference gives it exactly what the NBS really releases.
 
