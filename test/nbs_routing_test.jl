@@ -4,7 +4,7 @@ const SWIM = SurfaceWaterIntegratedModeling
 
 # ---------------------------------------------------------------------------
 # NBS as a signed-diff router element (agent/NBS_INVARIANTS.md).  `watercourses` is
-# NBS-oblivious; the NBS captures its live input `I_1` at the footprint-inflow cells and emits
+# NBS-oblivious; the NBS captures its live input `Q_in` at the footprint-inflow cells and emits
 # only the diff `O_1 - O_0` of its live output over the oblivious baseline, attenuated along
 # the carrier path's oblivious runoff by `max(V+d,0) - max(V,0)` per cell and delivered to the
 # downstream trap inflow.
@@ -22,7 +22,7 @@ const SWIM = SurfaceWaterIntegratedModeling
 end
 
 @testset "NBS: :nbsin intercepts the whole signed flow" begin
-    # A footprint-inflow cell intercepts ALL passing network flow into its live input I_1 (nbs_draw),
+    # A footprint-inflow cell intercepts ALL passing network flow into its live input Q_in (nbs_draw),
     # positive or negative — so an upstream NBS storing (a negative diff riding `current`) shows up as
     # a deficit in a downstream NBS's input, not as flow that bypasses it to the trap.
     D = SWIM._path_delivered!
@@ -117,8 +117,8 @@ end
     SWIM.dynNetworkRateFunction!(dV, V, p)
 
     el = p.nbsplan.elems[1]
-    I_1 = el.O_0_total                                    # traps empty ⇒ no spills ⇒ nbs_draw == 0
-    @test I_1 > 0.0                                       # the footprint really does receive flow
+    Q_in = el.O_0_total                                    # traps empty ⇒ no spills ⇒ nbs_draw == 0
+    @test Q_in > 0.0                                       # the footprint really does receive flow
     O_surface = 0.0; ground = 0.0; sum_dV = 0.0
     for (l, L) in enumerate(el.system.layers)
         S_mm = V[nt + el.state_base + l] * 1000.0 / el.A
@@ -128,7 +128,7 @@ end
         sum_dV += dV[nt + el.state_base + l]
     end
     # storage rate = in − out − to-ground: no mass created or lost in the cascade
-    @test isapprox(sum_dV, I_1 - O_surface - ground; atol = 1e-12, rtol = 1e-9)
+    @test isapprox(sum_dV, Q_in - O_surface - ground; atol = 1e-12, rtol = 1e-9)
 end
 
 @testset "NBS: a sink inside the footprint is rejected" begin

@@ -438,7 +438,7 @@ function _path_delivered!(path_runoff, head_flow, events,
             current -= a
         else                                              # :nbsin — intercept ALL passing flow,
             nbs_draw[idx] += current                      # signed: an upstream NBS storing shows up
-            current = 0.0                                 # as a deficit in this NBS's live input I_1
+            current = 0.0                                 # as a deficit in this NBS's live input Q_in
         end
         lo = pos
     end
@@ -958,7 +958,7 @@ function dynNetworkRateFunction!(dV, V, p::DynNetworkRateParams, t = 0.0)
         V[i] <= 0.0 && dV[i] < 0.0 && (dV[i] = 0.0)
     end
 
-    # NBS layers, fed at the top by the live input I_1 = O_0_total + the :nbsin draws.  I_1 >= 0
+    # NBS layers, fed at the top by the live input Q_in = O_0_total + the :nbsin draws.  Q_in >= 0
     # analytically (attenuation caps a deficit at the flow present); max() only absorbs rounding.
     if p.nbsplan !== nothing
         for (k, el) in enumerate(p.nbsplan.elems)
