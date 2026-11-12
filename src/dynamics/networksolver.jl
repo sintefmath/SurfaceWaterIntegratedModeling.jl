@@ -958,21 +958,12 @@ function _nbs_routing(V, p, nt::Int, np::Int)
     path_diff  = zeros(Float64, np)
     trap_diff  = zeros(Float64, nt)
     for el in p.nbsplan.elems
-        base = el.state_base
-        O_terrain = 0.0
-        @inbounds for l in 1:el.n_terrain
-            L = el.system.layers[l]
-            O_terrain += compute_outflow(L.Kout, L.nout, L.Smax,
-                                         V[nt + base + l] * 1000.0 / el.A) * el.A * 1e-3
-        end
-        diffbase = O_terrain - el.O_0_total
+        Vs = view(V, _layer_range(el, nt))
+        diffbase = _nbs_terrain_outflow(el.system, Vs, el.A, el.n_terrain) - el.O_0_total
         for (pth, r) in el.terrain_paths; path_diff[pth]  += diffbase * r; end
         for (tr,  r) in el.terrain_traps; trap_diff[tr]   += diffbase * r; end
         for (pth, l) in el.piped_paths
-            L = el.system.layers[l]
-            E = compute_outflow(L.Kout, L.nout, L.Smax,
-                                V[nt + base + l] * 1000.0 / el.A) * el.A * 1e-3
-            path_diff[pth] += E
+            path_diff[pth] += first(_layer_fluxes(el.system.layers[l], Vs[l], el.A))
         end
     end
     return NBSRouting(path_diff, trap_diff, zeros(Float64, length(p.nbsplan.elems)))
@@ -1179,36 +1170,20 @@ function dynNetworkRateFunction!(dV, V, p::DynNetworkRateParams, t = 0.0)
         V[i] <= 0.0 && dV[i] < 0.0 && (dV[i] = 0.0)
     end
 
-    # NBS layer-state derivatives (m^3/time).  Layer 1 (top) is fed by the live total input
-    # `I_1` (oblivious background throughput `O_0_total` + the :nbsin network draws captured
-    # during routing); each lower layer by the layer above's infiltration; the bottom layer's
-    # infiltration leaves the system to ground.  Each layer loses its own overflow and its
-    # infiltration.  Fluxes are power-law in the layer storage, in mm, converted to m^3
-    # (`S_mm = V*1000/A`, `Q_m3 = Q_mm*1e-3`).
+    # NBS layers, fed at the top by the live input I_1 = O_0_total + the :nbsin draws.  I_1 >= 0
+    # analytically (attenuation caps a deficit at the flow present); max() only absorbs rounding.
     if p.nbsplan !== nothing
-        @inbounds for (k, el) in enumerate(p.nbsplan.elems)
-            base    = el.state_base
-            # layer-1 inflow = live input I_1 = O_0_total + the :nbsin draws.  Physically >= 0
-            # (a negative draw is an upstream NBS's deficit, capped by attenuation at the flow
-            # present, which is part of this footprint's own O_0_total); max() guards float noise.
-            prev_qi = max(el.O_0_total + nbs_draw[k], 0.0)
-            for (l, L) in enumerate(el.system.layers)
-                S_mm = V[nt + base + l] * 1000.0 / el.A
-                # depth-rate (mm/time) -> volume-rate (m^3/time): * A / 1000
-                qo   = compute_outflow(L.Kout, L.nout, L.Smax, S_mm) * el.A * 1e-3
-                qi   = compute_outflow(L.Kinf, L.ninf, L.Smin, S_mm) * el.A * 1e-3
-                # @@@ evapotranspiration deferred: ET is an explicit 0.0 placeholder, so
-                #     wiring it in (from EVCoeff/EVS11) is a one-line change per layer.
-                ET = 0.0
-                dV[nt + base + l] = prev_qi - qo - qi - ET
-                # Physical floor: a layer cannot drain below empty.
-                V[nt + base + l] <= 0.0 && dV[nt + base + l] < 0.0 && (dV[nt + base + l] = 0.0)
-                prev_qi = qi
-            end
+        for (k, el) in enumerate(p.nbsplan.elems)
+            r = _layer_range(el, nt)
+            _nbs_layer_rates!(view(dV, r), el.system, view(V, r), el.A,
+                              max(el.O_0_total + nbs_draw[k], 0.0))
         end
     end
     return nothing
 end
+
+# State indices of `el`'s layers (top first), after the `nt` trap volumes.
+_layer_range(el::NBSElement, nt::Int) = (nt + el.state_base + 1):(nt + el.state_base + length(el.system.layers))
 
 # ============================================================================
 # Event detection.  Two callbacks stop the integration at the first event:

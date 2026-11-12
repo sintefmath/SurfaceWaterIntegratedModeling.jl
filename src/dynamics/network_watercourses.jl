@@ -148,12 +148,7 @@ function network_watercourses(tstruct::TrapStructure{<:Real},
                 NBS exit weights ($W) must sum to the throughput O_0 ($O_0)"""
 
             # terrain re-emission: (O_terrain(state) - O_0) shared across the terrain exits
-            O_terrain = 0.0
-            for l in 1:nb.n_terrain
-                L = nb.system.layers[l]
-                O_terrain += compute_outflow(L.Kout, L.nout, L.Smax, layers[l] * 1000.0 / A_foot) * A_foot * 1e-3
-            end
-            diffbase = O_terrain - O_0
+            diffbase = _nbs_terrain_outflow(nb.system, layers, A_foot, nb.n_terrain) - O_0
             # A downward correction removes -diffbase, shared by w/W; since w sums to W, no exit
             # loses more than its own oblivious outflow. Guard against that being violated.
             @assert diffbase >= -W - 1e-9 """
@@ -169,7 +164,7 @@ function network_watercourses(tstruct::TrapStructure{<:Real},
             for (l, L) in enumerate(nb.system.layers)
                 (l > nb.n_terrain && L.Kout > 0.0) || continue
                 piped += 1
-                E = compute_outflow(L.Kout, L.nout, L.Smax, layers[l] * 1000.0 / A_foot) * A_foot * 1e-3
+                E = first(_layer_fluxes(L, layers[l], A_foot))
                 _propagate_field_delta!(runoff_live, footprint_set, tstruct, full_traps_int,
                                         LI[nb.outlets[piped]], E)
             end

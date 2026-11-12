@@ -253,21 +253,65 @@ end
 """
     compute_outflow(K, n, Smax, S; mollifier=0.0) -> Float64
 
-Power-law outflow: `K * max(S - Smax, ε)^n`.
+Power-law outflow `K * (S - Smax)^n` above the threshold `Smax`, and zero at or below it.
 
 `mollifier > 0` smooths the threshold over a fraction of `Smax`, which improves
 gradient conditioning when this function is differentiated (e.g. via ForwardDiff,
 as done for calibration in the standalone NBS package).
 """
 function compute_outflow(K, n, Smax, S; mollifier=0.0)
-    tmp = max(S - Smax, eps())
+    tmp = max(S - Smax, 0.0)
 
     if mollifier > 0
         mu = mollifier * Smax
         tmp += mu * (  (S < Smax) ? S/Smax : max(2*Smax - S, 0.0)/Smax )
     end
-    return K * tmp^n
+    return tmp > 0.0 ? K * tmp^n : 0.0
 end
+
+# ----------------------------------------------------------------------------
+# Layer stack as used by the dynamic network.  The network holds each layer's storage as a
+# volume (m^3) over the footprint area `A` (m^2); layer parameters are in mm.  These functions
+# are the only place the two meet.  (`NBSLayer.A` is not used here; it serves the standalone
+# calibration code.)
+
+"""
+    _layer_fluxes(L, V, A) -> (overflow, percolation)
+
+Overflow and percolation (m^3/time) of layer `L` holding volume `V` over area `A`.  An empty
+layer emits nothing.
+"""
+function _layer_fluxes(L::NBSLayer, V, A)
+    V <= 0.0 && return (0.0, 0.0)
+    S = V * 1000.0 / A                      # storage depth (mm)
+    return (compute_outflow(L.Kout, L.nout, L.Smax, S) * A * 1e-3,
+            compute_outflow(L.Kinf, L.ninf, L.Smin, S) * A * 1e-3)
+end
+
+"""
+    _nbs_layer_rates!(dV, system, V, A, inflow) -> nothing
+
+Storage rates (m^3/time) of a layer stack fed `inflow` at the top.  Each layer gains what the
+layer above percolates and loses its own overflow and percolation; the bottom layer's
+percolation leaves the model (to ground).  `V` and `dV` hold the stack, top layer first.
+"""
+function _nbs_layer_rates!(dV, system::NBSSystem, V, A, inflow)
+    q_in = inflow
+    for (l, L) in enumerate(system.layers)
+        over, perc = _layer_fluxes(L, V[l], A)
+        dV[l] = q_in - over - perc          # @@@ evapotranspiration not modelled yet (EVCoeff, EVS11)
+        q_in  = perc
+    end
+    return nothing
+end
+
+"""
+    _nbs_terrain_outflow(system, V, A, n_terrain) -> Float64
+
+Total overflow of the top `n_terrain` layers: what the placement returns to the terrain.
+"""
+_nbs_terrain_outflow(system::NBSSystem, V, A, n_terrain) =
+    sum(first(_layer_fluxes(system.layers[l], V[l], A)) for l in 1:n_terrain; init = 0.0)
 
 # This file holds only the layer-storage model, so it can be included before elements.jl;
 # the placement type (`DynNBSPlacement`) lives with the other Dyn* elements in elements.jl.
