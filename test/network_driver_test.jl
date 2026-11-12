@@ -78,7 +78,7 @@ end
     @test nev == 1                               # one :fill, then steady out-of-domain spill
     @test filled_traps[driver.comps[1].traps[1].trap_ix]   # trap now full
 
-    SWIM.finalize_network_driver!(driver, inp.cur, ts, inp.infil, inp.zvt, lastT + 1.0e5)
+    SWIM.finalize_network_driver!(driver, inp.cur, ts, lastT + 1.0e5)
     g = driver.comps[1].traps[1].trap_ix
     @test inp.cur[g].amount ≈ SWIM._own_capacity(ts, g)    # settled at capacity
     @test all(isfinite(ca.amount) for ca in inp.cur)

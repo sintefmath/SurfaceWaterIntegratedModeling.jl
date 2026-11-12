@@ -184,8 +184,8 @@ function _fill_sequence_for_weather_event!(seq, sgraph, rateinfo, changetimeest,
     _settle_noncovered_at_endtime!(cur_amounts, rateinfo, filled_traps, tstruct,
                                    z_vol_tables, net_covered_set, cur_time, endtime)
     # advance every network to endtime; its settled ODE volumes seed the next weather period
-    _finalize_networks!(cur_amounts, driver.contexts, tstruct, infiltration,
-                        z_vol_tables, cur_time, endtime, driver.nbs_state)
+    _finalize_networks!(cur_amounts, driver.contexts, tstruct, cur_time, endtime,
+                        driver.nbs_state)
 end
 
 # ----------------------------------------------------------------------------

@@ -271,7 +271,7 @@ function network_states_at_timepoints(tstruct::TrapStructure{<:Real},
         if boundary
             # carry the NBS storage across the gap since the last commit, then start a fresh
             # period driver from this full snapshot
-            driver === nothing || _carry_nbs!(driver, tstruct, infil, z_vol_tables, t_i)
+            driver === nothing || _carry_nbs!(driver, tstruct, t_i)
             _apply_field!(filled,  ev.filled)
             _apply_field!(amounts, ev.amount)
             _apply_field!(inflow,  ev.inflow)
@@ -297,7 +297,7 @@ function network_states_at_timepoints(tstruct::TrapStructure{<:Real},
                 # each network event.  The event's own `ev.amount` update (applied next) then
                 # overrides the traps that structurally changed at this instant (e.g. a fired
                 # `:empty` node -> 0, its exposed children -> capacity).
-                _carry_nbs!(driver, tstruct, infil, z_vol_tables, t_i)
+                _carry_nbs!(driver, tstruct, t_i)
                 for (g, v) in driver.vol_by_trapix
                     amounts[g] = FilledAmount(v, t_i)
                 end
@@ -317,7 +317,7 @@ function network_states_at_timepoints(tstruct::TrapStructure{<:Real},
         while tp_ix <= length(timepoints) && timepoints[tp_ix] < next_t
             tp = timepoints[tp_ix]
             verbose && println("Handling timepoint: ", tp)
-            push!(result, _sample_network(driver, tstruct, infil, z_vol_tables, Float64(tp)))
+            push!(result, _sample_network(driver, tstruct, Float64(tp)))
             tp_ix += 1
         end
         tp_ix > length(timepoints) && break
@@ -422,12 +422,12 @@ function _event_touches_network(driver, ev)
     end
 end
 
-# commit every context to `t` under its cached inflow and harvest the advanced NBS layers into
+# commit every context to `t` under its frozen rates and harvest the advanced NBS layers into
 # the persistent store, so they survive the driver rebuild that follows.
-function _carry_nbs!(driver, tstruct, infil, z_vol_tables, t)
+function _carry_nbs!(driver, tstruct, t)
     for ctx in driver.contexts
         ctx.last_solve_time < t &&
-            _commit_network!(ctx, tstruct, infil, z_vol_tables, t)
+            _commit_network!(ctx, tstruct, t)
     end
     _harvest!(driver)
     return driver
@@ -449,15 +449,13 @@ end
 # sample the network state at absolute time `tp`: for each component, integrate a COPY of its
 # committed state forward (no topology event can fall before the next seq event, which is > tp),
 # then read the trap volumes and per-placement NBS layer volumes off the result.
-function _sample_network(driver, tstruct, infil, z_vol_tables, tp::Float64)
+function _sample_network(driver, tstruct, tp::Float64)
     trap_volumes = Dict{Int,Float64}()
     nbs_layers   = Dict{Int,Vector{Float64}}()
     driver === nothing && return (; trap_volumes, nbs_layers)
     for ctx in driver.contexts
         s = copy(ctx.state)
-        solveDynNetwork!(s, tstruct, ctx.net, infil, ctx.extern_inflow;
-                         tmax = tp - ctx.last_solve_time, runoff = ctx.runoff,
-                         precipitation = ctx.precip, zvt = z_vol_tables)
+        solveDynNetwork!(s, tstruct, ctx.params; tmax = tp - ctx.last_solve_time)
         ntc = length(ctx.global_ix)
         for (i, g) in enumerate(ctx.global_ix)
             trap_volumes[g] = s[i]

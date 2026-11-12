@@ -20,12 +20,12 @@ Fields:
   share the same id), summed by `_external_inflow`; used by the touch test in the event
   loop.
 - `last_solve_time`: absolute time the committed `state` refers to.
-- `extern_inflow`: per-node external inflow the `state` is currently evolving
-  under (cached at the last touch; the rate the commit/predict solves use).
-- `runoff`: the oblivious runoff grid (`rateinfo.runoff`), read by the solver to
-  build the NBS correction plan.
-- `precip`: the weather period's rain rate (scalar or per-cell), read alongside `runoff` for
-  the same plan — each placement's throughput is the rain on its footprint plus what flows in.
+- `params`: the rates the `state` is evolving under, built at the last touch and used by every
+  commit/predict solve: the per-node external inflow (`params.external_inflow`) and all that the
+  router and NBS plan read from the oblivious runoff and precipitation grids.  They are frozen
+  here, not read live, because the event loop updates `rateinfo.runoff` for an event *before*
+  committing the interval that precedes it; a live read would integrate that interval with the
+  event's new flows (e.g. a just-filled trap's spill crossing an NBS) and lose water.
 - `next_event`: cached prediction `(; time, trap, kind)` of the network's next
   event, with `time` an ABSOLUTE timestamp and `trap` a global trap index.
 """
@@ -35,10 +35,7 @@ mutable struct DynNetworkContext
     global_ix       ::Vector{Int}
     inflow_regions  ::Set{Int}                   # base spill regions feeding external inflow
     last_solve_time ::Float64
-    extern_inflow   ::Vector{Float64}
-    runoff          ::Matrix{Float64}            # the oblivious runoff grid (rateinfo.runoff), read
-                                                 # by the solver to build the NBS correction plan
-    precip          ::Union{Matrix{Float64},Float64}  # the period's rain rate, read for the same plan
+    params          ::DynNetworkRateParams       # rates frozen at the last touch
     next_event      ::NamedTuple
 end
 
@@ -112,30 +109,27 @@ end
 
 # ----------------------------------------------------------------------------
 """
-    _predict_network!(ctx, tstruct, infiltration, z_vol_tables, endtime) -> (; time, trap, kind)
+    _predict_network!(ctx, tstruct, endtime) -> (; time, trap, kind)
 
 Predict `ctx`'s next event, bounded by the time remaining to `endtime`.  Solves under the
-cached `ctx.extern_inflow` (the rate the state is evolving under).
+frozen `ctx.params` (the rates the state is evolving under).
 
 Mutates `ctx.next_event` only, storing `time` as an ABSOLUTE timestamp and `trap` as a global
 trap index; the solve runs on a COPY, so the committed `ctx.state` is left untouched.  Returns
 that `next_event`.
 """
-function _predict_network!(ctx::DynNetworkContext, tstruct, infiltration,
-                           z_vol_tables, endtime)
-    res = solveDynNetwork!(copy(ctx.state), tstruct, ctx.net, infiltration,
-                           ctx.extern_inflow;
-                           tmax = endtime - ctx.last_solve_time, zvt = z_vol_tables,
-                           runoff = ctx.runoff, precipitation = ctx.precip)
+function _predict_network!(ctx::DynNetworkContext, tstruct, endtime)
+    res = solveDynNetwork!(copy(ctx.state), tstruct, ctx.params;
+                           tmax = endtime - ctx.last_solve_time)
     ctx.next_event = (; time = res.time + ctx.last_solve_time,
                         trap = res.trap, kind = res.kind)
     return ctx.next_event
 end
 
 """
-    _commit_network!(ctx, tstruct, infiltration, z_vol_tables, T_commit) -> (; time, trap, kind)
+    _commit_network!(ctx, tstruct, T_commit) -> (; time, trap, kind)
 
-Advance `ctx`'s committed state to absolute time `T_commit`, under the cached `extern_inflow`
+Advance `ctx`'s committed state to absolute time `T_commit`, under the frozen `ctx.params`
 (the rates valid since the last touch — so this is order-independent of any intervening
 spillgraph/flow update).
 
@@ -143,12 +137,9 @@ Mutates `ctx`: `state` is left at the exact `T_commit` volumes and `last_solve_t
 updated.  Returns the solver result, so the caller can act on an event coinciding with
 `T_commit`.
 """
-function _commit_network!(ctx::DynNetworkContext, tstruct, infiltration,
-                          z_vol_tables, T_commit)
-    res = solveDynNetwork!(ctx.state, tstruct, ctx.net, infiltration,
-                           ctx.extern_inflow;
-                           tmax = T_commit - ctx.last_solve_time, zvt = z_vol_tables,
-                           runoff = ctx.runoff, precipitation = ctx.precip)
+function _commit_network!(ctx::DynNetworkContext, tstruct, T_commit)
+    res = solveDynNetwork!(ctx.state, tstruct, ctx.params;
+                           tmax = T_commit - ctx.last_solve_time)
     ctx.last_solve_time = T_commit
     return res
 end
@@ -216,18 +207,20 @@ function _store_nbs_state!(nbs_state, ctx::DynNetworkContext)
 end
 
 """
-    _make_context(net, tstruct, rateinfo, state0, cur_time, precipitation, nbs_state)
-        -> DynNetworkContext
+    _make_context(net, tstruct, rateinfo, state0, cur_time, infiltration, z_vol_tables,
+                  precipitation, nbs_state) -> DynNetworkContext
 
 Build one context from a single network component, committed at `cur_time`.  `state0(g)`
 supplies the initial committed volume for the global trap index `g`; NBS placements travel on
-`net.nbs`, their layer states restored from the persistent `nbs_state` store.  `precipitation`
-is the weather period's rain rate, held for the solver's NBS plan.
+`net.nbs`, their layer states restored from the persistent `nbs_state` store.  The rate params
+are built here from the current `rateinfo` (inflow and runoff), `infiltration` and
+`precipitation` (the weather period's rain rate) and frozen on the context.
 
-No argument is mutated (`nbs_state` is read only), but `net` and `rateinfo.runoff` are stored
-by reference into the returned context.
+No argument is mutated (`nbs_state` is read only); `net` is stored by reference into the
+returned context.
 """
 function _make_context(net::DynNetwork, tstruct, rateinfo, state0, cur_time,
+                       infiltration, z_vol_tables,
                        precipitation = 0.0,
                        nbs_state = Dict{Int,Vector{Float64}}())
     global_ix = Int[t.trap_ix for t in net.traps]
@@ -236,16 +229,15 @@ function _make_context(net::DynNetwork, tstruct, rateinfo, state0, cur_time,
     # storage carries across events and weather periods.
     state     = vcat(Float64[state0(g) for g in global_ix],
                      _nbs_layer_block(net, nbs_state))
-    # shared source for both inflow fields
     node_leaves = _node_leaf_regions(net, tstruct)
-    # `runoff` and `precip` are held for the solver's NBS correction plan.
+    params = _build_rate_params(tstruct, net, infiltration,
+                                _external_inflow(rateinfo, node_leaves);
+                                runoff = rateinfo.runoff, precipitation = precipitation,
+                                zvt = z_vol_tables)
     return DynNetworkContext(net, state, global_ix,
                              _inflow_regions(node_leaves),
                              cur_time,
-                             _external_inflow(rateinfo, node_leaves),
-                             rateinfo.runoff,
-                             precipitation isa Real ? Float64(precipitation) :
-                                                      Matrix{Float64}(precipitation),
+                             params,
                              (; time = Inf, trap = 0, kind = :none))
 end
 
@@ -369,12 +361,12 @@ end
 
 # ----------------------------------------------------------------------------
 """
-    _finalize_networks!(cur_amounts, net_contexts, tstruct, infiltration, z_vol_tables,
-                        cur_time, endtime, nbs_state = Dict{Int,Vector{Float64}}())
+    _finalize_networks!(cur_amounts, net_contexts, tstruct, cur_time, endtime,
+                        nbs_state = Dict{Int,Vector{Float64}}())
         -> cur_amounts
 
-Weather-period boundary finalization: advance every context to `endtime` under its cached
-external inflow and read the settled volumes.  Network traps follow the multi-trap ODE, so
+Weather-period boundary finalization: advance every context to `endtime` under its frozen
+rates and read the settled volumes.  Network traps follow the multi-trap ODE, so
 they can't use the constant-rate `fill_trap_until` projection — and these exact volumes are
 what the NEXT period rebuilds from.  The advance is event-free (any event ≤ `endtime` was
 already processed), so it settles cleanly.  A node takes its settled ODE volume; a subsumed
@@ -383,14 +375,13 @@ full descendant sits at capacity.
 Mutates `cur_amounts` (returned), every context in `net_contexts` (each committed to
 `endtime`), and `nbs_state`, which carries the NBS layer storage into the next period.
 """
-function _finalize_networks!(cur_amounts, net_contexts, tstruct, infiltration,
-                             z_vol_tables, cur_time, endtime,
+function _finalize_networks!(cur_amounts, net_contexts, tstruct, cur_time, endtime,
                              nbs_state = Dict{Int,Vector{Float64}}())
     isempty(net_contexts) && return cur_amounts
     stamp = min(cur_time, endtime)
     for ctx in net_contexts
         ctx.last_solve_time < endtime &&
-            _commit_network!(ctx, tstruct, infiltration, z_vol_tables, endtime)
+            _commit_network!(ctx, tstruct, endtime)
         _store_nbs_state!(nbs_state, ctx)          # carry NBS layer storage into the next period
         for (i, g) in enumerate(ctx.global_ix)
             cur_amounts[g] = FilledAmount(ctx.state[i], stamp)

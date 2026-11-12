@@ -99,8 +99,7 @@ function _nbs_rate_params(ts, nbs; rain = 1.0e-3)
                  nbs_placements = nbs, precipitation = rain,
                  nbs_state = Dict{Int,Vector{Float64}}())
     ctx = only(c for c in driver.contexts if !isempty(c.net.nbs))
-    return SWIM._build_rate_params(ts, ctx.net, infil, ctx.extern_inflow;
-                                   runoff = ctx.runoff, precipitation = ctx.precip, zvt = zvt)
+    return ctx.params
 end
 
 @testset "NBS: layer cascade conserves mass" begin
@@ -153,4 +152,34 @@ end
     # a sink outside every footprint stays legal
     ts_out = spillanalysis(grid, usediags = true, sinks = [CartesianIndex(25, 25)])
     @test setup_network(ts_out, Int[]; nbs = mk(ts_out)) isa Vector{SWIM.DynNetwork}
+end
+
+@testset "NBS: a network commit is not altered by the event that triggers it" begin
+    # An upstream pit U fills and starts spilling across a green roof whose downpipe drains off the
+    # domain, into a downstream pit D in the roof's network.  The event loop updates the runoff for
+    # U's spill *before* committing D's network over the interval leading up to it; that commit must
+    # still use the rates of the interval (frozen on the context), not the post-event runoff, or the
+    # roof's correction removes U's spill from D's inflow over the whole past interval (water lost,
+    # D fills late).  Splitting the rain into a second, identical period just before U fills forces
+    # the commit without that hazard, so D's fill time must agree.
+    N = 40
+    grid = Float64[j for i in 1:N, j in 1:N]
+    for i in 12:28, j in 3:6;   grid[i, j] = -20.0; end     # downstream pit D (west), deep
+    for i in 17:23, j in 30:33; grid[i, j] = 28.0;  end     # upstream pit U (east), shallow
+    ts = spillanalysis(grid, usediags = true)
+    @test numtraps(ts) == 2
+    D, U = argmax(ts.trapvolumes), argmin(ts.trapvolumes)
+
+    LI  = LinearIndices(size(ts.topography))
+    fp  = [LI[i, j] for i in 10:30 for j in 15:20]          # across U's spill path into D
+    nbs() = [SWIM.DynNBSPlacement(SWIM.elhadiGreenRoof(10.0, 5.0, 0.5, 0.5, 1.0, 1.0, 0.0, 1.0),
+                                  fp, [CartesianIndex(5, 21)])]  # downpipe drains west, off domain
+    rain = 1.0e-3
+
+    f1 = _filltimes(fill_sequence(ts, [SWIM.WeatherEvent(0.0, rain)]; nbs = nbs()))
+    @test f1[U] < f1[D]                                     # U fills first, spilling toward D
+    f2 = _filltimes(fill_sequence(ts, [SWIM.WeatherEvent(0.0, rain),
+                                       SWIM.WeatherEvent(f1[U] - 1.0e-3, rain)]; nbs = nbs()))
+    @test isapprox(f1[U], f2[U]; rtol = 1.0e-9)
+    @test isapprox(f1[D], f2[D]; rtol = 1.0e-4)
 end

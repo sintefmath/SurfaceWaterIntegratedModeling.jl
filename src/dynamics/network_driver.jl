@@ -131,9 +131,9 @@ function _rebuild_contexts!(driver::NetworkDriver, tstruct, rateinfo, infiltrati
                             cur_time, z_vol_tables)
     driver.contexts = DynNetworkContext[]
     for net in driver.comps
-        ctx = _make_context(net, tstruct, rateinfo, state0, cur_time,
-                            driver.precip, driver.nbs_state)
-        _predict_network!(ctx, tstruct, infiltration, z_vol_tables, endtime)
+        ctx = _make_context(net, tstruct, rateinfo, state0, cur_time, infiltration,
+                            z_vol_tables, driver.precip, driver.nbs_state)
+        _predict_network!(ctx, tstruct, endtime)
         push!(driver.contexts, ctx)
     end
     return driver
@@ -211,7 +211,7 @@ function step_network_driver!(driver::NetworkDriver, tstruct, rateinfo, infiltra
     # commit EVERY context to T under its cached inflow before the structural change; T is the
     # earliest event, so the advance is event-free and order-independent for the others
     for ctx in driver.contexts
-        _commit_network!(ctx, tstruct, infiltration, z_vol_tables, T)
+        _commit_network!(ctx, tstruct, T)
     end
     driver.last_time = T
     _harvest!(driver)
@@ -248,7 +248,7 @@ end
 # ----------------------------------------------------------------------------
 
 """
-    finalize_network_driver!(driver, cur_amounts, tstruct, infiltration, z_vol_tables, endtime)
+    finalize_network_driver!(driver, cur_amounts, tstruct, endtime)
         -> cur_amounts
 
 Period-boundary finalize: advance each context to `endtime` and settle the node volumes (and
@@ -257,10 +257,9 @@ subsumed capacities) into `cur_amounts`, carrying NBS layer storage into the nex
 Mutates `cur_amounts` (returned) and `driver` (contexts committed to `endtime`, `nbs_state`
 updated).
 """
-finalize_network_driver!(driver::NetworkDriver, cur_amounts, tstruct, infiltration,
-                         z_vol_tables, endtime) =
-    _finalize_networks!(cur_amounts, driver.contexts, tstruct, infiltration,
-                        z_vol_tables, driver.last_time, endtime, driver.nbs_state)
+finalize_network_driver!(driver::NetworkDriver, cur_amounts, tstruct, endtime) =
+    _finalize_networks!(cur_amounts, driver.contexts, tstruct, driver.last_time, endtime,
+                        driver.nbs_state)
 
 # ----------------------------------------------------------------------------
 
@@ -294,7 +293,7 @@ function _touch_networks_driver!(driver::NetworkDriver, changetimeest, sgraph, t
     # commit every context to cur_time under cached inflow, harvest, then overlay the fired-trap
     # boundary values the solver expects
     for ctx in driver.contexts
-        _commit_network!(ctx, tstruct, infiltration, z_vol_tables, cur_time)
+        _commit_network!(ctx, tstruct, cur_time)
     end
     driver.last_time = cur_time
     _harvest!(driver)

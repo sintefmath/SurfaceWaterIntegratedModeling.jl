@@ -1612,10 +1612,27 @@ function solveDynNetwork!(state::AbstractVector{Float64},
                           # step count vs 1e-8 on the culvert worst case (see PARITY_TOL in tests)
                           abstol = 1e-6, reltol = 1e-4,
                           zvt = nothing)
-    nt = length(net.traps)
     # Returns an (immutable) `DynNetworkRateParams` with all the static data the ODE needs
-    p  = _build_rate_params(tstruct, net, infiltration, inflow;
-                            runoff=runoff, precipitation=precipitation, zvt=zvt)
+    p = _build_rate_params(tstruct, net, infiltration, inflow;
+                           runoff=runoff, precipitation=precipitation, zvt=zvt)
+    return solveDynNetwork!(state, tstruct, p; tmax=tmax, abstol=abstol, reltol=reltol)
+end
+
+"""
+    solveDynNetwork!(state, tstruct, p::DynNetworkRateParams;
+                     tmax=Inf, abstol=1e-6, reltol=1e-4) -> (; time, trap, kind)
+
+As above, but from prebuilt rate params `p` (see [`_build_rate_params`](@ref)), which already
+hold the network, its inflow and everything read from the runoff and precipitation grids.  A
+[`DynNetworkContext`](@ref) builds `p` once and solves from it, so the rates stay those of the
+context's creation even when the live grids change before a commit.
+"""
+function solveDynNetwork!(state::AbstractVector{Float64},
+                          tstruct::TrapStructure,
+                          p::DynNetworkRateParams;
+                          tmax = Inf, abstol = 1e-6, reltol = 1e-4)
+    net = p.net
+    nt  = length(net.traps)
     @assert length(state) == nt + _nbs_state_count(p) """
         state must have one entry per trap in net.traps plus one per NBS layer \
         ($(nt) traps + $(_nbs_state_count(p)) NBS layer states)"""
