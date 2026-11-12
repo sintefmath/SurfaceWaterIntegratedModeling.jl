@@ -1,3 +1,7 @@
+> **OBSOLETE — archived 2026-11-12.** Historical design note for an earlier stage of the NBS
+> module; it does not describe the current code. The authoritative description is
+> `agent/NBS_INVARIANTS.md`.
+
 # NBS integration plan
 
 Integrate Nature-Based-Solution (NBS) systems into SWIM's dynamic-network

@@ -21,7 +21,7 @@ Key subsystems:
 | Trap volumes & hierarchy    | `trapvolumes.jl`, `sshierarchy.jl` |
 | Full static analysis        | `spillanalysis.jl`                 |
 | Dynamic fill sequencing     | `fill_sequence/` (six files)       |
-| Dynamic networks (culverts, NBS, ODE solve) | `dynamics/` (nine files) |
+| Dynamic networks (culverts, NBS, ODE solve) | `dynamics/` (eleven files) |
 | Flow intensity over terrain | `watercourses.jl`                  |
 | IO & visualisation          | `IOandplot.jl`                     |
 
@@ -135,8 +135,14 @@ constant-rate analytic path. The architecture (the "gate" — see
   and NBS rate functions, submergence). Returns one of `:fill` / `:unspill` /
   `:empty` / `:none`, mapping 1:1 to the `apply_*` entry points.
 - `nbs_elements.jl` — `NBSSystem` / `NBSLayer` layered-storage models (`puddle`,
-  `elhadiGreenRoof`, `mantillaRRmodel`). `culvert_rate.jl`, `network_utils.jl`
-  round out the folder.
+  `elhadiGreenRoof`, `mantillaRRmodel`) and the layer fluxes/cascade the solver uses.
+- `nbs_terrain.jl` — how an NBS placement couples to the terrain: its `NBSLink`
+  (inflow cells, exits, ponds) and its baseline throughput and exit shares, shared by
+  the solver and `network_watercourses`.  `culvert_rate.jl`, `network_utils.jl`,
+  `network_watercourses.jl` round out the folder.
+
+**NBS model, code map and invariants: `agent/NBS_INVARIANTS.md`** (authoritative;
+the older NBS design notes in `agent/archive/` are obsolete).
 
 Invariants: a **full** trap has `spill_path != 0` (`> 0` downstream, `-1` out of
 domain); a **transitory** frontier has `spill_path == 0` and must hold

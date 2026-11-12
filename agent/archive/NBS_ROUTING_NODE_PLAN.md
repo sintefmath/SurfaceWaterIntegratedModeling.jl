@@ -1,3 +1,7 @@
+> **OBSOLETE — archived 2026-11-12.** Historical design note for an earlier stage of the NBS
+> module; it does not describe the current code. The authoritative description is
+> `agent/NBS_INVARIANTS.md`.
+
 # NBS as a signed-diff router element — as-built design
 
 > **Status: IMPLEMENTED** on branch `nbs-dynamic-core` (commits `2ff9f6a` — add

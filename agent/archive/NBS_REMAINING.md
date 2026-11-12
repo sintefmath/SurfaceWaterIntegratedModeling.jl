@@ -1,3 +1,7 @@
+> **OBSOLETE — archived 2026-11-12.** Historical design note for an earlier stage of the NBS
+> module; it does not describe the current code. The authoritative description is
+> `agent/NBS_INVARIANTS.md`.
+
 # NBS overlay — remaining work & open questions
 
 Status as of the `nbs-dynamic-core` branch (Stages A–C of

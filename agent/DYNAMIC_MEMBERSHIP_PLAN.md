@@ -7,7 +7,7 @@ remains is the **gate**: driving these from `fill_sequence`/`network_context` (s
 handoff at the transitions) plus the distributor re-impl / retiring `DynNBS`.  Commits
 `2cea3e1`, `75fcbc3`, `282234f`, `106a897`, `96530e4`, `a16a842`, `5ea40a6`, `52d1f71`,
 `03a5828`, `3fd1319`.
-Related: `agent/NBS_ROUTING_REDESIGN.md` (the network this runs on),
+Related: `agent/archive/NBS_ROUTING_REDESIGN.md` (obsolete; the network this runs on),
 `src/dynamics/build_network.jl`, `src/dynamics/network_utils.jl`.
 
 ## Context

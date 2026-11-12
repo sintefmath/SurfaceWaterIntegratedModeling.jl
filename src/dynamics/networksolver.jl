@@ -617,24 +617,11 @@ end
 # ============================================================================
 
 # ============================================================================
-# NBS as a signed-diff router element (see agent/NBS_ROUTING_NODE_PLAN.md).
-#
-# `watercourses` is NBS-oblivious: the baseline oblivious runoff already passes through the
-# footprint and routes downstream (its output is `O_0`).  The NBS captures its *live* total
-# input `I_1` at the footprint-inflow cells (`:nbsin` router draws + the oblivious background
-# throughput `O_0_total`), runs its layered storage ODE (state appended after the `nt` trap
-# volumes), and emits only the **diff** `O_1 - O_0` of its live output over the oblivious
-# baseline.  Net downstream is `O_0 + diff = O_1`; `external_inflow` keeps the `O_0` baseline
-# (no double-count).
-#
-# Output diff placement.  Each terrain endpoint gets `(O_terrain(V) - O_0_total)*ratio_e`,
-# `ratio_e = O_0[e]/O_0_total` (even split when `O_0_total ≈ 0`); boundary exits head-inject
-# it on the carrier path departing from the exit cell, internal depressions deposit straight
-# into the accumulation trap.  Each piped outlet head-injects `+E_l(V)` on the path departing
-# from its outlet cell.  A head-injected diff is attenuated along the carrier path's oblivious
-# runoff by `_attenuate_diff` and delivered to the path's target trap, cascading onward via
-# the normal trap spill.  Fluxes are power-law in layer storage (`compute_outflow`), mm↔m^3
-# via `S_mm = V*1000/A`.
+# NBS in the solver (model and invariants: agent/NBS_INVARIANTS.md).  Each placement adds its
+# layer states after the trap volumes, injects (O_t − O_0)·share at its exits and ponds and its
+# piped overflow at its outlets (`_nbs_injections`), and is fed O_0 plus the `:nbsin` draws the
+# routing pass collects.
+# ============================================================================
 
 """
     NBSElement

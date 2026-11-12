@@ -3,7 +3,7 @@ using Test, SurfaceWaterIntegratedModeling, LazyArtifacts
 const SWIM = SurfaceWaterIntegratedModeling
 
 # ---------------------------------------------------------------------------
-# NBS as a signed-diff router element (agent/NBS_ROUTING_NODE_PLAN.md).  `watercourses` is
+# NBS as a signed-diff router element (agent/NBS_INVARIANTS.md).  `watercourses` is
 # NBS-oblivious; the NBS captures its live input `I_1` at the footprint-inflow cells and emits
 # only the diff `O_1 - O_0` of its live output over the oblivious baseline, attenuated along
 # the carrier path's oblivious runoff by `max(V+d,0) - max(V,0)` per cell and delivered to the
@@ -182,4 +182,12 @@ end
                                        SWIM.WeatherEvent(f1[U] - 1.0e-3, rain)]; nbs = nbs()))
     @test isapprox(f1[U], f2[U]; rtol = 1.0e-9)
     @test isapprox(f1[D], f2[D]; rtol = 1.0e-4)
+end
+
+@testset "NBS: overlapping footprints are rejected" begin
+    ts = _plane_with_pit()
+    fp = _upstream_footprint(ts)
+    mk(f) = SWIM.DynNBSPlacement(SWIM.puddle(1.0), f, CartesianIndex{2}[])
+    @test_throws Exception setup_network(ts, Int[]; nbs = [mk(fp), mk(fp[1:3])])
+    @test setup_network(ts, Int[]; nbs = [mk(fp[1:3]), mk(fp[4:end])]) isa Vector{SWIM.DynNetwork}
 end

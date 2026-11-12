@@ -274,19 +274,16 @@ end
 """
     _validate_network_inputs(tstruct, dyn_coords, culverts, nbs) -> nothing
 
-Error if a culvert endpoint, a `dyn_coord`, or a sink lies inside an NBS footprint.  An NBS
-replaces the surface flow over its footprint with its layer model, so nothing else may claim
-water there.  Nothing is mutated.
-
-The sink rule is load-bearing, not hygiene: a placement's ponding endpoints are its link's
-`ponds`, which is `footprint ∩ trap_bottoms` — and a sink is deliberately *not* a trap bottom
-(`_is_trap_bottom` excludes it).  A sink inside a footprint
-would therefore terminate flow at a cell the plan never sees, silently dropping it from the
-placement's endpoints while it still counted toward the throughput.
+Error if an NBS footprint is empty or overlaps another (invariant I1), or if a culvert endpoint,
+a `dyn_coord`, or a sink lies inside one (I2, agent/NBS_INVARIANTS.md): the layer model owns
+all water there.  Nothing is mutated.
 """
 function _validate_network_inputs(tstruct, dyn_coords, culverts, nbs)
     isempty(nbs) && return nothing
     nbs_footprints = Set(vcat([n.footprint for n in nbs]...))
+    any(n -> isempty(n.footprint), nbs) && error("An NBS footprint is empty.")
+    length(nbs_footprints) == sum(n -> length(unique(n.footprint)), nbs) ||
+        error("NBS footprints overlap.")
     LI = LinearIndices(tstruct.topography)
     for culvert in culverts
         if LI[culvert.inlet] in nbs_footprints || LI[culvert.outlet] in nbs_footprints

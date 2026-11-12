@@ -1,3 +1,7 @@
+> **OBSOLETE — archived 2026-11-12.** Historical design note for an earlier stage of the NBS
+> module; it does not describe the current code. The authoritative description is
+> `agent/NBS_INVARIANTS.md`.
+
 # NBS routing redesign — design notes
 
 > **⚠ RETIRED — successor landed.** This documented the old signed-*correction* model,
