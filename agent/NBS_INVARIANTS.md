@@ -164,8 +164,8 @@ Each invariant names where it is enforced.
    - **D3:** RHS allocations, and a dense finite-difference Jacobian.
    - C7 and C14 are fixed; D2's per-context params caching is done.
 4. **`Pkg.test()` stops early.** `test/dynamic_membership_test.jl` uses `Random`, which is not a test dependency, and `runtests.jl` stops at the first failing testset. The deprecated `MaskingTests` and the known bay-grid failures then hide everything after them. To fix, add `Random` to `[extras]`/`[targets]` in `Project.toml`, and isolate or retire the known-broken testsets.
-   - Meanwhile, run the NBS/dynamics tests with `julia --project=. scratch/nbs_debug/run_tests.jl`. It isolates the known-broken testsets. It lives in the untracked `scratch/` folder in this checkout.
-5. **Repro material**, also in the untracked `scratch/nbs_debug/`:
+   - Meanwhile, run the NBS/dynamics tests with `julia --project=. agent/reports/nbs_debug/run_tests.jl`. It isolates the known-broken testsets.
+5. **Repro material**, also in the untracked `scratch/nb5. **Repro material** is in `agent/reports/nbs_debug/` (see its `README.md`):
    - `setup.jl`, `run1.jl`, `run2.jl`: the SUrbArea synthetic case, run outside the webapp, with a mass-balance check;
-   - `run9.jl`: the C14 proof.
-   - The case's inputs are in `SUrbArea/debug/` (`synthetic_dtm*`, `synthetic_userdefined*.geojson`).
+   - `zero_vol.jl`: the zero-volume trap count behind S6.
+   - The case's inputs are in `<SUrbArea>/debug/` (`synthetic_dtm*`, `synthetic_userdefined*.geojson`), which is not in git.
