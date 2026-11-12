@@ -150,9 +150,8 @@ function _grow_network_from_seed!(network, pathmap, seed::CartesianIndex{2},
             was_present = !isnothing(trap_local)
             if !was_present
                 # trap_ix is not yet in network.traps, so add it
-                cv_in, cv_out, nbs_out =
-                    _intersecting_culverts_and_nbs_outlets(CI[tstruct.footprints[trap_ix]],
-                                                           network.culverts, network.nbs)
+                cv_in, cv_out = _intersecting_culverts(CI[tstruct.footprints[trap_ix]],
+                                                       network.culverts)
                 push!(network.traps, DynTrap(trap_ix, 0, cv_in, cv_out)) # @@ handle spill_path index later
                 trap_local = length(network.traps)
             end
@@ -162,10 +161,10 @@ function _grow_network_from_seed!(network, pathmap, seed::CartesianIndex{2},
         isect_path, isect_cell =
             _update_pathmap!(pathmap, path, length(network.flow_paths)+1) # may empty path
 
-        cv_in, cv_out, nbs_in, nbs_out = _intersecting_on_path(CI[path], network.culverts, network.nbs)
+        cv_in, cv_out, nbs_in = _intersecting_on_path(CI[path], network.culverts, network.nbs)
         target_trap = isect_path > 0 ? 0 : trap_local
         push!(network.flow_paths,
-              DynFlowPath(CI[path], seed, target_trap, cv_in, cv_out, nbs_in, nbs_out, Tuple{Int,Int}[]))
+              DynFlowPath(CI[path], seed, target_trap, cv_in, cv_out, nbs_in, Tuple{Int,Int}[]))
         new_ix = length(network.flow_paths)
 
         (departing_trap_ix > 0) && (network.traps[departing_trap_ix].spill_path = new_ix)
@@ -237,63 +236,38 @@ end
 
 # ----------------------------------------------------------------------------
 """
-    _intersecting_culverts_and_nbs_outlets(footprint, culverts, nbs) -> (cv_in, cv_out, nbs_out)
+    _intersecting_culverts(footprint, culverts) -> (cv_in, cv_out)
 
-The culvert inlets, culvert outlets and NBS outlets falling inside a trap `footprint`, as bare
-id lists — a trap is a pool, so there is no along-path position to record (contrast
-`_intersecting_on_path`).  Nothing is mutated.
+The culverts whose inlet / outlet lies inside a trap `footprint`, as id lists — a trap is a pool,
+so there is no along-path position to record (contrast `_intersecting_on_path`).
 """
-function _intersecting_culverts_and_nbs_outlets(footprint, culverts, nbs)
-    cv_in = Int[]
-    cv_out = Int[]
-    nbs_out = Int[]
-    for (ix, culvert) in enumerate(culverts)
-        if culvert.inlet in footprint
-            push!(cv_in, ix)
-        end
-        if culvert.outlet in footprint
-            push!(cv_out, ix)
-        end
-    end
-    for (ix, n) in enumerate(nbs)
-        if any(outlet in footprint for outlet in n.outlets)
-            push!(nbs_out, ix)
-        end
-    end
-
-    return cv_in, cv_out, nbs_out
+function _intersecting_culverts(footprint, culverts)
+    cv_in  = [ix for (ix, cv) in enumerate(culverts) if cv.inlet  in footprint]
+    cv_out = [ix for (ix, cv) in enumerate(culverts) if cv.outlet in footprint]
+    return cv_in, cv_out
 end
 
 # ----------------------------------------------------------------------------
 """
-    _intersecting_on_path(path, culverts, nbs) -> (cv_in, cv_out, nbs_in, nbs_out)
+    _intersecting_on_path(path, culverts, nbs) -> (cv_in, cv_out, nbs_in)
 
-The culvert inlets/outlets and NBS in/outlets falling on a flow `path`, each as `(id, pos)`
-with `pos` the 1-based index of the matching cell within `path`.  The position matters: routing
-charges infiltration up to that cell before applying the element, like a `merges` junction.
-
-NBS inlets are the footprint-inflow boundary cells the path crosses; every crossing is
-registered, the first drawing the flow and later ones then seeing zero.  Nothing is mutated.
+The culvert inlets/outlets and NBS inflow cells on a flow `path`, each as `(id, pos)` with `pos`
+the 1-based index of the cell within `path`.  The position matters: routing charges
+infiltration up to that cell before applying the element, like a `merges` junction.  Every NBS
+inflow cell crossed is registered; the first draws the flow and later ones see zero.
 """
 function _intersecting_on_path(path, culverts, nbs)
-    cv_in   = Tuple{Int,Int}[]
-    cv_out  = Tuple{Int,Int}[]
-    nbs_in  = Tuple{Int,Int}[]
-    nbs_out = Tuple{Int,Int}[]
+    cv_in  = Tuple{Int,Int}[]
+    cv_out = Tuple{Int,Int}[]
+    nbs_in = Tuple{Int,Int}[]
     for (ix, culvert) in enumerate(culverts)
         p = findfirst(==(culvert.inlet),  path); p !== nothing && push!(cv_in,  (ix, p))
         p = findfirst(==(culvert.outlet), path); p !== nothing && push!(cv_out, (ix, p))
     end
-    for (ix, n) in enumerate(nbs)
-        for (pos, cell) in enumerate(path)
-            cell in n.link.inflow_cells && push!(nbs_in, (ix, pos))
-        end
-        for outlet in n.outlets
-            p = findfirst(==(outlet), path)
-            p !== nothing && (push!(nbs_out, (ix, p)); break)
-        end
+    for (ix, n) in enumerate(nbs), (pos, cell) in enumerate(path)
+        cell in n.link.inflow_cells && push!(nbs_in, (ix, pos))
     end
-    return cv_in, cv_out, nbs_in, nbs_out
+    return cv_in, cv_out, nbs_in
 end
 
 # ----------------------------------------------------------------------------

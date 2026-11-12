@@ -11,7 +11,7 @@ mk_network(ts, coords, full; kw...) = setup_network(ts, full; dyn_coords = coord
 # constructor needs an explicit departure_point since there is no `first(cells)` to take.
 srcpath(target) = DynFlowPath(CartesianIndex{2}[], CartesianIndex(1, 1), target,
                               Tuple{Int,Int}[], Tuple{Int,Int}[], Tuple{Int,Int}[],
-                              Tuple{Int,Int}[], Tuple{Int,Int}[])
+                              Tuple{Int,Int}[])
 
 # Tolerance for the network-ODE fill/drain times reproducing the analytic (plain) path.
 # The dynamic solver runs at abstol=1e-6 (m^3, ~mL) / reltol=1e-4 — accuracy calibrated to
@@ -231,7 +231,7 @@ _rf(net, ext, spilling, fp_infil, cell_infil; cvplan = nothing, trap_level = not
 
     # tributary merge: path1(A)->trap2(C,leaf), path2(B) merges into A at pos 1 (only cell)
     net2 = DynNetwork([DynFlowPath([c(1,1)], 2, Tuple{Int,Int}[], Tuple{Int,Int}[],
-                                   Tuple{Int,Int}[], [(2, 1)]),
+                                   [(2, 1)]),
                        DynFlowPath([c(5,5)], 0)],
                       [T(10,1), T(20,0), T(30,2)], DynCulvert[])
     # B: max(20-2,0)=18 joins A at pos 1 (no pre-junc infil); A: max((10+18)-1,0)=27 -> C
@@ -243,7 +243,7 @@ _rf(net, ext, spilling, fp_infil, cell_infil; cvplan = nothing, trap_level = not
     # correct:  max(0.5-1.0,0)=0  + 5.0 = 5.0;  max(5.0-3.0,0)=2.0
     # old approx would give: max(0.5+5.0-4.0,0)=1.5  (wrong)
     net_mf = DynNetwork([DynFlowPath([c(1,1), c(1,2)], 2, Tuple{Int,Int}[], Tuple{Int,Int}[],
-                                     Tuple{Int,Int}[], [(2, 2)]),
+                                     [(2, 2)]),
                          DynFlowPath([c(5,5)], 0)],
                         [T(10,1), T(20,0), T(30,2)], DynCulvert[])
     @test rf(net_mf, [0.5,0.0,5.0], Bool[true,false,true], [0.0,0.0,0.0],
@@ -708,7 +708,7 @@ end
     # delivers into trap t1.  Path endpoints use head = D, not submerged.
     pcells = [c(1,1), c(1,2), c(1,3)]
     cv  = DynCulvert(pcells[2], c(5,5), 0.5, 0.6, 0.5, 1.0, 1.7)        # D = 1
-    p1  = DynFlowPath(pcells, 0, [(1, 2)], Tuple{Int,Int}[], Tuple{Int,Int}[], Tuple{Int,Int}[])
+    p1  = DynFlowPath(pcells, 0, [(1, 2)], Tuple{Int,Int}[], Tuple{Int,Int}[])
     t0  = DynTrap(100, 1, Int[], Int[])             # full trap upstream, spills down p1
     t1  = DynTrap(101, 0, Int[], [1])               # trap hosts the culvert outlet
     net = DynNetwork([p1], [t0, t1], [cv])

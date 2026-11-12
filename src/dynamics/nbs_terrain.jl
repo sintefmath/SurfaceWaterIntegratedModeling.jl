@@ -8,6 +8,15 @@
 # Below this the endpoint weights count as zero and the throughput is split evenly instead.
 const _NBS_O0_EPS = 1e-12
 
+# NBS footprints never infiltrate: the layer models own that water (invariant I3).  Applied to
+# every infiltration grid the dynamic code builds.
+function _nbs_zero_infiltration!(infiltration, nbs)
+    for nb in nbs
+        infiltration[nb.footprint] .= 0.0
+    end
+    return infiltration
+end
+
 """
     _prepare_nbs!(nbs, tstruct) -> nbs
 

@@ -59,8 +59,7 @@ function fill_sequence(tstruct::TrapStructure{<:Real},
     infiltration = (typeof(infiltration) == Nothing) ? zeros(size(tstruct.topography)) :
                    (typeof(infiltration) <: Real)    ? ones(size(tstruct.topography)) * infiltration :
                                                       copy(infiltration)
-    # ensuring no infiltration overlaps with NBS footprints
-    infiltration[vcat([n.footprint for n in nbs]...)] .= 0.0
+    _nbs_zero_infiltration!(infiltration, nbs)
 
     # tables mapping water level -> trap volume
     z_vol_tables = _compute_z_vol_tables(tstruct)

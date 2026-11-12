@@ -69,43 +69,27 @@ end
 """
     _nbs_coupled_nodes(net, tstruct, np) -> Vector{Vector{Int}}
 
-For each NBS placement, the coupling-graph nodes causally tied to it and so required to share
-its component: its outlet paths, the paths leaving its footprint, the paths entering it, and
-its internal-accumulation trap.
-
-An outflow cell seeds a path, so it is matched against the path's `departure_point`; an inflow
-cell is crossed mid-path, so it is matched anywhere in `cells`.  Nothing is mutated.
+For each NBS placement, the coupling-graph nodes that must share its component (invariant C1 in
+NBS_INVARIANTS.md): the paths departing from its exits and piped outlets (they carry its
+output), the paths crossing its inflow cells (they feed it), and the trap under each of its
+ponds.  Nothing is mutated.
 """
 function _nbs_coupled_nodes(net::DynNetwork, tstruct, np::Int)
+    emits = [Set(vcat(nb.link.exits, nb.outlets)) for nb in net.nbs]
+    feeds = Dict(c => n for (n, nb) in enumerate(net.nbs) for c in nb.link.inflow_cells)
     coupled = [Int[] for _ in net.nbs]
-    outflow = [Set(n.link.exits) for n in net.nbs]
-    inflow_of = Dict{CartesianIndex{2},Int}()          # inflow cell -> the NBS it feeds
-    for (n, nb) in enumerate(net.nbs), c in nb.link.inflow_cells
-        inflow_of[c] = n
-    end
     for (p, fp) in enumerate(net.flow_paths)
-        for (n, _) in fp.nbs_outlets; push!(coupled[n], p); end
         for n in eachindex(net.nbs)
-            fp.departure_point in outflow[n] && push!(coupled[n], p)
+            fp.departure_point in emits[n] && push!(coupled[n], p)
         end
-        for cell in fp.cells
-            n = get(inflow_of, cell, 0); n > 0 && push!(coupled[n], p)
+        for c in fp.cells
+            n = get(feeds, c, 0); n > 0 && push!(coupled[n], p)
         end
     end
-    _add_accumulation_traps!(coupled, net, tstruct, np)
-    return [unique!(v) for v in coupled]
-end
-
-"""
-    _add_accumulation_traps!(coupled, net, tstruct, np) -> nothing
-
-Unite each NBS with the network trap under each of its ponds: water ponding inside the footprint
-is that trap's, so the two must solve together.  **Mutates `coupled`**.
-"""
-function _add_accumulation_traps!(coupled, net::DynNetwork, tstruct, np::Int)
     for (n, nb) in enumerate(net.nbs), c in nb.link.ponds
         push!(coupled[n], np + _pond_trap(net, tstruct, c))
     end
+    return [unique!(v) for v in coupled]
 end
 
 """
@@ -169,7 +153,6 @@ function _localize_path(fp::DynFlowPath, tmap, cvmap, nbsmap, pmap)
                 [(cvmap[c],  pos) for (c, pos) in fp.culvert_inlets],
                 [(cvmap[c],  pos) for (c, pos) in fp.culvert_outlets],
                 [(nbsmap[n], pos) for (n, pos) in fp.nbs_inlets],
-                [(nbsmap[n], pos) for (n, pos) in fp.nbs_outlets],
                 [(pmap[m],   j)   for (m, j)   in fp.merges])
 end
 

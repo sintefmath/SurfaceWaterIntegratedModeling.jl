@@ -87,7 +87,7 @@ function _compact!(net::DynNetwork)
 
     net.flow_paths = [let p = net.flow_paths[o]
         DynFlowPath(p.cells, p.departure_point, rmp(p.target_trap, tmap),
-                    p.culvert_inlets, p.culvert_outlets, p.nbs_inlets, p.nbs_outlets,
+                    p.culvert_inlets, p.culvert_outlets, p.nbs_inlets,
                     [(pmap[m], j) for (m, j) in p.merges if pmap[m] > 0])
     end for o in live_p]
     net.traps = [let t = net.traps[o]; t.spill_path = rmp(t.spill_path, pmap); t end
@@ -178,7 +178,7 @@ to clear beforehand.
 """
 _tombstone_path!(net::DynNetwork, path_id::Int) =
     net.flow_paths[path_id] = DynFlowPath(CartesianIndex{2}[], CartesianIndex(0, 0), 0,
-        Tuple{Int,Int}[], Tuple{Int,Int}[], Tuple{Int,Int}[], Tuple{Int,Int}[], Tuple{Int,Int}[])
+        Tuple{Int,Int}[], Tuple{Int,Int}[], Tuple{Int,Int}[], Tuple{Int,Int}[])
 
 """
     _promote_tributary!(net, path_id, j, q) -> nothing
@@ -202,10 +202,9 @@ function _promote_tributary!(net::DynNetwork, path_id::Int, j::Int, q::Int)
     ci = vcat(Q.culvert_inlets,  [(c, reb(p)) for (c, p) in P.culvert_inlets  if p >= j])
     co = vcat(Q.culvert_outlets, [(c, reb(p)) for (c, p) in P.culvert_outlets if p >= j])
     ni = vcat(Q.nbs_inlets,      [(n, reb(p)) for (n, p) in P.nbs_inlets      if p >= j])
-    no = vcat(Q.nbs_outlets,     [(n, reb(p)) for (n, p) in P.nbs_outlets     if p >= j])
     mg = vcat(Q.merges,          [(m, reb(p)) for (m, p) in P.merges          if p != j])
     net.flow_paths[q] = DynFlowPath(vcat(Q.cells, P.cells[j:end]),
-        Q.departure_point, P.target_trap, ci, co, ni, no, mg)
+        Q.departure_point, P.target_trap, ci, co, ni, mg)
     _tombstone_path!(net, path_id)
 end
 

@@ -68,11 +68,10 @@ function network_watercourses(tstruct::TrapStructure{<:Real},
     gridres = size(tstruct.topography)
     LI      = LinearIndices(gridres)
 
-    # expand precipitation/infiltration to grids; NBS footprints never infiltrate (the layer
-    # models own that water) — the same rule fill_sequence applies
+    # expand precipitation/infiltration to grids, prepared as fill_sequence does
     precip = precipitation isa Real ? fill(Float64(precipitation), gridres) : Float64.(precipitation)
     infil  = infiltration  isa Real ? fill(Float64(infiltration),  gridres) : Float64.(infiltration)
-    isempty(nbs) || (infil[vcat([n.footprint for n in nbs]...)] .= 0.0)
+    _nbs_zero_infiltration!(infil, nbs)
 
     # the network-oblivious baseline field, fully routed by terrain. `runoff_live`
     # accumulates the network corrections; `runoff_orig` keeps the untouched

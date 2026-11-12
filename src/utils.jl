@@ -242,10 +242,9 @@ function network_states_at_timepoints(tstruct::TrapStructure{<:Real},
 
     nt = numtraps(tstruct)
 
-    # infiltration map, prepared exactly as `fill_sequence` does (default 0, NBS footprints
-    # never infiltrate — the layer models own that water)
+    # infiltration map, prepared exactly as `fill_sequence` does
     infil = (infiltration === nothing) ? zeros(size(tstruct.topography)) : copy(infiltration)
-    isempty(nbs) || (infil[vcat([n.footprint for n in nbs]...)] .= 0.0)
+    _nbs_zero_infiltration!(infil, nbs)
 
     z_vol_tables = _compute_z_vol_tables(tstruct)
     seeds        = _dyn_seeds(tstruct, dyn_traps, DynCulvert[])
