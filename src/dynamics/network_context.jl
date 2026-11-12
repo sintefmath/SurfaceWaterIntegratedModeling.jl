@@ -170,8 +170,8 @@ end
 """
     _nbs_layer_block(net, nbs_state) -> Vector{Float64}
 
-The NBS layer states for `net`, concatenated in `net.nbs` order — the layout `_make_context`
-appends after the trap volumes, matching `_build_nbs_plan`'s `state_base` offsets.
+The NBS layer states for `net`, concatenated in `net.nbs` order, top layer first — the layout
+`_make_context` appends after the trap volumes and `_build_nbs_plan` records as `state_base`.
 
 Read from the persistent `nbs_state` store by each placement's stable `id`; a placement not yet
 in the store starts empty (zeros).  Nothing is mutated.
@@ -196,14 +196,18 @@ rebuild that regroups NBS into new components restores each layer correctly.
 Mutates and returns `nbs_state`; `ctx` is read only.
 """
 function _store_nbs_state!(nbs_state, ctx::DynNetworkContext)
-    nt   = length(ctx.global_ix)
-    base = 0
-    for nb in ctx.net.nbs
-        L = length(nb.system.layers)
-        nbs_state[nb.id] = ctx.state[(nt + base + 1):(nt + base + L)]
-        base += L
+    for (id, layers) in _nbs_layers(ctx, ctx.state)
+        nbs_state[id] = layers
     end
     return nbs_state
+end
+
+# `(id, layer volumes)` per placement of `ctx`, read from a state vector laid out as ctx.state.
+function _nbs_layers(ctx::DynNetworkContext, state)
+    plan = ctx.params.nbsplan
+    plan === nothing && return Tuple{Int,Vector{Float64}}[]
+    nt = length(ctx.global_ix)
+    return [(nb.id, state[_layer_range(el, nt)]) for (nb, el) in zip(ctx.net.nbs, plan.elems)]
 end
 
 """

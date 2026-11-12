@@ -209,12 +209,12 @@ end
 # oblivious runoff grid here, so every cell sits at its capacity floor — the same convention
 # `_build_rate_params` applies when `runoff === nothing`.
 _rf(net, ext, spilling, fp_infil, cell_infil; cvplan = nothing, trap_level = nothing) =
-    SWIM._route_flow(net, ext, spilling, fp_infil,
+    first(SWIM._route_flow(net, ext, spilling, fp_infil,
                      [Float64[-c for c in ci] for ci in cell_infil],
                      SWIM._path_event_templates(net),
                      first(SWIM._network_order(net)),
                      SWIM._merge_targets(net),
-                     cvplan, trap_level)
+                     cvplan, trap_level))       # trap inflows (drop the NBS draws)
 
 @testset "networksolver: flow routing (pure topology)" begin
     T(ix, sp) = DynTrap(ix, sp)

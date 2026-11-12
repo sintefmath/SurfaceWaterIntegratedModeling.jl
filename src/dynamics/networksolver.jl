@@ -186,13 +186,10 @@ fix the path/trap interleaving once tributaries exist.  Nothing is mutated.
     one: its inlet draws `min(capacity, current)` — what is actually available there — and its
     outlet then delivers exactly that, so the inlet must be visited first.
 
-    An NBS has none.  Its output is `O_terrain(V)` / `E_l(V)`, a function of the **stored layer
-    state**, so [`_nbs_routing`](@ref) fixes `path_diff` / `trap_diff` before the walk begins;
-    the router only adds them, exactly as it adds `external_inflow`.  In the other direction
-    `nbs_draw` is write-only during the walk and is not read until after
-    [`_routed_inflow`](@ref) returns.  Neither direction reads what the other writes, so no
-    ordering constraint exists to encode — a carrier path may legitimately be visited before
-    the inflow path feeding the same placement.
+    An NBS has none.  Its output depends only on the stored layer state, so
+    [`_nbs_injections`](@ref) fixes it before the pass, and the draws the pass collects feed
+    only the layers' rates.  A carrier path may therefore be visited before the inflow path
+    feeding the same placement.
 
     NBS placements *do* get edges in `_coupling_graph` (`network_utils.jl`), but that is an
     undirected graph deciding which elements must be solved **together**, not in what order.
@@ -494,7 +491,8 @@ end
 """
     _route_flow(net, external_inflow, spilling, footprint_infil, path_runoff,
                 path_events, order, merge_target,
-                cvplan = nothing, trap_level = nothing, nbsrt = nothing) -> Vector{Float64}
+                cvplan = nothing, trap_level = nothing,
+                path_inject = nothing, trap_inject = nothing) -> (trap_inflow, nbs_draw)
 
 The router: how much water arrives at each trap, given who is spilling right now.
 
@@ -511,14 +509,15 @@ solve onto [`DynNetworkRateParams`](@ref) — so the per-step cost here is just 
 - `order`, `merge_target`: the routing plan ([`_network_order`](@ref), [`_merge_targets`](@ref)).
 - `cvplan`: [`CulvertPlan`](@ref), or `nothing` to ignore culverts entirely.
 - `trap_level`: per-trap water surface, needed only for culvert heads.
-- `nbsrt`: [`NBSRouting`](@ref), or `nothing` with no NBS.  Its `path_diff` / `trap_diff` are
-  read in; its `nbs_draw` is **written through** with the intercepted flow.
+- `path_inject`, `trap_inject`: NBS output added at path heads / into traps
+  ([`_nbs_injections`](@ref)), or `nothing` with no NBS.
 
 # Returns
-Total inflow at each trap, in `net.traps` order.
+Total inflow at each trap (`net.traps` order), and the flow each NBS placement intercepts at its
+inflow cells (`net.nbs` order; signed, as an upstream NBS that is storing arrives as a deficit).
 
 Walks `order`, so everything upstream of a node is final when it is visited.  Nothing the caller
-owns is mutated apart from `nbsrt`: the accumulators are built fresh here.  Segmented routing
+owns is mutated.  Segmented routing
 charges flow only the cells it actually travels, so a tributary joining at junction `j` is not
 charged the main path's pre-junction losses.
 """
@@ -532,28 +531,26 @@ function _route_flow(net::DynNetwork,
                      merge_target::AbstractVector{<:Integer},
                      cvplan = nothing,
                      trap_level = nothing,
-                     nbsrt = nothing)
+                     path_inject = nothing,
+                     trap_inject = nothing)
 
     np = length(net.flow_paths)
     nt = length(net.traps)
     @assert length(external_inflow) == length(spilling) == length(footprint_infil) == nt
     @assert length(path_runoff) == length(merge_target) == length(path_events) == np
 
-    # Working accumulators: `trap_inflow` seeded with external trap inflow (plus any NBS
-    # internal-depression diff); `path_flow`, `trib_output` and `culvert_actual` zeroed —
-    # every path's water arrives from an upstream trap's spill or an NBS head-injection.
+    # every path's water arrives from an upstream trap's spill or an NBS injection at its head
     trap_inflow = Float64.(external_inflow)
-    nbsrt === nothing || (trap_inflow .+= nbsrt.trap_diff)
+    trap_inject === nothing || (trap_inflow .+= trap_inject)
     path_flow   = zeros(Float64, np)
     trib_output = zeros(Float64, np)
     culvert_actual = cvplan === nothing ? Float64[] : zeros(Float64, length(net.culverts))
-    nbs_draw = nbsrt === nothing ? Float64[] : nbsrt.nbs_draw
+    nbs_draw = zeros(Float64, length(net.nbs))
 
     for node in order
         if node <= np                               # a flow path
             p = node
-            # NBS output diff (if any) is head-injected here and rides the same signed tracker.
-            head = nbsrt === nothing ? path_flow[p] : path_flow[p] + nbsrt.path_diff[p]
+            head = path_inject === nothing ? path_flow[p] : path_flow[p] + path_inject[p]
             delivered = _path_delivered!(path_runoff[p], head,
                                          path_events[p], trib_output, culvert_actual,
                                          cvplan, net, trap_level, nbs_draw)
@@ -568,7 +565,7 @@ function _route_flow(net::DynNetwork,
                               spilling, cvplan, trap_level, culvert_actual)
         end
     end
-    return trap_inflow
+    return trap_inflow, nbs_draw
 end
 
 # ----------------------------------------------------------------------------
@@ -685,50 +682,6 @@ How many NBS layer states the ODE state vector carries beyond the trap volumes.
 _nbs_state_count(p) = p.nbsplan === nothing ? 0 : p.nbsplan.nlayer_total
 
 """
-    NBSRouting
-
-Per-step NBS scratch, rebuilt each rate-function call and threaded through the router.  It
-carries traffic in **both** directions, and each field is indexed in a **different space**.
-
-# Fields
-
-| Field | Indexed by | Direction |
-|---|---|---|
-| `path_diff` | flow path (`1:np`) | in — router reads |
-| `trap_diff` | trap (`1:nt`) | in — router reads |
-| `nbs_draw` | NBS placement (`nbsplan.elems`) | out — router writes |
-
-**In.** `path_diff` and `trap_diff` are the placements' signed output diffs, computed from the
-current layer state by [`_nbs_routing`](@ref).  Both are the same quantity — a share
-`(O_terrain - O_0_total) * ratio_e` — differing only in where it lands: `path_diff` is injected
-at a carrier path's head and then attenuated along it (and also collects each piped outlet's
-`+E_l`), while `trap_diff` is deposited straight into an internal depression's trap.
-
-**Out.** `nbs_draw` is the *network-routed* flow intercepted at each placement's
-footprint-inflow cells (the `:nbsin` events).  Layer 1 is fed by the live input
-`I_1 = O_0_total + nbs_draw`: the oblivious half is static and known when the plan is built,
-but the network half depends on which traps are spilling right now, so it can only be collected
-while routing — hence a router output rather than a plan field.  It is signed: an upstream NBS
-that is storing water rides a negative diff, which arrives here as a *deficit* in this
-placement's input rather than as flow that quietly bypassed it.
-
-**The two directions do not meet within a step, and must not.** The `in` fields come from the
-layer state `V`; the `out` field feeds `dV`.  So a placement's output does *not* reflect the
-draw collected alongside it — outflow follows stored volume, not what is arriving this instant,
-and the draw reaches the output only through integration.  That is what keeps the RHS free of an
-algebraic loop, and why routing needs no NBS ordering (see [`_network_order`](@ref)).  Sanity
-check: at steady state `dS/dt = 0`, so `O_terrain = I_1` and `diffbase = nbs_draw` — the
-placement passes the network draw straight through.
-
-The attenuation reference `path_runoff` is not here — it is static and lives on the rate params.
-"""
-struct NBSRouting
-    path_diff  ::Vector{Float64}   # per flow path — signed diff injected at its head (in)
-    trap_diff  ::Vector{Float64}   # per trap — signed diff deposited into it (in)
-    nbs_draw   ::Vector{Float64}   # per NBS placement — :nbsin flow captured while routing (out)
-end
-
-"""
     _attenuate_range(runoff, lo, hi, d) -> Float64
 
 The one flow-tracking rule, applied to every flow the router carries — network spills,
@@ -809,40 +762,27 @@ function _build_nbs_plan(net::DynNetwork, tstruct, runoff::AbstractMatrix{<:Real
 end
 
 """
-    _nbs_routing(V, p, nt, np) -> NBSRouting
+    _nbs_injections(V, plan, nt, np) -> (path_inject, trap_inject)
 
-The signed output diffs of every NBS placement at the current layer state.
-
-# Arguments
-- `V`: the ODE state — trap volumes, then the NBS layer states.
-- `p`: the [`DynNetworkRateParams`](@ref); `p.nbsplan` must not be `nothing`.
-- `nt`, `np`: trap and flow-path counts, sizing the two output vectors.
-
-# Returns
-A fresh [`NBSRouting`](@ref) with `path_diff` and `trap_diff` filled and `nbs_draw` zeroed for
-the router to fill on the way back.  Nothing is mutated; the scratch is allocated per call.
-
-Terrain re-emission contributes `(O_terrain(V) - O_0_total) * ratio_e` to `path_diff` (injected
-at the carrier path's head) or to `trap_diff` (deposited into the accumulation trap) — the same
-share either way, differing only in where it lands.  Each piped outlet adds `+E_l(V)` to its
-carrier path.
-
-Emitting the *diff* over the oblivious baseline, rather than the output itself, is what keeps
-`external_inflow`'s `O_0` from being counted twice.
+What every NBS placement adds to the routing at state `V`, computed from the layer storage
+alone, before the routing pass.  Each exit's carrier path gets `(O_terrain - O_0)·share` at its
+head and each pond's trap the same share term; each piped outlet's carrier path gets that layer's
+overflow.  Adding the *difference* to `O_0` is what keeps `external_inflow`, which already holds
+`O_0`, from being counted twice.
 """
-function _nbs_routing(V, p, nt::Int, np::Int)
-    path_diff  = zeros(Float64, np)
-    trap_diff  = zeros(Float64, nt)
-    for el in p.nbsplan.elems
-        Vs = view(V, _layer_range(el, nt))
-        diffbase = _nbs_terrain_outflow(el.system, Vs, el.A, el.n_terrain) - el.O_0_total
-        for (pth, r) in el.terrain_paths; path_diff[pth]  += diffbase * r; end
-        for (tr,  r) in el.terrain_traps; trap_diff[tr]   += diffbase * r; end
+function _nbs_injections(V, plan::NBSPlan, nt::Int, np::Int)
+    path_inject = zeros(Float64, np)
+    trap_inject = zeros(Float64, nt)
+    for el in plan.elems
+        Vs   = view(V, _layer_range(el, nt))
+        diff = _nbs_terrain_outflow(el.system, Vs, el.A, el.n_terrain) - el.O_0_total
+        for (pth, sh) in el.terrain_paths; path_inject[pth] += diff * sh; end
+        for (tr,  sh) in el.terrain_traps; trap_inject[tr]  += diff * sh; end
         for (pth, l) in el.piped_paths
-            path_diff[pth] += first(_layer_fluxes(el.system.layers[l], Vs[l], el.A))
+            path_inject[pth] += first(_layer_fluxes(el.system.layers[l], Vs[l], el.A))
         end
     end
-    return NBSRouting(path_diff, trap_diff, zeros(Float64, length(p.nbsplan.elems)))
+    return path_inject, trap_inject
 end
 
 # ----------------------------------------------------------------------------
@@ -962,27 +902,11 @@ Route the network at a given state — the single point where "what is arriving 
 
 # Returns
 `(inflow, spilling, nbs_draw)` — total inflow per trap, whether each trap is at capacity (and so
-spilling), and the NBS live-input draws (`nothing` with no NBS).
+spilling), and the flow each NBS placement intercepts at its inflow cells.
 
 Shared by the rate function and the `:unspill` condition, so the two cannot disagree about who
-is spilling.  With NBS the signed output diffs are folded into the routing via `nbsrt`, and the
-`:nbsin` flow captured during routing comes back as `nbs_draw`.  Nothing the caller owns is
-mutated; scratch is allocated per call.
-
-!!! note "`nbs_draw` is complete on return"
-    A placement's draw is summed across every path crossing its footprint-inflow cells, so it is
-    only trustworthy once *all* of them have been walked.  Three things make that hold, and a
-    caller must not read `nbs_draw` before this function returns:
-
-    1. `_nbs_coupled_nodes` (`network_utils.jl`) forces every path crossing a footprint-inflow
-       cell into that placement's component, so no contributor can sit in another `net`.
-    2. [`_route_flow`](@ref) walks every node of `order`, so every `:nbsin` fires.
-    3. `nbs_draw` is write-only during the walk — order of contributions is irrelevant to a sum.
-
-    Point 1 is the load-bearing one: were the coupling incomplete, a path's flow would simply
-    never reach the placement.  It cannot go unnoticed, though — `_localize_path` resolves each
-    `nbs_inlet` through `nbsmap`, so a path landing in a component without its NBS throws at
-    build rather than under-counting silently.
+is spilling.  `nbs_draw` is complete only because every path crossing a placement's inflow cells
+is in the placement's component (`_nbs_coupled_nodes`; invariant C1 in NBS_INVARIANTS.md).
 """
 function _routed_inflow(V, p::DynNetworkRateParams)
     geom = p.geom
@@ -991,13 +915,14 @@ function _routed_inflow(V, p::DynNetworkRateParams)
     # culverts need each trap's water-surface elevation for the head calc
     trap_level = p.cvplan === nothing ? nothing :
                  Float64[water_level(geom[i], V[i]) for i in 1:nt]
-    nbsrt = p.nbsplan === nothing ? nothing :
-            _nbs_routing(V, p, nt, length(p.net.flow_paths))
-    inflow = _route_flow(p.net, p.external_inflow, spilling,
-                         p.footprint_infil, p.path_runoff,
-                         p.path_events, p.order, p.merge_target,
-                         p.cvplan, trap_level, nbsrt)
-    return inflow, spilling, (nbsrt === nothing ? nothing : nbsrt.nbs_draw)
+    # NBS output depends on the layer state only, so it is fixed before the routing pass
+    inject = p.nbsplan === nothing ? (nothing, nothing) :
+             _nbs_injections(V, p.nbsplan, nt, length(p.net.flow_paths))
+    inflow, nbs_draw = _route_flow(p.net, p.external_inflow, spilling,
+                                   p.footprint_infil, p.path_runoff,
+                                   p.path_events, p.order, p.merge_target,
+                                   p.cvplan, trap_level, inject...)
+    return inflow, spilling, nbs_draw
 end
 
 """
@@ -1536,7 +1461,7 @@ function solveDynNetwork!(state::AbstractVector{Float64},
     # accuracy — over a long tmax (a last-period solve with no next event marching to a distant
     # trap fill) that means ~1e6 tiny steps. The stiff switch integrates that mode A-stably, so
     # dt is accuracy-bound and grows; Tsit5 still handles the easy segments. Finite-diff Jacobian
-    # because the RHS (_nbs_routing) allocates Float64 and isn't Dual-safe for ForwardDiff.
+    # because the RHS (_nbs_injections) allocates Float64 and isn't Dual-safe for ForwardDiff.
     sol = solve(ODEProblem(dynNetworkRateFunction!, V0, (0.0, tmax_ode), p),
                 AutoTsit5(Rodas5P(autodiff = AutoFiniteDiff()));
                 callback = callback,
