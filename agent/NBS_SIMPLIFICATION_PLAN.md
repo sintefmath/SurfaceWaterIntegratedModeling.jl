@@ -1,6 +1,6 @@
 # NBS code: assessment and simplification plan
 
-Status: **proposal, 2026-11-12.** No NBS code has been restructured yet.
+Status: **steps 1–5 done, 2026-11-12** (`ae22903`, `354757b`, `0cc54e3`, `f922f95`, `030b8d2`). Step 6 (model change) was not pursued, per D-a. The current design is described in `agent/NBS_INVARIANTS.md`; this file records the reasoning.
 
 **Decisions (user, 2026-11-12):**
 - **D-a:** restructure first, keeping the signed-diff model. Change the model only if very strong arguments emerge, to keep the line between base SWIM and the bolted-on NBS module sharp.
