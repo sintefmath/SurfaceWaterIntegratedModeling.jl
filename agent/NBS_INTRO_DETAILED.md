@@ -14,7 +14,7 @@ Function names are stable; line numbers are not given because they drift.
 
 | Symbol | Meaning |
 |---|---|
-| `R` | A cell's baseline runoff value: positive = surface flow, negative = unused infiltration capacity. |
+| `R` | A cell's baseline runoff value: positive = surface flow, negative = unused infiltration capacity. In the solver it is read from `rateinfo.runoff` (base SWIM's rates, which do not route covered traps' spills); in `network_watercourses` from a plain `watercourses` field (§7.2). |
 | `S`, `V` | A layer's storage, in mm (`S`) or as a volume (`V`). The ODE state vector is also called `V` in code, but it is written "the state" here. |
 | `A` | Footprint area = number of footprint cells (1 m² per cell). Not the `NBSLayer.A` field, which only SUrbArea's calibration code uses. |
 | `O_0` | Baseline throughput of a footprint: rain on it plus baseline flow entering it. |
@@ -120,7 +120,7 @@ fill_sequence(tstruct, weather_events; infiltration, dyn_traps, culverts, nbs)
 `_rebuild_contexts!` creates a context per component with `_make_context(net, tstruct, rateinfo, state0, cur_time, infiltration, z_vol_tables, precipitation, nbs_state)`.
 
 1. **The state (S1).**
-   - The trap volumes: `state0(g)`, from the committed volumes.
+   - The trap volumes: `state0(trap)`, which returns the trap's committed volume (or its capacity, if it is full).
    - Then `_nbs_layer_block(net, nbs_state)`: each placement's layer volumes in `net.nbs` order, top first. A layer never stored starts empty.
 2. **`params = _build_rate_params(...)`.** These are the context's *frozen rates* (S5):
    - per-trap geometry: volume↔level tables, infiltration per cell of the trap footprint;
@@ -159,10 +159,12 @@ Each iteration:
    3. **Apply the change.** The solver reports each event as `:fill`, `:unspill` or `:empty` (§6), handled by `apply_fill!`, `apply_unfill!` and `apply_empty!` (`network_updating.jl`) respectively. A component can:
       - grow along a newly active spill path;
       - detach traps that are no longer reached;
-      - or merge with another component it now reaches. Merging rebuilds the component from its seeds (`_regrow`); placements keep their `link` and `id`.
+      - or merge with another component it now reaches.
+
+      Merging, and the restructuring `apply_empty!` and `apply_fill!` need when a parent trap absorbs or releases its sub-traps, rebuild the component from its seeds (`_regrow`); placements keep their `link` and `id`. A component is never split: if it becomes disconnected after `apply_unfill!`, it stays one ODE, which gives the same result.
    4. **Reconcile the spill graph** (`_reconcile_spillgraph!`). Base SWIM's spill graph must contain exactly the full traps that are not covered. A trap that has just become covered has its spill withdrawn from the baseline, and one that has just left coverage gets it back.
    5. **Rebuild and predict.** Every context is rebuilt, with new frozen rates from the current `rateinfo`, and predicts again.
-4. **Record.** The amount updates are collected; network traps' volumes come from the driver. A `SpillEvent` is pushed. NBS layer volumes are **not** stored in `SpillEvent`.
+4. **Record.** `_collect_amount_updates` gathers the new volumes: those of non-covered traps whose inflow changed (projected at constant rate), those of traps that just changed status (at their capacity), and those of network traps (from the driver). They are stored as incremental updates in a new `SpillEvent`. NBS layer volumes are **not** stored in `SpillEvent`.
 
 **At the end of the period:**
 - `_settle_noncovered_at_endtime!` brings the non-covered traps to the end time.
@@ -181,12 +183,12 @@ The next period's driver restores the layers from `nbs_state`.
   - `:fill`: a trap reaches capacity;
   - `:empty`: a parent trap drains to the level of its sub-traps;
   - `:unspill`: a full trap's inflow drops below its losses.
-- **Steady state.** The integration also stops when nothing changes any more. The rate of every trap that is not full, and with NBS of every layer, must be below the solver's absolute tolerance (`abstol`), or have changed sign since the start (`_build_steadystate_callback_nbs`).
+- **Steady state.** The integration also stops when nothing changes any more. The rate of every trap that is not full, and with NBS of every layer, must be below the solver's absolute tolerance (`abstol`), or have changed sign since the start (`_build_steadystate_callback_nbs`). The sign test catches a trap that settles at a level below capacity, where its wetted infiltration jumps back and forth across one step of the terrain, so its rate never becomes small.
 
 **One evaluation of the right-hand side** (`dynNetworkRateFunction!(dV, state, p)`):
 
 1. **Route** (`_routed_inflow(state, p)`):
-   1. A trap is *spilling* if its volume is at capacity. If there are culverts, each trap's water level is computed.
+   1. A trap is *spilling* if its volume is at capacity: it then passes its surplus on (a *full* trap, in `fill_sequence`'s terms, is one that has filled and not yet unspilled). If there are culverts, each trap's water level is computed.
    2. **Injections**, from the layer volumes only (S2). `_nbs_injections` gives, per placement:
       - `d = O_t − O_0`;
       - `path_inject[carrier] += d·share` per exit;
@@ -194,11 +196,11 @@ The next period's driver restores the layers from `nbs_state`.
       - `path_inject[carrier] += E_k` per outlet.
    3. **The *routing pass*.** `_route_flow` walks paths and traps from upstream to downstream, so whatever feeds a path or trap has been computed by the time it is reached. Every trap starts from `external_inflow + trap_inject`.
       - **At a trap:** apply its culverts. If it is spilling, push its surplus into its spill path: inflow minus the infiltration over its whole trap footprint.
-      - **At a path:** start from `head = (flow pushed into it) + path_inject[p]`. `_path_delivered!` then walks the path's stops in order:
-        - between stops, the *network flow* `d` changes cell by cell as `d ← max(R+d, 0) − max(R, 0)`;
+      - **At a path:** start from `q_head = (flow pushed into it) + path_inject[p]` at the path's head. `_path_delivered!` then walks the path's stops in order:
+        - between stops, the *network flow* `d` changes cell by cell as `d ← max(R+d, 0) − max(R, 0)` (`_attenuate_range`);
         - `:trib` adds the tributary's delivered flow;
         - `:cvin` takes the culvert's flow, capped by what is there, and `:cvout` delivers it;
-        - **`:nbsin` adds the whole passing flow to that placement's draw**, and the path carries 0 beyond it.
+        - **`:nbsin`: the inflow cell's own rule is applied, and what leaves it, i.e. enters the footprint, is added to that placement's draw.** The path carries 0 beyond it.
       - It returns the total inflow per trap (*routed trap inflow*) and `nbs_draw` per placement.
 2. **Trap rates.**
    - Spilling: `inflow − trap-footprint infiltration − spill`, which is ≈ 0 while the trap is fed.
@@ -206,11 +208,11 @@ The next period's driver restores the layers from `nbs_state`.
 3. **Layer rates.** For each placement, `_nbs_layer_rates!(dV[layers], system, state[layers], A, max(O_0 + draw, 0))`:
    - the top layer gets `Q_in`, and each lower layer gets the percolation of the one above;
    - each layer loses its overflow and its percolation, and the bottom layer's percolation leaves the model;
-   - the `max` only absorbs rounding, since `Q_in ≥ 0` analytically. The per-placement mass balance is S3.
+   - the `max` only absorbs rounding: per inflow cell `c`, its part of `O_0` and its part of the draw add up to `max(R_c + d_c, 0) ≥ 0`, so `Q_in ≥ 0`. The per-placement mass balance is S3.
 
 **Why the downstream trap gets the right amount.**
-- Its `external_inflow` already contains the baseline `O_0·share_e`, as that water arrived after the path's infiltration.
-- The carrier path adds `(O_t − O_0)·share_e` under the same per-cell rule, so the total becomes `O_t·share_e`.
+- Its `external_inflow` already contains the baseline `O_0·share_e`, reduced by the infiltration along the path to the trap.
+- The carrier path adds `(O_t − O_0)·share_e` under the same per-cell rule. Together the trap receives `O_t·share_e` reduced by that path, in place of `O_0·share_e` reduced by it.
 - The pipe flow arrives separately, through its own carrier path.
 
 ---
@@ -221,7 +223,7 @@ The next period's driver restores the layers from `nbs_state`.
 
 **`network_states_at_timepoints(tstruct, seq, times; nbs, culverts, dyn_traps, infiltration)`.** `seq` holds no layer volumes, so this replays the network forward through `seq`:
 - at each weather-period start, it rebuilds a driver from that event's full snapshot (`_rebuild_replay_driver`), carrying the layer volumes (`_carry_nbs!`);
-- at events that touch a component, it commits and rebuilds;
+- at events that touch a component, it commits, then rebuilds the network from scratch with `setup_network` (not with the incremental `apply_*` updates of the run). Component boundaries can therefore differ from the run's (the run never splits a component); the covered traps and paths should be the same, so the volumes agree up to solver tolerance;
 - it samples each requested time with `_sample_network`, which integrates a copy of the state.
 
 The result, per time, is `trap_volumes` (network traps) and `nbs_layers` (per `id`, top layer first).
@@ -238,10 +240,10 @@ The result, per time, is `trap_volumes` (network traps) and `nbs_layers` (per `i
 2. **Network.** Rebuild the network for the given state with `setup_network`.
 3. **Culverts.** Take culvert flow `q` at the inlet, capped by the flow there, and add it at the outlet.
 4. **NBS.** For each placement:
-   - get `O_0` and the shares from `_nbs_baseline` on `runoff_orig`, so placements do not affect each other's baseline;
-   - add `(O_t − O_0)·share_e` downstream of each exit, and `E_k` downstream of each outlet;
+   - get `O_0` and the shares from `_nbs_baseline` on `runoff_orig`, so placements do not affect each other's baseline. Unlike the solver's `rateinfo.runoff`, this field also routes full network traps' spills, so `O_0` here already includes what the solver receives from them as draw;
+   - add `(O_t − O_0)·share_e` starting at each exit cell, and `E_k` starting at each outlet cell (as the solver injects at the head of the carrier path);
    - leave pond shares in their trap. This is a known simplification: if that trap is full, its share should continue along the trap's spill path.
-5. **Carrying changes downstream.** `_propagate_field_delta!` applies the per-cell rule. It passes through full traps along their spill paths, and stops at a footprint (as the solver's `:nbsin` capture does) or when nothing is left.
+5. **Carrying changes downstream.** `_propagate_field_delta!` applies the per-cell rule. It passes through full traps along their spill paths, and stops when it reaches a footprint cell (after applying the inflow cell's rule, where the solver's `:nbsin` captures) or when nothing is left.
 6. **Footprints.** Footprint cells are set to `NaN`.
 
 ### 7.3 Maps
@@ -261,4 +263,4 @@ The result, per time, is `trap_volumes` (network traps) and `nbs_layers` (per `i
   Don't recompute these elsewhere.
 - **A commit must use the context's frozen rates** (S5).
 - **Anything that changes what feeds a placement must keep C1 true.** That is, update `_nbs_coupled_nodes` along with it.
-- **Known simplifications and open questions** are listed at the end of `NBS_INVARIANTS.md`.
+- **Known simplifications** are listed at the end of `NBS_INVARIANTS.md`.

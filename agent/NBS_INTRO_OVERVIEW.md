@@ -27,7 +27,7 @@ An **NBS placement** is a green roof, a rain bed, a permeable patch or similar. 
   - The top `n_terrain` layers (normally 1) overflow **onto the terrain**. The water leaves across the footprint's natural downhill edge, at the **exits**: the outside cells the footprint drains to.
   - Every lower layer that overflows is **piped** to an **outlet** cell you give, for example a green roof's downpipe.
 
-The layers form an ODE in time. Base SWIM's `fill_sequence` uses constant rates and has no ODEs, except in one place: the **dynamic network**. That is a set of traps and flow paths solved together as a coupled ODE, originally built for **culverts** (pipes under roads, whose rate depends on the water levels at both ends). NBS placements live in the dynamic network for the same reason.
+The layers form an ODE in time whose rates depend on what happens elsewhere. Base SWIM's `fill_sequence` works with constant inflow rates and solves each trap on its own (`fill_trap_until`). The only place where several elements are solved together, as one coupled ODE, is the **dynamic network**: a set of traps and flow paths originally built for **culverts** (pipes under roads, whose rate depends on the water levels at both ends). NBS placements live in the dynamic network for the same reason.
 
 ## 2. The central idea: base SWIM never sees the NBS
 
@@ -38,7 +38,7 @@ As in base SWIM's runoff grid, a cell's **runoff value** is positive surface flo
 The NBS module corrects the baseline, inside the dynamic network solver only:
 
 1. **Throughput.** It computes what the baseline sends through the footprint: `O_0` = rain on the footprint + baseline flow entering it.
-2. **Input.** The top layer receives `O_0`, plus the **draw**: any change the network makes to the flow reaching the footprint. An example is a spilling trap upstream. The draw can be negative if an NBS further upstream is holding water back.
+2. **Input.** The top layer receives `O_0`, plus the **draw**: any change the network makes to the flow entering the footprint. An example is the spill of a full trap upstream that belongs to the network (base SWIM does not route such spills, see below). The draw can be negative if an NBS further upstream is holding water back.
 3. **Integration.** The layer ODE gives the NBS's real output:
    - `O_t`, the overflow returning onto the terrain;
    - the **pipe flow** at each outlet.
@@ -46,20 +46,22 @@ The NBS module corrects the baseline, inside the dynamic network solver only:
 
 **Why only the difference is added.**
 - In the network solver, each trap starts from its **`external_inflow`**: base SWIM's inflow to that trap, read from the baseline. It belongs to a trap, not to the footprint.
-- Because the baseline routed water through the footprint, the downstream trap's `external_inflow` already contains the throughput `O_0` (its share of it).
-- Adding `(O_t − O_0)·share` therefore leaves the trap with what the NBS really releases.
+- Because the baseline routed water through the footprint, the downstream trap's `external_inflow` already contains its share of `O_0`, reduced by infiltration on the way.
+- The difference `(O_t − O_0)·share` travels the same way, so the trap ends up with `O_t·share` reduced on the way instead: what the NBS really releases.
 
-**How a change travels downstream (the per-cell rule).** Everything the network carries along its paths is a change relative to the baseline: an NBS correction, a culvert's flow, or the spill of a full trap that base SWIM is not routing itself. Such a change `d` moves downhill cell by cell, following the **per-cell rule**. At a cell with runoff value `R` it becomes `max(R+d, 0) − max(R, 0)`. In words:
+**How a change travels downstream (the per-cell rule).** Everything the network carries along its paths is a change relative to the baseline: an NBS correction, a culvert's flow, or the spill of a full network trap. (Base SWIM does not route the spill of traps that belong to the network; the network does.) Such a change `d` moves downhill cell by cell, following the **per-cell rule**. At a cell with runoff value `R` it becomes `max(R+d, 0) − max(R, 0)`. In words:
 - added water first fills a cell's unused infiltration capacity;
 - a removal cannot take more than the flow that is there.
 
-This is the same rule base SWIM uses when it routes a trap's spill.
+For added water, this is the rule base SWIM uses when it routes a trap's spill.
 
 ## 3. Workflow, from the user's call to the results
 
 ```julia
-# green roof: soil layer Smin (field capacity) 10 mm, drainage layer Smax 5 mm, then rate
-# coefficients and exponents for soil percolation and drainage overflow, ET parameters (unused)
+# elhadiGreenRoof(Smin_soil, Smin_drain, kINF, kDRAIN, nINF, nDRAIN, EVC, EVS11):
+#   soil layer Smin (field capacity) 10 mm, drainage layer Smax 5 mm, percolation coefficient
+#   kINF and drainage-overflow coefficient kDRAIN, their exponents nINF and nDRAIN, then the
+#   (unused) evapotranspiration parameters
 roof = DynNBSPlacement(elhadiGreenRoof(10, 5, 0.5, 0.5, 1, 1, 0, 1),
                        footprint_cells,                 # Vector{Int}: linear grid indices
                        [CartesianIndex(80, 121)])       # downpipe outlet (one per piped layer)
@@ -71,7 +73,8 @@ s      = states[k]                                       # state at times[k]
 field  = network_watercourses(tstruct, s.filled,
                               Dict{Int,Float64}(),       # trap volumes; only culverts need them
                               s.nbs_layers;              # layer volumes per placement id
-                              nbs = [roof], precipitation = rain, infiltration = infil)
+                              nbs = [roof], precipitation = rain,   # rain rate in effect at times[k]
+                              infiltration = infil)
 ```
 
 ### Step 1: `fill_sequence` (entry point)
@@ -88,11 +91,12 @@ Before anything else, infiltration is set to zero on every footprint, because th
    3. The network is split into independent **components**. Each NBS ends up in one component with everything connected to it: the paths leaving its exits and outlets, the paths crossing its inflow cells, and the traps under its ponds. That way all the water reaching it is computed in the same ODE.
 3. **Run the event loop.** This is base SWIM's loop: find the next trap that fills or empties, update the spill graph and rates, and record a `SpillEvent`.
    - A network trap's next event is found by integrating its component's ODE ahead.
-   - When an event concerns a component (one of its traps changed status, or the baseline inflow to one of its traps changed), the component is **touched**:
-     1. its ODE is advanced to the event time;
-     2. it is updated: it may gain traps, lose traps, or merge with another component;
-     3. it is rebuilt with rates from the current baseline;
-     4. its next event is predicted again.
+   - When an event concerns a component (one of its traps changed status, or the baseline inflow to one of its traps changed), the network is **touched**. For all components, not only the affected one:
+     1. their ODEs are advanced to the event time;
+     2. the affected component is updated: it may gain traps, lose traps, or merge with another component;
+     3. base SWIM's spill graph is told which traps the network now routes;
+     4. every component is rebuilt with rates from the current baseline;
+     5. each one's next event is predicted again.
 4. **End of the period.** Each component is advanced to the end. The layer volumes are stored under each placement's `id`, and the next weather period continues from them.
 
 **What `seq` contains.** It holds the trap events and volumes, including those of network traps. It does not hold the NBS layer volumes.
@@ -105,7 +109,7 @@ These replay only the dynamic network through `seq` and sample it at the request
 
 This builds the flow-intensity field for one instant, which is what the web viewer of SUrbArea (an application built on SWIM) draws.
 1. Start from the baseline `watercourses` field.
-2. Apply each culvert's flow and each NBS's correction, with the same `O_0`, shares and per-cell rule as the solver.
+2. Apply each culvert's flow and each NBS's correction, with the same functions and per-cell rule as the solver. One difference: this baseline field also routes the spills of full network traps, so an NBS's `O_0` here already includes what the solver receives as draw from them.
 3. Mark footprint cells `NaN`: surface flow is undefined there, since the layers hold the water.
 
 `interpolate_timeseries(...; nbs = ...)` paints the footprints as their own class on the trap/river map.
@@ -124,7 +128,7 @@ layer volumes ──► O_t and pipe flow ──► (O_t − O_0)·share at exit
 
 The NBS output depends only on what the layers hold. So the solver computes it before the routing pass, and the draw collected during the pass only affects how fast the layers fill. Nothing is circular.
 
-**Events.** NBS layers never end an integration on their own. Only traps do:
+**Events.** Apart from the stop when everything has settled (a steady state), only traps end an integration:
 - `:fill`: a trap becomes full;
 - `:empty`: a trap drains enough to expose its sub-traps;
 - `:unspill`: a full trap stops spilling.

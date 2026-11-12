@@ -20,6 +20,7 @@ Each term below is defined using only base SWIM vocabulary and terms defined abo
 - **`n_terrain`**: the number of top layers whose overflow goes back onto the terrain.
 - **piped layer**: a layer below the top `n_terrain` that has overflow (`Kout > 0`). The list is `_piped_layers(system, n_terrain)`, top first.
 - **outlet**: the cell where a piped layer's overflow (its pipe flow) re-enters the terrain. `outlets[k]` belongs to the k-th piped layer.
+- **`O_t`**: the total overflow of the top `n_terrain` layers, i.e. what the placement returns onto the terrain. **`E_k`**: the overflow (pipe flow) of the k-th piped layer.
 - **`id`**: the placement's position in the `nbs` vector passed to `fill_sequence`. It labels the placement's stored layer volumes.
 
 **The terrain and the baseline**
@@ -29,44 +30,47 @@ Each term below is defined using only base SWIM vocabulary and terms defined abo
 - **inflow cells**: cells outside a footprint whose downstream cell (in the flow graph) is inside it.
 - **exits**: cells outside a footprint that a footprint cell drains to.
 - **ponds**: trap bottoms inside a footprint.
-- **leaf regions** of a trap: the lowest-level spill regions it contains (the trap itself, if it has no sub-traps).
+- **leaf regions** of a trap: the lowest-level spill regions it contains (just its own spill region, if it has no sub-traps).
 - **`O_0`**: the footprint's baseline throughput: rain on the footprint plus the baseline flow entering it through its inflow cells.
 - **share** (`share_e`): the fraction of `O_0` that leaves the footprint through endpoint `e`, where an endpoint is an exit or a pond.
   - **For an exit:** the baseline flow of the footprint cells that drain straight out to that exit, divided by `O_0`. The exit cell's own runoff is not used, because it also includes water that never crossed the footprint.
   - **For a pond:** the baseline flow arriving at the pond, divided by `O_0`.
-  - The shares sum to 1, and are set equal if `O_0 ≈ 0`.
+  - The shares sum to 1. If there is (almost) no throughput, they are set equal.
 
 **The dynamic network**
 
 - **culvert** (`DynCulvert`): a pipe moving water from an inlet cell to an outlet cell, at a rate set by the water levels at both ends. Like an NBS, it needs the dynamic network because its rate changes continuously with the water levels.
-- **seed**: a cell from which flow is traced. Seeds are each NBS's exits, outlets and ponds, each culvert's two ends, and one cell of each trap named in `fill_sequence`'s `dyn_traps` argument (passed internally as `dyn_coords`).
+- **seed**: a cell from which flow is traced. Seeds are each NBS's exits, outlets and ponds, each culvert's two ends, and one cell (the first footprint cell) of each trap named in `fill_sequence`'s `dyn_traps` argument; these cells are passed internally as `dyn_coords`.
 - **network path** (`DynFlowPath`): a run of cells traced downhill from a seed, or from a full trap's spillpoint, to the next trap (or out of the domain).
-  - **departure point:** where it starts. **head:** its first cell.
+  - **departure point:** the cell the tracing started from (the seed or the spillpoint). The path's cells normally begin with it; they are empty only when every cell was already claimed by an earlier path, so the path just connects its departure point to that path.
+  - **head:** the start of the path, where flow added to the path (e.g. NBS output) enters.
   - A path can end where it joins another path; it is then a **tributary** of that path.
 - **network trap**: a trap reached by such tracing, where tracing continues through full traps along their spill paths. Its volume is an ODE state. The set changes during a run:
   - it grows when a network trap fills and its spill path is traced further;
   - traps drop out when they are no longer reached.
-- **covered trap**: a network trap, or a full sub-trap inside one. Base SWIM leaves covered traps alone: no changetime estimates, and they are not in its spill graph.
-- **component** (a `DynNetwork`): a set of network paths, network traps, culverts and NBS placements that are linked (by flow, culverts or NBS) and so are solved as one ODE. One run has several independent components.
+- **covered trap**: a network trap, or a full sub-trap inside one. Base SWIM leaves covered traps alone: they are not in its spill graph, and their changetime estimates are replaced by the network's prediction (an exact time for the one trap each component predicts to change next, `Inf` for the others).
+- **component** (a `DynNetwork`): a set of network paths, network traps, culverts and NBS placements that are linked (by flow, culverts or NBS) and so are solved as one ODE. One run has several independent components. A component is never split while it runs: if it becomes disconnected (a trap stops spilling) it stays one ODE, which gives the same result.
 - **carrier path**: the network path departing from an exit or an outlet. NBS output enters at its head.
 - **routing pass**: one evaluation of "what arrives where" in a component (`_route_flow`), done at every evaluation of the ODE right-hand side. It visits paths and traps from upstream to downstream.
 - **network flow**: what the routing pass carries along network paths. It is always an *increment on top of the baseline*. Examples are the spill of a full network trap (base SWIM's spill graph excludes covered traps, so this spill exists only here), a culvert's flow, and NBS corrections. It is signed.
-- **per-cell rule**: how network flow `d` changes along a path. At each cell with baseline runoff value `R`, `d ← max(R+d, 0) − max(R, 0)`. Unused infiltration capacity absorbs added water, and a negative `d` can remove at most the flow that is there. This is the same rule base SWIM's `_track_flow!` uses when it routes a trap's spill.
-- **draw**: the network flow reaching a placement's inflow cells during one routing pass. It is signed: negative when an upstream NBS is holding water back.
-- **injection**: what a placement adds to a routing pass: `(O_t − O_0)·share_e` at each exit's carrier path or pond's trap, and each piped layer's pipe flow at its outlet's carrier path. `O_t` is defined in the Model section below.
+- **per-cell rule**: how network flow `d` changes along a path. At each cell with baseline runoff value `R`, `d ← max(R+d, 0) − max(R, 0)`. Unused infiltration capacity absorbs added water, and a negative `d` can remove at most the flow that is there. For added water this is the rule base SWIM's `_track_flow!` uses when it routes a trap's spill.
+- **draw**: the network flow leaving a placement's inflow cells into the footprint (after each inflow cell's own per-cell rule) during one routing pass. It is signed: negative when an upstream NBS is holding water back.
+- **injection**: what a placement adds to a routing pass: `(O_t − O_0)·share_e` at the head of each exit's carrier path or into each pond's trap, and `E_k` at the head of each outlet's carrier path.
 
 **Running the network**
 
-- **context** (`DynNetworkContext`): one component together with its *committed* state (trap volumes and layer volumes at a known time) and its rates (`params`).
-- **touch**: what happens when an event in `fill_sequence` affects a component (one of its traps changed status, or the baseline inflow to one of its network traps' leaf regions changed):
-  - **commit:** integrate the context's ODE up to the event time;
-  - **harvest:** read the committed volumes out;
-  - apply the change (the component may grow, lose traps, or merge with another);
-  - **rebuild:** build a new context with rates taken from the current baseline;
-  - **predict:** integrate a copy ahead to find its next event.
-- **frozen rates**: a context's `params` are built once at its touch and never re-read from the live baseline grids until the next touch.
-- **finalize**: commit every context to the end of a weather period.
+- **driver**: the object that owns all components of one weather period, their committed volumes and `nbs_state`.
 - **`nbs_state`**: the stored layer volumes of every placement, by `id`. It is carried across touches and weather periods.
+- **context** (`DynNetworkContext`): one component together with its *committed* state (trap volumes and layer volumes at a known time) and its rates (`params`).
+- **touch**: what happens when an event in `fill_sequence` affects any component (one of its traps changed status, or the baseline inflow to one of its network traps' leaf regions changed). For **all** components of the driver, not only the affected one:
+  - **commit:** integrate each context's ODE up to the event time;
+  - **harvest:** copy the committed trap volumes into the driver (`vol_by_trapix`) and the layer volumes into `nbs_state`;
+  - apply the change to the affected component (it may grow, lose traps, or merge with another);
+  - **reconcile** base SWIM's spill graph with the new coverage (see S6);
+  - **rebuild:** build a new context for every component, with rates from the current baseline;
+  - **predict:** integrate a copy of each ahead to find its next event.
+- **frozen rates**: a context's `params` are built at a touch and not re-read from the live baseline grids until the next touch.
+- **finalize**: commit every context to the end of a weather period.
 
 ## Model
 
@@ -77,7 +81,7 @@ Each term below is defined using only base SWIM vocabulary and terms defined abo
 **Per placement, at every evaluation of the ODE right-hand side:**
 
 ```
-Q_in  = O_0 + draw                                   input to the top layer
+Q_in  = O_0 + draw  (≥ 0: per inflow cell c it is max(R_c + d_c, 0))   input to the top layer
 dV_l  = in_l − overflow_l − percolation_l            in_1 = Q_in,  in_l = percolation_{l−1}
 O_t   = overflow of the top n_terrain layers         (back onto the terrain)
 E_k   = overflow of the k-th piped layer             (pipe flow, to outlets[k])
@@ -88,7 +92,7 @@ E_k   = overflow of the k-th piped layer             (pipe flow, to outlets[k])
 - **Ponds:** `(O_t − O_0)·share_e` into each pond's trap.
 - **Outlets:** `E_k` at the head of each outlet's carrier path.
 
-Both the injection and the baseline `O_0·share_e` travel the same path under the per-cell rule. The trap downstream of exit `e` therefore receives `O_t·share_e` instead of `O_0·share_e`: what the NBS actually releases.
+The baseline `O_0·share_e` reaches the trap below exit `e` reduced by the infiltration along the way, and is already in that trap's `external_inflow`. The injection travels the same path under the per-cell rule. Together, the trap receives `O_t·share_e` reduced by the same path, in place of `O_0·share_e` reduced by it: what the NBS actually releases.
 
 ## Code map
 
@@ -114,7 +118,7 @@ Each invariant names where it is enforced.
 - **I5.** `id` is stable for a whole `fill_sequence` call. *Set by `_prepare_nbs!`.*
 
 **Terrain link and baseline**
-- **L1.** `O_0 = rain on footprint + Σ_{c ∈ inflow cells} max(R_c, 0)`. This is exact because of I3: everything entering also leaves.
+- **L1.** `O_0 = rain on footprint + Σ_{c ∈ inflow cells} max(R_c, 0)`. In the baseline the footprint has no infiltration (I3), so this is exactly what leaves it through its exits and ponds.
 - **L2.** The shares are ≥ 0 and sum to 1. *Asserted in `_nbs_baseline`: the unnormalised weights must sum to `O_0`.*
 - **L3.** Every exit and outlet is the departure point of a network path (so it has a carrier path), and every pond lies in exactly one network trap. *Asserted in `_build_nbs_plan` and `_pond_trap`.*
 
@@ -125,9 +129,9 @@ Each invariant names where it is enforced.
 - **S1.** The ODE state is laid out as the component's `nt` trap volumes, then each placement's layer volumes in the component's placement order (`net.nbs`), top layer first. *`_build_nbs_plan` records each placement's offset (`state_base`); `_layer_range` reads it; `_nbs_layer_block` builds the state in the same order.*
 - **S2.** Injections depend only on the layer volumes, and draws feed only the layers' rates. So no placement needs to be routed before another, and there is no circular dependency within a routing pass. *Call order in `_routed_inflow`.*
 - **S3.** Per placement, `Σ dV = Q_in − O_t − Σ E_k − bottom percolation`. *Unit test "NBS: layer cascade conserves mass".*
-- **S4.** A layer that is empty, or at or below a threshold, emits nothing through that flux. No rate is clamped ("floored") after the fact. *`compute_outflow`, `_layer_fluxes`.*
+- **S4.** A layer that is empty, or at or below a threshold, emits nothing through that flux. No layer rate is clamped ("floored") after the fact; the only `max(·, 0)` is on `Q_in`, which is ≥ 0 by construction and only absorbs rounding. *`compute_outflow`, `_layer_fluxes`, `dynNetworkRateFunction!`.*
 - **S5.** A commit uses the context's frozen rates. *`DynNetworkContext.params`; fixed in `d0e296a` (review item C14); test "a network commit is not altered by the event that triggers it".*
-- **S6.** Base SWIM's spill graph contains exactly the full traps that are not covered, so a covered trap's spill is routed only by its network, never twice. *`_reconcile_spillgraph!` at every touch that changes coverage. When a weather period's network is built, `fill_sequence` asserts it: only a trap full from t = 0 could break it, and `spillanalysis` leaves no zero-volume traps (`spillregions` merges them into their downstream region).*
+- **S6.** Base SWIM's spill graph contains exactly the full traps that are not covered, so a covered trap's spill is routed only by its network, never twice. *`_reconcile_spillgraph!` at every touch that changes coverage, and asserted in `fill_sequence` each time a weather period's network is built. In the first period, a covered trap could still be in the spill graph only if it was already full when the network was built; that means zero volume, and `spillregions` merges zero-volume traps into their downstream region. In later periods the spill graph comes from the previous period's touches while coverage comes from a fresh build, so the assertion also checks that the two agree.*
 
 **Persistence**
 - **P1.** Layer volumes cross touches and weather periods only through `nbs_state[id]`. They are written at every harvest and finalize, and read at every rebuild.
