@@ -25,6 +25,8 @@ E_k   = overflow of the k-th piped layer                     → its outlet cell
 - Each pond gets the same kind of term directly into its trap.
 - Each piped outlet gets `E_k` at the head of its path.
 
+`share_e` is the fraction of the baseline throughput `O_0` that leaves the footprint through endpoint `e`, where an endpoint is an exit or a pond. For an exit, it is the baseline flow of the footprint cells that drain straight out to that exit cell, divided by `O_0`. The exit cell's own runoff is not used, because it also includes water that never crossed the footprint. For a pond, it is the baseline flow arriving at the pond, divided by `O_0`. The shares sum to 1. If `O_0 ≈ 0`, they are set equal. So the NBS output leaves the footprint in the same proportions as the baseline flow did (`_nbs_baseline`, L2).
+
 Because `external_inflow` already contains `O_0`, a downstream trap ends up receiving `O_t` instead of `O_0`.
 
 **Carrying a flow change downstream.** Any change of flow `d` travels down a path cell by cell, with `d ← max(V+d,0) − max(V,0)` at each cell (`V` = the cell's baseline value). Spare infiltration absorbs added water, and a removal cannot take a cell below zero flow. This is the same rule as base SWIM's `_track_flow!`, and it is used by both the solver and `network_watercourses`.
