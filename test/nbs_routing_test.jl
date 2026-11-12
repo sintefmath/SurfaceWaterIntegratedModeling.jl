@@ -191,3 +191,18 @@ end
     @test_throws Exception setup_network(ts, Int[]; nbs = [mk(fp), mk(fp[1:3])])
     @test setup_network(ts, Int[]; nbs = [mk(fp[1:3]), mk(fp[4:end])]) isa Vector{SWIM.DynNetwork}
 end
+
+@testset "NBS: the inflow cell's own residual applies before capture" begin
+    # What enters the footprint is what LEAVES the inflow cell (that is what O_0 counts there), so
+    # a network flow change is charged by the inflow cell's residual before it is drawn; this keeps
+    # Q_in = O_0 + draw >= 0 without clamping.
+    D  = SWIM._path_delivered!
+    nt = SWIM.DynNetwork()
+    ev = [(2, :nbsin, 1)]                            # inflow cell at position 2
+    nd = [0.0]
+    D([10.0, -3.0, 10.0], 5.0, ev, Float64[], Float64[], nothing, nt, nothing, nd)
+    @test nd[1] ≈ 2.0                                # 3 of the 5 fill the cell's spare capacity
+    nd = [0.0]
+    D([10.0, 2.0, 10.0], -3.0, ev, Float64[], Float64[], nothing, nt, nothing, nd)
+    @test nd[1] ≈ -2.0                               # cannot remove more than the 2 leaving the cell
+end

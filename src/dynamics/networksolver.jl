@@ -415,8 +415,9 @@ Walk one flow path, applying every stop along it, and return what arrives at the
 The signed flow delivered at the end of the path.
 
 At each stop: a tributary adds its signed output; a culvert outlet adds what its inlet drew; a
-culvert inlet draws `min(capacity, available)`; an NBS inlet intercepts everything passing and
-zeroes the carrier.  Cell `k`'s residual is charged on the segment *leaving* `k`.
+culvert inlet draws `min(capacity, available)`; an NBS inflow cell intercepts everything leaving
+it, i.e. after its own residual is charged, which is what enters the footprint (and what `O_0`
+counts there), and zeroes the path.  Cell `k`'s residual is charged on the segment *leaving* `k`.
 
 Writing the drawn amount to `culvert_actual` and delivering exactly that at the outlet is the
 mass-conservation invariant — never the requested capacity.  `nbs_draw` is signed: a negative
@@ -436,9 +437,11 @@ function _path_delivered!(path_runoff, head_flow, events,
             a = min(_culvert_flow(cvplan, net, idx, trap_level), max(current, 0.0))
             culvert_actual[idx] = a                       # drawn == delivered
             current -= a
-        else                                              # :nbsin — intercept ALL passing flow,
-            nbs_draw[idx] += current                      # signed: an upstream NBS storing shows up
-            current = 0.0                                 # as a deficit in this NBS's live input Q_in
+        else                                              # :nbsin — intercept ALL flow leaving the
+            # inflow cell (charged by its own residual first, as O_0 counts it); signed: an
+            # upstream NBS storing shows up as a deficit in this NBS's input Q_in
+            nbs_draw[idx] += _attenuate_range(path_runoff, pos, pos, current)
+            current = 0.0
         end
         lo = pos
     end
@@ -958,8 +961,8 @@ function dynNetworkRateFunction!(dV, V, p::DynNetworkRateParams, t = 0.0)
         V[i] <= 0.0 && dV[i] < 0.0 && (dV[i] = 0.0)
     end
 
-    # NBS layers, fed at the top by the live input Q_in = O_0_total + the :nbsin draws.  Q_in >= 0
-    # analytically (attenuation caps a deficit at the flow present); max() only absorbs rounding.
+    # NBS layers, fed at the top by Q_in = O_0_total + the :nbsin draws.  Per inflow cell c the two
+    # add up to max(R_c + d_c, 0), so Q_in >= 0 exactly; max() only absorbs rounding.
     if p.nbsplan !== nothing
         for (k, el) in enumerate(p.nbsplan.elems)
             r = _layer_range(el, nt)
