@@ -18,3 +18,13 @@ _two_pit_terrain() = (z = [10.0 + 0.5j + 0.3i for i in 1:12, j in 1:15];
     # stretching the cells in one direction changes which way the slope is steepest
     @test spillfield(z; lengths = (12.0, 150.0))[1] != dir
 end
+
+@testset "spillanalysis: integer DEM" begin
+    z = [100 + 5j + 3i for i in 1:12, j in 1:15]; z[4, 5] -= 30; z[8, 10] -= 25
+    ts = spillanalysis(z)
+    ts_f = spillanalysis(Float64.(z))
+    @test ts isa TrapStructure{Float64}
+    @test ts.regions == ts_f.regions
+    @test ts.trapvolumes == ts_f.trapvolumes
+    @test spillfield(z)[1] == spillfield(Float64.(z))[1]
+end

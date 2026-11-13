@@ -69,6 +69,7 @@ function spillfield(grid::Matrix{<:Real};
                     domain::Union{Domain2D, Nothing}=nothing,
                     tiling::Union{Tuple{Int, Int}, Nothing}=nothing)
 
+    grid = float(grid) # NaN/Inf markers are used below, so an integer DEM is converted
     if domain == nothing
         domain = Domain2D((1:x for x in size(grid))...)
     end

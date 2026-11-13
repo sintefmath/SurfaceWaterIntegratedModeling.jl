@@ -70,8 +70,9 @@ function spillanalysis(grid::Matrix{<:Real};
     verbose && println("Entering spillfield")
 
     # a copy of the grid will be returned by the TrapStructure, and there may be
-    # modifications to it if waterbodies are provided
-    gridcpy = copy(grid)
+    # modifications to it if waterbodies are provided.  Heights are made floating-point, as
+    # the analysis needs NaN/Inf markers and fractional volumes (an integer DEM is accepted)
+    gridcpy = float.(grid)
 
     # ensure `sinks` is a vector of CartesianIndex
     if typeof(sinks) <: Matrix
@@ -145,7 +146,7 @@ function spillanalysis(grid::Matrix{<:Real};
 
     wbody_cells = isnothing(waterbodies) ? Set{CartesianIndex{2}}() : Set(findall(waterbodies))
 
-    return TrapStructure{eltype(grid)}(gridcpy,
+    return TrapStructure{eltype(gridcpy)}(gridcpy,
                                        flowgraph,
                                        trap_bottoms,
                                        regions,
