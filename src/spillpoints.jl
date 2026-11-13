@@ -61,8 +61,7 @@ region 'j'.
                      considered
 - `tiling::Union{Tuple{Int, Int}, Nothing}=nothing`: 
         tuple specifying number of 'tiles' to subdivide surface in for parallel
-        processing.  Default is (1,1), which means the whole surface is treated
-        as a single tile (no parallel processing).
+        processing.  Not fully implemented yet: anything but `nothing` raises an error.
 - `cut_edges::Dict{CartesianIndex{2}, Vector{CartesianIndex{2}}}=Dict{CartesianIndex{2}, Vector{CartesianIndex{2}}}()`:
         dictionary specifying edges that should be cut (i.e., no flow allowed
         across these edges).  Keys are CartesianIndices of grid cells, and values
@@ -76,6 +75,7 @@ function spillpoints(grid::Matrix{<:Real}, spillregions::Matrix{Int};
                      cut_edges::Dict{CartesianIndex{2}, Vector{CartesianIndex{2}}}=
                                 Dict{CartesianIndex{2}, Vector{CartesianIndex{2}}}())
 
+    isnothing(tiling) || _not_implemented_yet("tiling")
     domain = Domain2D(1:size(grid,1), 1:size(grid,2))
     
     if tiling == nothing

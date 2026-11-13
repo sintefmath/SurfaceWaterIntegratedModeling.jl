@@ -28,8 +28,7 @@ exit the domain are assigned negative region numbers.
 - `usediags::Bool=true` : if `true`, diagonal connections between cells will also be considered
 - `tiling::Union{Tuple{Int, Int}, Nothing}=nothing`: 
       tuple specifying number of 'tiles' to subdivide surface in for parallel 
-      processing.  Default is (1,1), which means the whole surface is treated
-      as a single tile (no parallel processing).
+      processing.  Not fully implemented yet: anything but `nothing` raises an error.
 - `grid`: the topography grid or nothing.  If present, it will be used to identify
       traps with zero volume, whose spill region will then be merged with its downstream
       neighbor.
@@ -53,6 +52,7 @@ function spillregions(spillfield::Matrix{Int8};
                       culverts::Vector{Tuple{CartesianIndex{2}, CartesianIndex{2}}}=
                           Vector{Tuple{CartesianIndex{2}, CartesianIndex{2}}}())
     
+    isnothing(tiling) || _not_implemented_yet("tiling")
     regions = similar(spillfield, Int64)
     edges = Set{Tuple{Int, Int}}()
     domain = Domain2D(1:size(spillfield,1), 1:size(spillfield,2))
@@ -142,7 +142,7 @@ See also [`spillregions`](@ref).
 function update_spillregions!(regions::Matrix{Int64}, spillfield::Matrix{Int8},
                               domain::Domain2D;
                               usediags=true, return_region_reindex=false)
-    @assert false "This function needs to be updated to handle cut_edges properly, as well as also updating the flowgraph."
+    _not_implemented_yet("update_spillregions!") # @@@ must also handle cut_edges and update the flowgraph
     
     # expand domain by one gridcell in all direction, since the gridcell closest
     # to the modified area may also have changed spill direction (which depends

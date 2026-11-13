@@ -28,3 +28,18 @@ end
     @test ts.trapvolumes == ts_f.trapvolumes
     @test spillfield(z)[1] == spillfield(Float64.(z))[1]
 end
+
+# domain/tiling belong to a suspended parallelisation effort; until it is finished they must
+# fail with a clear message rather than a BoundsError/MethodError deep inside
+@testset "domain and tiling raise 'not fully implemented yet'" begin
+    z = _two_pit_terrain()
+    dir, = spillfield(z)
+    regions, = spillregions(dir)
+    msg = r"not fully implemented yet"
+    @test_throws msg spillanalysis(z; domain = Domain2D(3:6, 3:7))
+    @test_throws msg spillfield(z; domain = Domain2D(3:6, 3:7))
+    @test_throws msg spillfield(z; tiling = (2, 2))
+    @test_throws msg spillregions(dir; tiling = (2, 2))
+    @test_throws msg spillpoints(z, regions; tiling = (2, 2))
+    @test_throws msg update_spillregions!(regions, dir, Domain2D(3:6, 3:7))
+end

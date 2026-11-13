@@ -1,5 +1,11 @@
 export Domain2D, tiledomain, tiles
 
+# @@@ Restricting the analysis to a subdomain (`domain`) and tiling it for parallel processing
+#     (`tiling`) belong to a suspended parallelisation effort, to be revisited.  Until then the
+#     public options raise this error.
+_not_implemented_yet(option) =
+    error("`$option` is not fully implemented yet (suspended parallelisation work)")
+
 # ----------------------------------------------------------------------------
 """
     struct Domain2D

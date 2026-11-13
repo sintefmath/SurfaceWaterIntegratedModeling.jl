@@ -51,11 +51,10 @@ returned as a second argument.
 - `lengths::Union{Tuple{<:Real, <:Real}, Nothing}=nothing`: 
       tuple expressing the length and width of the grid (used to compute aspect ratios)
 - `domain::Union{Domain2D, Nothing}=nothing`: restrict computation to the specified domain
-                                      of the grid
+      of the grid.  Not fully implemented yet: anything but `nothing` raises an error.
 - `tiling::Union{Tuple{Int, Int}, Nothing}=nothing`: 
       tuple specifying number of 'tiles' to subdivide surface in for parallel
-      processing.  Default is (1,1), which means the whole surface is treated
-      as a single tile (no parallel processing).
+      processing.  Not fully implemented yet: anything but `nothing` raises an error.
 
 See also [`update_spillfield!`](@ref).
 """
@@ -69,6 +68,8 @@ function spillfield(grid::Matrix{<:Real};
                     domain::Union{Domain2D, Nothing}=nothing,
                     tiling::Union{Tuple{Int, Int}, Nothing}=nothing)
 
+    isnothing(domain) || _not_implemented_yet("domain")
+    isnothing(tiling) || _not_implemented_yet("tiling")
     grid = float(grid) # NaN/Inf markers are used below, so an integer DEM is converted
     if domain == nothing
         domain = Domain2D((1:x for x in size(grid))...)

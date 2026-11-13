@@ -37,8 +37,8 @@ documentation for details.
 - `lengths::Union{Tuple{<:Real, <:Real}, Nothing}=nothing`:
       tuple expressing the length and width of the grid (used to compute aspect ratios)
 - `domain::Union{Domain2D, Nothing}=nothing`: 
-      restrict computation to the specified domain of the grid.  @@@ Note that this is not
-      fully supported yet for this function.
+      restrict computation to the specified domain of the grid.  Not fully implemented yet:
+      anything but `nothing` raises an error.
 - `merge_outregions::Bool=false`: if `true`, all "outside" regions will be merged and 
       represented as region -1.   Otherwise, each "outside" region will be represented
       by its own negative integer.
@@ -67,6 +67,7 @@ function spillanalysis(grid::Matrix{<:Real};
                   barriers::Vector{Vector{CartesianIndex{2}}}=
                            Vector{Vector{CartesianIndex{2}}}())
 
+    isnothing(domain) || _not_implemented_yet("domain")
     verbose && println("Entering spillfield")
 
     # a copy of the grid will be returned by the TrapStructure, and there may be
