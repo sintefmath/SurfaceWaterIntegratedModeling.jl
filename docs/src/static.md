@@ -94,7 +94,9 @@ Pages = ["trapvolumes.jl"]
 
 The `Domain2D` struct represent a rectangular subpart of a terrain grid.  It is
 mainly used to specify subsets of a terrain that should be updated or processed
-in parallel.
+in parallel.  Restricting the analysis to a subdomain (`domain`) and tiling it for
+parallel processing (`tiling`) are not fully implemented yet: those options raise an
+error for now.
 
 <!-- No `Private = false` here, unlike the other blocks: `size`/`min`/`max` are public
      `Base` methods on `Domain2D`, but Documenter classifies by export and would drop them. -->

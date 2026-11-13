@@ -128,7 +128,7 @@ layer volumes ──► O_t and pipe flow ──► (O_t − O_0)·share at exit
 
 The NBS output depends only on what the layers hold. So the solver computes it before the routing pass, and the draw collected during the pass only affects how fast the layers fill. Nothing is circular.
 
-**Events.** Apart from the stop when everything has settled (a steady state), only traps end an integration:
+**Events.** Apart from the stop when everything has settled (a steady state, and only when predicting the next event: a commit always integrates up to its time), only traps end an integration:
 - `:fill`: a trap becomes full;
 - `:empty`: a trap drains enough to expose its sub-traps;
 - `:unspill`: a full trap stops spilling.

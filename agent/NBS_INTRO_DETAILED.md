@@ -154,7 +154,7 @@ Each iteration:
 1. **Next change.** `_identify_next_status_change!` picks the earliest trap status change from the estimates. Network traps take part through their predicted times. Covered traps that are not network traps (full sub-traps inside one) never do.
 2. **Base SWIM update.** The changed traps' filled status is set. For traps *not* covered by a network, the spill graph is updated (`update_spillgraph!`), and `_update_flow!` updates the baseline rates. Both are plain base SWIM.
 3. **Touch.** `_touch_affected_networks!`: a component is *touched* if one of its traps changed status, or the baseline inflow to one of its network traps' leaf regions changed. If any is touched, `_touch_networks_driver!` does the following:
-   1. **Commit** every context to the current time (`_commit_network!`, with its frozen rates).
+   1. **Commit** every context to the current time (`_commit_network!`, with its frozen rates). A commit always integrates to that time (`stop_at_steady = false`): it never stops at a steady state, so slow flow is not dropped. Only the event that triggered the touch may fire, at that time; anything earlier is an assertion error (S8).
    2. **Harvest:** trap volumes go into `vol_by_trapix` and layer volumes into `nbs_state` (`_harvest!` → `_store_nbs_state!`).
    3. **Apply the change.** The solver reports each event as `:fill`, `:unspill` or `:empty` (§6), handled by `apply_fill!`, `apply_unfill!` and `apply_empty!` (`network_updating.jl`) respectively. A component can:
       - grow along a newly active spill path;
@@ -164,7 +164,7 @@ Each iteration:
       Merging, and the restructuring `apply_empty!` and `apply_fill!` need when a parent trap absorbs or releases its sub-traps, rebuild the component from its seeds (`_regrow`); placements keep their `link` and `id`. `apply_unfill!` does not split a component that becomes disconnected: it stays one ODE, which gives the same result. A regrow does split it into connected pieces.
    4. **Reconcile the spill graph** (`_reconcile_spillgraph!`). Base SWIM's spill graph must contain exactly the full traps that are not covered. A trap that has just become covered has its spill withdrawn from the baseline, and one that has just left coverage gets it back.
    5. **Rebuild and predict.** Every context is rebuilt, with new frozen rates from the current `rateinfo`, and predicts again.
-4. **Record.** `_collect_amount_updates` gathers the new volumes: those of non-covered traps whose inflow changed (projected at constant rate), those of traps that just changed status (at their capacity), and those of network traps (from the driver). They are stored as incremental updates in a new `SpillEvent`. NBS layer volumes are **not** stored in `SpillEvent`.
+4. **Record.** `_collect_amount_updates` gathers the new volumes: those of non-covered traps whose rates (inflow, Smax or Smin) changed (projected at constant rate, under the rates they had until now), those of traps that just changed status (at their capacity), and those of network traps (from the driver). They are stored as incremental updates in a new `SpillEvent`. NBS layer volumes are **not** stored in `SpillEvent`.
 
 **At the end of the period:**
 - `_settle_noncovered_at_endtime!` brings the non-covered traps to the end time.
@@ -183,19 +183,22 @@ The next period's driver restores the layers from `nbs_state`.
   - `:fill`: a trap reaches capacity;
   - `:empty`: a parent trap drains to the level of its sub-traps;
   - `:unspill`: a full trap's inflow drops below its losses.
-- **Steady state.** The integration also stops when nothing changes any more. The rate of every trap that is not full, and with NBS of every layer, must be below the solver's absolute tolerance (`abstol`), or have changed sign since the start (`_build_steadystate_callback_nbs`). The sign test catches a trap that settles at a level below capacity, where its wetted infiltration jumps back and forth across one step of the terrain, so its rate never becomes small.
+- **Steady state** (only when *predicting*, `stop_at_steady = true`; a commit or a timepoint sample always runs to `tmax`). The integration stops when nothing changes any more:
+  - every trap that is not full has a rate of exactly 0, or its rate has changed sign since the start. The sign test catches a trap that settles at a level below capacity, where its wetted infiltration jumps back and forth across one step of the terrain. A small but nonzero rate does *not* count: the trap is still filling or draining, and its event must be predicted;
+  - every NBS layer has a rate below a relative tolerance (`_NBS_SETTLED_RTOL` × the largest starting rate). A layer approaches its equilibrium exponentially and never reaches a zero rate; a sign change does not count for it, since a layer can drain and then refill.
+  - Known gap: in a culvert or NBS network a trap's rate can cross zero smoothly (a real turn, not a stall) and is then also taken as settled, so a later event can go unpredicted until the next touch.
 
 **One evaluation of the right-hand side** (`dynNetworkRateFunction!(dV, state, p)`):
 
 1. **Route** (`_routed_inflow(state, p)`):
-   1. A trap is *spilling* if its volume is at capacity: it then passes its surplus on (a *full* trap, in `fill_sequence`'s terms, is one that has filled and not yet unspilled). If there are culverts, each trap's water level is computed.
+   1. A trap is *spilling* if it is full in this network, i.e. it has a spill path (a *full* trap, in `fill_sequence`'s terms, is one that has filled and not yet unspilled): it then passes its surplus on. Spilling follows the topology, not the volume: a trap that is filling keeps its own rate through capacity until the `:fill` event ends the solve, so that event is located exactly (S7). If there are culverts, each trap's water level is computed.
    2. **Injections**, from the layer volumes only (S2). `_nbs_injections` gives, per placement:
       - `d = O_t − O_0`;
       - `path_inject[carrier] += d·share` per exit;
       - `trap_inject[trap] += d·share` per pond;
       - `path_inject[carrier] += E_k` per outlet.
    3. **The *routing pass*.** `_route_flow` walks paths and traps from upstream to downstream, so whatever feeds a path or trap has been computed by the time it is reached. Every trap starts from `external_inflow + trap_inject`.
-      - **At a trap:** apply its culverts. If it is spilling, push its surplus into its spill path: inflow minus the infiltration over its whole trap footprint.
+      - **At a trap:** apply its culverts; an empty trap's culverts draw at most what reaches it. If it is spilling, push its surplus into its spill path: inflow minus the infiltration over its whole trap footprint.
       - **At a path:** start from `q_head = (flow pushed into it) + path_inject[p]` at the path's head. `_path_delivered!` then walks the path's stops in order:
         - between stops, the *network flow* `d` changes cell by cell as `d ← max(R+d, 0) − max(R, 0)` (`_attenuate_range`);
         - `:trib` adds the tributary's delivered flow;
