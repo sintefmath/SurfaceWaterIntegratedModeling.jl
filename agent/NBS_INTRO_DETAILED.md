@@ -236,12 +236,13 @@ The result, per time, is `trap_volumes` (network traps) and `nbs_layers` (per `i
 
 ### 7.2 Flow field at a time: `network_watercourses` (`dynamics/network_watercourses.jl`)
 
-1. **Baseline.** Build the baseline `watercourses` field: one copy is modified (`runoff_live`), one is kept untouched (`runoff_orig`).
+1. **Baseline.** Build the baseline `watercourses` field: one copy is modified (`runoff_live`), one is kept untouched (`runoff_orig`). When there are placements, also build the solver's baseline (`runoff_solver`): `watercourses` with only the full traps that no network covers, as in `rateinfo.runoff`.
 2. **Network.** Rebuild the network for the given state with `setup_network`.
 3. **Culverts.** Take culvert flow `q` at the inlet, capped by the flow there, and add it at the outlet.
 4. **NBS.** For each placement:
-   - get `O_0` and the shares from `_nbs_baseline` on `runoff_orig`, so placements do not affect each other's baseline. Unlike the solver's `rateinfo.runoff`, this field also routes full network traps' spills, so `O_0` here already includes what the solver receives from them as draw;
-   - add `(O_t − O_0)·share_e` starting at each exit cell, and `E_k` starting at each outlet cell (as the solver injects at the head of the carrier path);
+   - take the shares from `_nbs_baseline` on `runoff_solver`, so the field splits `O_t` over the exits exactly as the solver does (invariant F1);
+   - take what the footprint delivers to each exit in this field, `w_e`, from `_exit_throughput` on `runoff_orig`, so placements do not affect each other's baseline. Unlike `runoff_solver`, this field routes full network traps' spills, so `w_e` includes what the solver receives from them as draw;
+   - add `O_t·share_e − w_e` starting at each exit cell, and `E_k` starting at each outlet cell (as the solver injects at the head of the carrier path);
    - leave pond shares in their trap. This is a known simplification: if that trap is full, its share should continue along the trap's spill path.
 5. **Carrying changes downstream.** `_propagate_field_delta!` applies the per-cell rule. It passes through full traps along their spill paths, and stops when it reaches a footprint cell (after applying the inflow cell's rule, where the solver's `:nbsin` captures) or when nothing is left.
 6. **Footprints.** Footprint cells are set to `NaN`.

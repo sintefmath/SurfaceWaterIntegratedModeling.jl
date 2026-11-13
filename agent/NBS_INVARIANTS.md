@@ -136,6 +136,9 @@ Each invariant names where it is enforced.
 **Persistence**
 - **P1.** Layer volumes cross touches and weather periods only through `nbs_state[id]`. They are written at every harvest and finalize, and read at every rebuild.
 
+**Flow field (`network_watercourses`)**
+- **F1.** The field splits each placement's terrain outflow `O_t` over its exits with the solver's shares, i.e. from the baseline without covered traps' spills. At each exit it removes exactly what its own field's footprint delivers there (`_exit_throughput` on that field), so the correction never takes away more than the field carries. *Test "network_watercourses: NBS exit split matches the solver".*
+
 ## Known simplifications (marked `# @@@` in code)
 
 - **Cell area.** The footprint area is the cell count, i.e. 1 m² per cell.
@@ -144,15 +147,7 @@ Each invariant names where it is enforced.
 
 ## Open follow-ups (as of 2026-11-12, to be picked up)
 
-1. **Field vs solver: how NBS output is split over exits.**
-   - **The difference.** The two use different baselines:
-     - the solver's (`rateinfo.runoff`) does not route full network traps' spills; those reach an NBS as draw;
-     - `network_watercourses`' field (`watercourses` with all full traps) does route them, through the footprint, so its `O_0'` and shares `share'_e` include them.
-   - **Effect.** Totals agree, since both release `O_t` in total and the per-cell rule composes additively. But the field gives exit `e` `O_t·share'_e` where the solver gives `O_t·share_e`.
-   - **When it matters.** Only when a full network trap spills into a footprint that has several exits, entering it unevenly.
-   - **Proposed fix, field only.** In `network_watercourses`, also build the solver's baseline (`watercourses` with only the full traps that are *not* covered). Take the shares from it, and apply `O_t·share_e − O_0'·share'_e` at each exit, so the field matches the solver exit by exit.
-   - **Alternative.** Use spill-inclusive shares in both. This changes solver results, so it is not preferred.
-   - **To do.** Measure the size of the effect on the SUrbArea synthetic case first.
+1. **Field vs solver: how NBS output is split over exits.** *Fixed 2026-11-13; see F1.* The field's own baseline routes full network traps' spills through the footprint, while the solver's does not (they reach the NBS as draw). The field used to take its shares from its own baseline, so a spill entering a footprint unevenly skewed the field's split away from the solver's. It now takes the solver's shares.
 2. **Pond shares in the field.** See "Known simplifications": the share should continue along a full pond trap's spill path.
 3. **Remaining NBS items from the 2026-11 review.** They are in `agent/reports/perf_memory_review_2026-11.md`, §6.0 (NBS track), and §4 for the details.
    - **C3:** the steady-state stop can end a *commit* early and drop slow flow; the sign test can wrongly settle a layer that drains then refills.
@@ -169,3 +164,4 @@ Each invariant names where it is enforced.
    - `setup.jl`, `run1.jl`, `run2.jl`: the SUrbArea synthetic case, run outside the webapp, with a mass-balance check;
    - `zero_vol.jl`: the zero-volume trap count behind S6.
    - The case's inputs are in `<SUrbArea>/debug/` (`synthetic_dtm*`, `synthetic_userdefined*.geojson`), which is not in git.
+6. **A removal through a full trap in the field (not verified).** `_propagate_field_delta!` skips a full trap's footprint cells and continues from its spill point. That is exact for an added flow `d` (the trap's outflow rises by `d`). For a removal larger than the trap's current outflow, the outflow should drop to 0 (and the trap would stop being full), but the per-cell rule at the first cell past the spill point would also remove that cell's own runoff.

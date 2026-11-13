@@ -111,3 +111,40 @@ end
     westpit = [li[i, j] for i in 1:N for j in 1:5]     # cells downstream (west) of the full pit
     @test sum(abs.(rn[westpit] .- ro[westpit])) > 0.0  # the delivered flow reached past the pit
 end
+
+# ---------------------------------------------------------------------------
+# NBS exit split: the field must split an NBS's outflow over its exits as the solver does.  In the
+# solver's baseline a full network trap does not spill over the terrain (its spill reaches the NBS
+# as draw), so the split ignores where that spill enters.  A west-flowing plane, a footprint with
+# one exit per row, symmetric about its middle row, and a full network trap upstream whose spill
+# enters a single row: the exit flows must stay symmetric.
+# ---------------------------------------------------------------------------
+@testset "network_watercourses: NBS exit split matches the solver" begin
+    N    = 30
+    grid = Float64[j for i in 1:N, j in 1:N]
+    for i in 12:18, j in 3:6; grid[i, j] = 1.0; end
+    grid[15, 26] = 20.0                               # pit T, spilling north-west into row 13
+    ts   = spillanalysis(grid, usediags = true)
+    LI   = LinearIndices(size(grid))
+    T    = ts.regions[15, 26]
+    fp   = [LI[CartesianIndex(i, j)] for i in 12:18 for j in 15:20]
+    pl   = SWIM.DynNBSPlacement(SWIM.puddle(50.0; kOUT = 0.01), fp, CartesianIndex{2}[])
+    prec = 1.0e-3
+
+    seq = fill_sequence(ts, [SWIM.WeatherEvent(0.0, prec)]; nbs = [pl], dyn_traps = [T])
+    tp  = seq[end].timestamp * 1.2
+    allst = all_states_at_timepoints(ts, seq, [tp]; nbs = [pl], dyn_traps = [T], verbose = false)[1]
+    netst = network_states_at_timepoints(ts, seq, [tp]; nbs = [pl], dyn_traps = [T], verbose = false)[1]
+    @test allst.filled[T]                             # T is full and spilling into the footprint
+
+    rn = network_watercourses(ts, allst.filled, netst.trap_volumes, netst.nbs_layers;
+                              nbs = [pl], dyn_traps = [T], precipitation = prec)
+    @test pl.link.exits == [CartesianIndex(i, 14) for i in 12:18]
+    exitflow = [rn[i, 14] for i in 12:18]
+    @test exitflow ≈ reverse(exitflow)                # row 13 gets no more than its mirror row 17
+
+    # the exits carry, besides their own rain, exactly the layers' outflow
+    O_t = SWIM._nbs_terrain_outflow(pl.system, netst.nbs_layers[pl.id], Float64(length(fp)),
+                                    pl.n_terrain)
+    @test sum(exitflow) ≈ O_t + 7 * prec
+end

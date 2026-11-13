@@ -76,9 +76,9 @@ function network_watercourses(tstruct::TrapStructure{<:Real},
     # the network-oblivious baseline field, fully routed by terrain. `runoff_live`
     # accumulates the network corrections; `runoff_orig` keeps the untouched
     # oblivious field. Culvert draws read the *live* flow (what is actually there,
-    # matching the solver's min(capacity, current)); NBS corrections are measured
-    # against the *oblivious* field (matching the solver's precomputed O_0_total),
-    # so a downstream placement is never contaminated by an upstream correction.
+    # matching the solver's min(capacity, current)); what an NBS removes at its exits
+    # is measured on the *oblivious* field, so a downstream placement is never
+    # contaminated by an upstream correction.
     runoff_live, = watercourses(tstruct, full_traps; precipitation = precip, infiltration = infil)
     runoff_orig  = copy(runoff_live)
 
@@ -92,6 +92,16 @@ function network_watercourses(tstruct::TrapStructure{<:Real},
 
     footprint_set  = Set{Int}(vcat([n.footprint for n in nbs]...))
     full_traps_int = findall(full_traps)
+
+    # the solver's baseline, which sets how an NBS splits its outflow over its exits: there,
+    # network-covered full traps do not spill over the terrain (their spill reaches an NBS as draw)
+    runoff_solver = nothing
+    if !isempty(nbs)
+        covered = _covered_of(comps, tstruct)
+        solver_full = [full_traps[t] && !(t in covered) for t in eachindex(full_traps)]
+        runoff_solver, = watercourses(tstruct, solver_full; precipitation = precip,
+                                      infiltration = infil)
+    end
 
     for net in comps
         # --- culverts: draw at the inlet, deliver at the outlet (mass-conserving) ------------
@@ -116,12 +126,15 @@ function network_watercourses(tstruct::TrapStructure{<:Real},
         for nb in net.nbs
             A      = Float64(length(nb.footprint))
             layers = get(nbs_layers, nb.id, zeros(Float64, length(nb.system.layers)))
-            # measured on the untouched oblivious field, so stacked placements stay independent
-            O_0, exit_shares, _ = _nbs_baseline(nb, tstruct, runoff_orig, precip)
-            diff = _nbs_terrain_outflow(nb.system, layers, A, nb.n_terrain) - O_0
-            for (c, sh) in zip(nb.link.exits, exit_shares)
+            # at each exit, replace what this field's footprint delivers there (measured on the
+            # untouched field, so stacked placements stay independent) by the solver's share of
+            # the layers' outflow
+            O_t = _nbs_terrain_outflow(nb.system, layers, A, nb.n_terrain)
+            _, exit_shares, _ = _nbs_baseline(nb, tstruct, runoff_solver, precip)
+            delivered = _exit_throughput(tstruct, nb.footprint, nb.link.exits, runoff_orig)
+            for (c, sh, w) in zip(nb.link.exits, exit_shares, delivered)
                 _propagate_field_delta!(runoff_live, footprint_set, tstruct, full_traps_int,
-                                        LI[c], diff * sh)
+                                        LI[c], O_t * sh - w)
             end
             # @@@ pond shares stay in the trap under the footprint (field undefined there); if
             #     that trap is full they should continue along its spill path

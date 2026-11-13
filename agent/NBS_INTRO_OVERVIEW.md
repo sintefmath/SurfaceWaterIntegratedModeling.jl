@@ -109,7 +109,7 @@ These replay only the dynamic network through `seq` and sample it at the request
 
 This builds the flow-intensity field for one instant, which is what the web viewer of SUrbArea (an application built on SWIM) draws.
 1. Start from the baseline `watercourses` field.
-2. Apply each culvert's flow and each NBS's correction, with the same functions and per-cell rule as the solver. One difference: this baseline field also routes the spills of full network traps, so an NBS's `O_0` here already includes what the solver receives as draw from them.
+2. Apply each culvert's flow and each NBS's correction, with the same functions and per-cell rule as the solver. One difference: this baseline field also routes the spills of full network traps, which the solver receives as draw instead. So at each exit the field removes what its own baseline delivers there and adds the solver's share of the NBS's outflow, with the shares taken from the solver's baseline.
 3. Mark footprint cells `NaN`: surface flow is undefined there, since the layers hold the water.
 
 `interpolate_timeseries(...; nbs = ...)` paints the footprints as their own class on the trap/river map.
