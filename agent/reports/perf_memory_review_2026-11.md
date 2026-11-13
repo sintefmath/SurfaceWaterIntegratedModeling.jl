@@ -453,7 +453,7 @@ Fix these independently of the performance work. Each one needs a regression tes
 - **C8 [V]: `lengths` cannot be used.** *Fixed 2026-11-13 (`085addb`).* `lengths::Union{Tuple{<:Real}, Nothing}` (`spillanalysis.jl:61`, `spillfield.jl:68,296,369`) is a *1-tuple* type, so `(Lx, Ly)` raises a MethodError. Change it to `NTuple{2,<:Real}`.
 - **C9 [V]: integer DEMs crash.** *Fixed 2026-11-13 (`abdcda8`): grids are converted to float.* `_diffgrid` allocates `Array{eltype(grid)}` and then does `target[:] .= NaN` (`spillfield.jl:495-496`). That throws `InexactError` for an `Int` grid, yet `Matrix{<:Real}` is accepted. `TrapStructure{eltype(grid)}` would also fail on Float64 volumes. Convert the input to float in `spillanalysis`, or restrict the signature.
 - **C10 [V]: `_setsamesize!` does nothing** *Fixed 2026-11-13 (`8b53b23`): removed.* (`spillfield.jl:560-564`); it rebinds a local variable. Find the callers and either return the array or delete the function.
-- **C11 [R]: `domain=` and tiling are broken.**
+- **C11 [R]: `domain=` and tiling are broken.** *2026-11-13: the options now raise "not fully implemented yet" (part of a suspended parallelisation effort, to be revisited).*
   - `dir` is sized to the domain but written with global indices (`spillfield.jl:79-80,255`).
   - `tiles()` is annotated `::Vector{Domain2D}` but returns a Matrix (`domain.jl:90-97`).
   - `spillpoints.jl:100` uses an undefined `return_boundaries`.
@@ -461,7 +461,7 @@ Fix these independently of the performance work. Each one needs a regression tes
   - `_process_extended_domain!` calls a function with the wrong number of arguments (`:191`).
   - The tiling tests are commented out.
   - The docs already say domain is "not fully supported". Either fix it or make `domain`/`tiling` raise a clear error.
-- **C12 [R]: traps with no outer boundary.** *Checked 2026-11-13: such a basin gets spill elevation and volume `Inf` (it never fills, consistent with infinitely high clipped cells), but its z/volume table ends in `NaN`, so its level is `NaN` once water is above its highest cell. Open: needs a decision on how to represent that level.* `_identify_new_spillpoint!` returns `Spillpoint()` with elevation `typemax(T)` (`sshierarchy.jl:224-228`), and `trapvolumes` then computes `typemax − z`. Treat such traps as closed basins explicitly.
+- **C12 [R]: traps with no outer boundary.** *Fixed 2026-11-13 (`d1c1ad4`): such a basin keeps spill elevation and volume `Inf` (it never fills, consistent with infinitely high clipped cells); its z/volume table, which ended in `NaN` and so ignored its spare infiltration, now extends one unit above its highest cell with the full footprint area.* `_identify_new_spillpoint!` returns `Spillpoint()` with elevation `typemax(T)` (`sshierarchy.jl:224-228`), and `trapvolumes` then computes `typemax − z`. Treat such traps as closed basins explicitly.
 - **C13 [R]: out-of-domain spill targets dropped silently.** *Fixed 2026-11-13 (`bc00a90`).* `SimpleDiGraph(Edge.((i, downstream_region)))` with `downstream_region ≤ 0` (`sshierarchy.jl:57`) is skipped by Graphs without warning. It works only by accident; filter explicitly.
 
 ---
