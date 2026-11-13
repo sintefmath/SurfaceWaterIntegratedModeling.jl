@@ -163,7 +163,7 @@ Each invariant names where it is enforced.
    - **D2:** a touch recommits and rebuilds every component; only the touched ones need it.
    - **D3:** RHS allocations, and a dense finite-difference Jacobian.
    - C7 and C14 are fixed; D2's per-context params caching is done.
-4. **`Pkg.test()` stops early.** `test/dynamic_membership_test.jl` uses `Random`, which is not a test dependency, and `runtests.jl` stops at the first failing testset. The deprecated `MaskingTests` and the known bay-grid failures then hide everything after them. To fix, add `Random` to `[extras]`/`[targets]` in `Project.toml`, and isolate or retire the known-broken testsets.
+4. **`Pkg.test()` stops early.** `runtests.jl` stops at the first failing testset, so the deprecated `MaskingTests` and the known bay-grid failures hide everything after them. To fix, isolate or retire the known-broken testsets. (The missing `Random` test dependency was added on 2026-11-13.)
    - Meanwhile, run the NBS/dynamics tests with `julia --project=. agent/reports/nbs_debug/run_tests.jl`. It isolates the known-broken testsets.
 5. **Repro material** is in `agent/reports/nbs_debug/` (see its `README.md`):
    - `setup.jl`, `run1.jl`, `run2.jl`: the SUrbArea synthetic case, run outside the webapp, with a mass-balance check;
