@@ -179,6 +179,9 @@ function _fill_sequence_for_weather_event!(seq, sgraph, rateinfo, changetimeest,
                                                  z_vol_tables, cur_time, fill_updates, driver,
                                                  net_covered_set, old_covered, network_touched)
         _apply_updates!(cur_amounts, amount_updates)
+        _assert_subtraps_full_under_water(fill_updates, amount_updates, cur_amounts,
+                                          filled_traps, rateinfo, tstruct, z_vol_tables,
+                                          cur_time, net_covered_set, old_covered)
 
         push!(seq, SpillEvent(cur_time, amount_updates, fill_updates,
                               getinflowupdates(rateinfo), nothing, getrunoffupdates(rateinfo)))
@@ -331,6 +334,35 @@ function _update_affected_amounts(rateinfo, cur_amounts, filled_traps, tstruct,
 end
 
 # ----------------------------------------------------------------------------
+# Invariant: a trap holding water of its own has all its subtraps full.  Checked after an event
+# for the traps it changed: a trap that stopped being full must have an empty parent (projected
+# to `cur_time` under the rates it drained with), and a trap given water must have full
+# subtraps.  Traps network-covered before or after the event are left to their network.
+function _assert_subtraps_full_under_water(fill_updates, amount_updates, cur_amounts,
+                                           filled_traps, rateinfo, tstruct, z_vol_tables,
+                                           cur_time, net_covered_set, old_covered)
+    covered(t) = t in net_covered_set || t in old_covered
+    for u in fill_updates
+        (u.value || covered(u.index)) && continue
+        p = parentof(tstruct, u.index)
+        (isnothing(p) || covered(p)) && continue
+        vol, = fill_trap_until(p, rateinfo, cur_amounts[p], cur_time, tstruct, z_vol_tables,
+                               use_saved = true)
+        @assert(_is_empty(vol, tstruct, p),
+                "trap $(u.index) stopped being full under parent $p, which holds $vol")
+    end
+    for u in amount_updates
+        (covered(u.index) || _is_empty(u.value.amount, tstruct, u.index)) && continue
+        @assert(all_subtraps_filled(tstruct, u.index, filled_traps),
+                "trap $(u.index) holds $(u.value.amount) while a subtrap is not full")
+    end
+end
+
+# Whether `amount` is no more than rounding/solver tolerance of trap `t`'s own capacity.
+_is_empty(amount, tstruct, t) =
+    amount <= 1e-6 * max(1.0, tstruct.trapvolumes[t] - tstruct.subvolumes[t])
+
+# ----------------------------------------------------------------------------
 """
     _apply_updates!(amounts, updates) -> nothing
 
@@ -383,15 +415,14 @@ function _compute_changetime_estimate(trap, cur_amounts, cur_time, rateinfo, fil
             if parent_max_net_inflow > 0
                 return ChangeTimeEstimate(false, Inf, Inf) # parent won't empty to expose subtraps
             else
+                # the parent's volume is as of its last checkpoint, so time from there; an
+                # already-empty parent exposes the trap right away
                 parent_volume = cur_amounts[parent].amount
-                min_time =
-                    (parent_volume > 0.0) ? -parent_volume / parent_min_net_inflow : 0.0
-                max_time =
-                    (parent_volume > 0.0) ? -parent_volume / parent_max_net_inflow : 0.0
-
-                return ChangeTimeEstimate(false,
-                                          cur_time + min_time,
-                                          cur_time + max_time)
+                parent_volume > 0.0 || return ChangeTimeEstimate(false, cur_time, cur_time)
+                starttime = cur_amounts[parent].time
+                drain_time(rate) = rate < 0.0 ? starttime - parent_volume / rate : Inf
+                return ChangeTimeEstimate(false, drain_time(parent_min_net_inflow),
+                                          drain_time(parent_max_net_inflow))
             end
         end
     else
@@ -417,7 +448,8 @@ end
                                   tstruct, net_covered_set = nothing) -> nothing
 
 Refresh the changetime estimate of every trap whose rates (inflow, Smax or Smin) changed in
-`rateinfo`.
+`rateinfo`, and of the full subtraps of each such trap that is not full: those are exposed when
+it has drained, so their estimates are derived from its rates.
 
 Traps in `net_covered_set` are skipped: they are governed by the network prediction, not by
 this constant-rate estimate.  `nothing` (the default) means no networks are active.  Mutates
@@ -433,6 +465,13 @@ function _update_changetime_estimates!(changetimeest, cur_amounts, cur_time,
         changetimeest[trap] =
             _compute_changetime_estimate(trap, cur_amounts, cur_time,
                                          rateinfo, filled_traps, tstruct)
+        filled_traps[trap] && continue
+        for c in subtrapsof(tstruct, trap)
+            (!filled_traps[c] || (net_covered_set !== nothing && c ∈ net_covered_set)) && continue
+            changetimeest[c] =
+                _compute_changetime_estimate(c, cur_amounts, cur_time,
+                                             rateinfo, filled_traps, tstruct)
+        end
     end
 
 end
@@ -654,6 +693,8 @@ function _compute_exact_changetime(trap, changetimes, cur_amounts, rateinfo,
         @assert !isnothing(par) # if we got here, the trap should have a parent
         vol, tstop = fill_trap_until(par, rateinfo, cur_amounts[par],
                                      Inf, tstruct, z_vol_tables, use_saved=false)
+        @assert(isnothing(tstop) || _is_empty(vol, tstruct, par),
+                "parent $par of submerged trap $trap fills up instead of draining")
     else
         # This trap is not yet filled.  The trap is however expected to be filling up.
         @assert changetimes[trap].filling

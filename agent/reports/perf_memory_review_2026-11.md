@@ -382,7 +382,7 @@ Fix these independently of the performance work. Each one needs a regression tes
 
 ### Dynamic path
 
-- **C1 [V]: wrong time origin in the submerged-child changetime.**
+- **C1 [V]: wrong time origin in the submerged-child changetime.** *Fixed 2026-11-13, with C2: the estimate is timed from the parent's checkpoint; an already-empty parent exposes the trap at once.*
   - `_compute_changetime_estimate`, `fill_sequence.jl:383-391`, computes:
     ```julia
     parent_volume = cur_amounts[parent].amount
@@ -391,7 +391,7 @@ Fix these independently of the performance work. Each one needs a regression tes
     `parent_volume` was recorded at `cur_amounts[parent].time`, which can be earlier than `cur_time`. The unfilled branch at `:399-405` correctly uses `starttime = cur_amounts[trap].time`. The children re-estimate at `:584` passes `earliest_changetime` and hits the same issue.
   - **Effect:** the lower bound can come out too late. Branch-and-bound then drops the candidate (`:557`), and the event is missed or misordered.
   - **Fix:** use `cur_amounts[parent].time` as the origin, or project the parent's volume to `cur_time` first. Compare with the earlier stale-time fix (memory `staletime-bug-fix.md`), which addressed the same pattern elsewhere.
-- **C2 [R]: rate-only changes are not followed up.** *Partly fixed in `b2bc8d7` (2026-11-13): estimate refresh and amount checkpoints now cover every trap whose inflow, Smax or Smin changed (`_rate_updated_traps`), with a test in `test/fill_sequence_rates_test.jl`. Still open: the submerged children of a parent whose rates changed (last two bullets below; same code as C1).*
+- **C2 [R]: rate-only changes are not followed up.** *Fixed 2026-11-13. `b2bc8d7`: estimate refresh and amount checkpoints cover every trap whose inflow, Smax or Smin changed (`_rate_updated_traps`). Follow-up commit: a refreshed trap that is not full also refreshes its full subtraps, whose exposure time is derived from it. Tests in `test/fill_sequence_rates_test.jl`; the invariant "a trap holding water of its own has all its subtraps full" is now asserted per event (`_assert_subtraps_full_under_water`).*
   - `_track_flow!` updates Smax/Smin for all `supertraps_of[reg]`, but sets inflow only if the flow reaches a trap bottom (`flow.jl:188-190`).
   - When infiltration absorbs the flow en route, the trap's rates change but `_update_changetime_estimates!` (keyed on inflow updates only, `:426`) doesn't refresh its estimate.
   - Cached exact estimates (`min==max`, `:638`) are returned unchanged.

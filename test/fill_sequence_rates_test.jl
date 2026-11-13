@@ -29,3 +29,48 @@ using Test, SurfaceWaterIntegratedModeling
     @test any(k -> filled_at(seq, k)[X], eachindex(seq))
     @test fill_time(seq) ≈ fill_time(ref)
 end
+
+# True iff no trap holds water of its own (amount > 0) while one of its subtraps is not full, at
+# any event of `seq`.
+function _subtraps_full_under_water(ts, seq)
+    for k in eachindex(seq)
+        filled, amounts = filled_at(seq, k), SurfaceWaterIntegratedModeling.amount_at(seq, k)
+        for t in 1:numtraps(ts)
+            amounts[t].amount > 0.0 &&
+                !all(filled[c] for c in SurfaceWaterIntegratedModeling.subtrapsof(ts, t)) &&
+                return false
+        end
+    end
+    return true
+end
+
+# A full subtrap under a draining parent is exposed when the parent has drained; that time is
+# derived from the parent's rates but stored on the subtrap.  When the parent's rates change, its
+# subtraps' estimates must change with them.
+@testset "fill_sequence: a parent's rate change reaches its submerged subtraps" begin
+    # channel along row 3: U (bottom j=2:3) spills into A (j=7); A and B (j=9) are the subtraps of P
+    prof = [30.0, 0.0, 0.0, 9.5, 7.0, 5.0, 1.0, 3.0, 1.0, 5.0, 6.0, 0.5, 0.0]
+    z = [10.0 + 0.1j + 0.01i for i in 1:5, j in 1:length(prof)]  # sloped rim, no flats
+    z[3, :] = prof
+    z[1, :] .+= 10; z[end, :] .+= 10; z[:, 1] .= 30; z[:, end] .= 0.0
+    ts = spillanalysis(z)
+    @test numtraps(ts) == 4
+    U, A, B, P = 1, 2, 3, 4
+    @test SurfaceWaterIntegratedModeling.subtrapsof(ts, P) == [A, B]
+
+    infil = zeros(size(z))
+    infil[3, 7] = 3.0; infil[3, 9] = 2.0; infil[3, 6] = 1.0; infil[3, 10] = 1.0
+    # heavy rain fills A and B and part of P; then light rain lets P drain, until U fills and
+    # its spill (through A) makes P fill instead
+    rain2 = fill(0.1, size(z)); rain2[:, 1:4] .= 0.4
+    w = [WeatherEvent(0.0, 1.0), WeatherEvent(0.5, rain2)]
+    seq = fill_sequence(ts, w; infiltration = infil)
+    @test _subtraps_full_under_water(ts, seq)
+
+    # reference: a new weather period when U fills, which rebuilds all estimates from scratch
+    tU = seq[findfirst(k -> filled_at(seq, k)[U], eachindex(seq))].timestamp
+    ref = fill_sequence(ts, [w; WeatherEvent(tU, rain2)]; infiltration = infil)
+    fill_time(s, t) = s[findfirst(k -> filled_at(s, k)[t], eachindex(s))].timestamp
+    @test fill_time(seq, P) ≈ fill_time(ref, P)
+    @test all(filled_at(seq, length(seq))) && all(filled_at(ref, length(ref)))
+end
