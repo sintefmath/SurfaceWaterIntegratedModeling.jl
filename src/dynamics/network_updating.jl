@@ -190,7 +190,8 @@ The survivor is `Q` followed by `P` from the junction down, kept in `Q`'s slot s
 continuation — `Q`'s head trap already spills into `q`, and `P`'s head trap was cleared before
 the re-root, so no `spill_path` redirect is needed and `P`'s slot is tombstoned.  `P`'s dead
 head stub (cells `1:j-1`) is dropped, the target trap stays fed (`in_count` unchanged), and
-injections all sit at positions `>= j`, so none is lost.  Mutates `net`.
+injections and the other merges all sit at positions `>= j` (`j` is the uppermost merge), so
+none is lost.  Mutates `net`.
 
 !!! note
     @@@ a culvert *inlet* in the dropped stub (position < j) is dropped with it.
@@ -202,7 +203,8 @@ function _promote_tributary!(net::DynNetwork, path_id::Int, j::Int, q::Int)
     ci = vcat(Q.culvert_inlets,  [(c, reb(p)) for (c, p) in P.culvert_inlets  if p >= j])
     co = vcat(Q.culvert_outlets, [(c, reb(p)) for (c, p) in P.culvert_outlets if p >= j])
     ni = vcat(Q.nbs_inlets,      [(n, reb(p)) for (n, p) in P.nbs_inlets      if p >= j])
-    mg = vcat(Q.merges,          [(m, reb(p)) for (m, p) in P.merges          if p != j])
+    # every other tributary stays, including any joining at the same junction cell as `Q`
+    mg = vcat(Q.merges,          [(m, reb(p)) for (m, p) in P.merges          if m != q])
     net.flow_paths[q] = DynFlowPath(vcat(Q.cells, P.cells[j:end]),
         Q.departure_point, P.target_trap, ci, co, ni, mg)
     _tombstone_path!(net, path_id)

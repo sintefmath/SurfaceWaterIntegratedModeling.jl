@@ -168,3 +168,23 @@ end
     @test DM._locate_trap(comps, P) === nothing
     @test partition(comps) == partition(_mini_build(cur))       # matches a fresh build
 end
+
+# ---------------------------------------------------------------------------
+# Re-rooting promotes the uppermost tributary; another tributary joining at the same cell must
+# stay attached to the survivor, or its flow is lost (review item C5).
+@testset "re-root keeps a co-located tributary" begin
+    # path 1 (cells (5,5),(6,6)) feeds trap 202; tributaries 2 and 5 both join it at cell 2
+    p = [fp([ci(5,5), ci(6,6)], ci(5,5), 2; mg = [(2,2), (5,2)]), fp([ci(9,9)], ci(9,9), 0),
+         fp([ci(1,1)], ci(1,1), 1), fp([ci(8,8)], ci(8,8), 3), fp([ci(7,7)], ci(7,7), 0)]
+    t = [DynTrap(201,1,Int[],Int[]), DynTrap(202,0,Int[],Int[]), DynTrap(203,2,Int[],Int[]),
+         DynTrap(204,5,Int[],Int[])]
+    net = DynNetwork(p, t, DynCulvert[])
+    DM.init_in_counts!(net)
+    @test detach_spill!(net, 1) == Int[]               # trap 201 unspills; 202 stays fed
+    surv = net.flow_paths[findfirst(q -> q.target_trap > 0 &&
+                                         net.traps[q.target_trap].trap_ix == 202, net.flow_paths)]
+    @test surv.cells == [ci(9,9), ci(6,6)]             # the promoted tributary, then the junction
+    @test length(surv.merges) == 1
+    other = net.flow_paths[surv.merges[1][1]]
+    @test other.departure_point == ci(7,7) && surv.merges[1][2] == 2   # still joins at (6,6)
+end
