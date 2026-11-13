@@ -407,7 +407,7 @@ Fix these independently of the performance work. Each one needs a regression tes
   - The "sign flipped" settled test can accept large `|rate|`, e.g. an NBS lower layer that drains and then refills.
   - **Fix:** in commit mode (finite `tmax`), disable the early return and `cb_ss`, or advance analytically with `state .+= du * remaining`. Use a dedicated, scale-aware rate tolerance.
 - **C4 [R]: commit result ignored.** *Fixed 2026-11-13: `_commit_network!` asserts that only the triggering event fires, at `T_commit` within the solver's relative tolerance. Root cause found on the way: a filling trap counted as spilling at `V >= C`, so fill events landed early (by ~the solver tolerance) and the capacity pin created water at each network fill; spilling now follows topology.* `_commit_network!` returns the solver result, but no caller checks it (`network_driver.jl:214,297`; `network_context.jl:393`). A `:fill` firing before `T_commit` leaves state clamped at an earlier time but labelled `T_commit`. Handle the event, or assert that none occurred.
-- **C5 [P]: re-rooting drops co-located tributaries (mass loss).**
+- **C5 [P]: re-rooting drops co-located tributaries (mass loss).** *Fixed 2026-11-13 (`d70e451`).*
   - `_promote_tributary!` (`network_updating.jl:206`):
     ```julia
     mg = vcat(Q.merges, [(m, reb(p)) for (m, p) in P.merges if p != j])
@@ -415,7 +415,7 @@ Fix these independently of the performance work. Each one needs a regression tes
     This drops *every* tributary merging at junction `j`, not just the promoted `q`. Two tributaries meeting at the same D8 cell is common.
   - **Effect:** the other tributary keeps `target_trap = 0`, so its flow is routed out of the domain.
   - **Fix:** filter on `m != q`, but first check that `Q.merges` doesn't already cover it. Write a test with two tributaries joining at one cell, then a re-root.
-- **C6 [R]: culvert draw not capped by available water (mass creation).**
+- **C6 [R]: culvert draw not capped by available water (mass creation).** *Fixed 2026-11-13: an empty trap's culverts draw at most what reaches it.*
   - `_route_trap_node!` (`networksolver.jl:474-490`) subtracts `q = _culvert_flow(...)` from `trap_inflow[i]` with no cap.
   - The RHS floor (`:1179`) zeroes `dV` at V ≤ 0 while the outlet still receives `q`.
   - It is triggered for parent traps, where `zmin` is raised to the children's spill level (`:82`) but `inlet_invert` is raw terrain, giving a positive head at V=0. It is also triggered by overshoot to V<0.
