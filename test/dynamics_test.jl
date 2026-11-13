@@ -977,10 +977,8 @@ end
     @test res.kind == :none && res.time == 1000.0
     @test s[1] ≈ q * 1000.0
     # and predicting finds the fill, at capacity / q
-    # @@@ rtol 1e-2: the solver's fill-event time is off by ~1e-3 relative here (4e-4 even at
-    #     q = 1), more than its tolerances suggest; to be looked into separately
     res = solveDynNetwork!([0.0], ts, net, dry, [q])
-    @test res.kind == :fill && isapprox(res.time, cap / q; rtol = 1e-2)
+    @test res.kind == :fill && res.time ≈ cap / q
 
     # a trap whose wetted infiltration leaves a small residual rate (q - 3 cells * 0.1) keeps
     # rising at that rate for the whole window

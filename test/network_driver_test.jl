@@ -201,3 +201,22 @@ end
     @test maximum(abs(f0[t] - fD[t]) / f0[t] for t in keys(f0)) < 2e-3   # relative parity
     @test fD[1] > fD[2] && fD[1] > fD[3]                  # the shared trough fills after both feeders
 end
+
+# A commit advances a context to T_commit; every earlier event has been handled by then, so an
+# event firing before T_commit would leave the state at that event while the clock says
+# T_commit.  That must fail loudly (review item C4).
+@testset "network driver: a commit past an unhandled event is an error" begin
+    ts  = _pit_terrain()
+    inp = _driver_inputs(ts)
+    driver = SWIM.build_network_driver(ts, [CartesianIndex(15, 15)], SWIM.DynCulvert[],
+                                       findall(inp.filled), inp.cur, inp.rateinfo,
+                                       inp.infil, inp.zvt, 0.0, Inf)
+    ctx = driver.contexts[1]
+    tf  = ctx.next_event.time                         # the pit fills at tf
+    @test_throws AssertionError SWIM._commit_network!(deepcopy(ctx), ts, 2 * tf)
+    # committing to the event itself is the normal case
+    c = deepcopy(ctx)
+    SWIM._commit_network!(c, ts, tf)
+    @test c.last_solve_time == tf
+    @test c.state[1] ≈ SWIM._own_capacity(ts, ctx.global_ix[1])
+end

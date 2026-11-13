@@ -460,7 +460,7 @@ Route one trap node: apply the culverts touching it, then spill its surplus if i
 - `trap_inflow`: **mutated** at `i` — culvert deliveries added, culvert draws subtracted.
 - `path_flow`: **mutated** at the trap's spill path — a full trap adds its surplus there.
 - `footprint_infil`: whole-footprint loss per trap; a full trap's spill is net of it.
-- `spilling`: whether each trap is at capacity.
+- `spilling`: whether each trap spills (is FULL in this network).
 - `cvplan`, `trap_level`: passed to [`_culvert_flow`](@ref); `nothing` cvplan skips culverts.
 - `culvert_actual`: **mutated** — records what each culvert leaving this trap draws.
 
@@ -505,7 +505,7 @@ solve onto [`DynNetworkRateParams`](@ref) — so the per-step cost here is just 
 # Arguments
 - `net`: the network being routed.
 - `external_inflow`: constant inflow per trap (terrain runoff); seeds the result.
-- `spilling`: whether each trap is at capacity, hence emitting.
+- `spilling`: whether each trap spills (is FULL in this network), hence emitting.
 - `footprint_infil`: whole-footprint loss per trap, deducted from a full trap's spill.
 - `path_runoff`: per-path oblivious residual, the attenuation reference.  Read only.
 - `path_events`: per-path ordered stops ([`_path_event_templates`](@ref)).
@@ -891,8 +891,11 @@ Route the network at a given state — the single point where "what is arriving 
 - `p`: the [`DynNetworkRateParams`](@ref) for this solve.
 
 # Returns
-`(inflow, spilling, nbs_draw)` — total inflow per trap, whether each trap is at capacity (and so
-spilling), and the flow each NBS placement intercepts at its inflow cells.
+`(inflow, spilling, nbs_draw)` — total inflow per trap, whether each trap spills, and the flow
+each NBS placement intercepts at its inflow cells.  A trap spills when it is FULL in this
+network (it has a spill path), not when `V` reaches capacity: a filling trap keeps its own rate
+through capacity until the `:fill` event ends the solve, so the rate has no kink there for the
+event location to fall short of (a stage trying `V > C` must not stop the trap filling).
 
 Shared by the rate function and the `:unspill` condition, so the two cannot disagree about who
 is spilling.  `nbs_draw` is complete only because every path crossing a placement's inflow cells
@@ -901,7 +904,7 @@ is in the placement's component (`_nbs_coupled_nodes`; invariant C1 in NBS_INVAR
 function _routed_inflow(V, p::DynNetworkRateParams)
     geom = p.geom
     nt   = length(geom)
-    spilling = Bool[V[i] >= geom[i].capacity for i in 1:nt]
+    spilling = Bool[p.net.traps[i].spill_path != 0 for i in 1:nt]
     # culverts need each trap's water-surface elevation for the head calc
     trap_level = p.cvplan === nothing ? nothing :
                  Float64[water_level(geom[i], V[i]) for i in 1:nt]
@@ -1089,10 +1092,10 @@ function _build_steadystate_callback(p::DynNetworkRateParams,
                                      evolving::AbstractVector{<:Integer},
                                      du0::AbstractVector{<:Real})
     function condition(u, t, integrator)
-        inflow, spilling = _routed_inflow(u, p)
         for e in evolving
-            spilling[e] && return false   # veto: :fill wins
+            u[e] >= p.geom[e].capacity && return false   # veto: :fill wins
         end
+        inflow, _ = _routed_inflow(u, p)
         for e in evolving
             rate = inflow[e] - wetted_infiltration(p.geom[e], u[e])
             # Match the rate function's physical floor: an empty trap cannot drain

@@ -126,6 +126,10 @@ function _predict_network!(ctx::DynNetworkContext, tstruct, endtime)
     return ctx.next_event
 end
 
+# how far before T_commit (relative to the window) a commit may meet its triggering event: the
+# solver's default reltol
+const _COMMIT_EVENT_RTOL = 1e-4
+
 """
     _commit_network!(ctx, tstruct, T_commit) -> (; time, trap, kind)
 
@@ -134,12 +138,20 @@ Advance `ctx`'s committed state to absolute time `T_commit`, under the frozen `c
 spillgraph/flow update).
 
 Mutates `ctx`: `state` is left at the exact `T_commit` volumes and `last_solve_time` is
-updated.  Returns the solver result, so the caller can act on an event coinciding with
-`T_commit`.
+updated.  Returns the solver result.
+
+Every event before `T_commit` has been handled by the caller, so the advance is event-free: only
+the event that triggered this commit may fire, at `T_commit` itself.  Anything earlier would
+leave `state` at that event while the clock says `T_commit`, so it is an error.  "At `T_commit`"
+allows the solver's relative tolerance on the window: prediction and commit integrate windows
+of different length, so for nonlinear (NBS, culvert) dynamics their event times differ slightly.
 """
 function _commit_network!(ctx::DynNetworkContext, tstruct, T_commit)
-    res = solveDynNetwork!(ctx.state, tstruct, ctx.params;
-                           tmax = T_commit - ctx.last_solve_time, stop_at_steady = false)
+    window = T_commit - ctx.last_solve_time
+    res = solveDynNetwork!(ctx.state, tstruct, ctx.params; tmax = window, stop_at_steady = false)
+    @assert(res.kind == :none || window - res.time <= _COMMIT_EVENT_RTOL * window,
+            "network commit to $T_commit stopped at a $(res.kind) event of trap $(res.trap) " *
+            "at $(ctx.last_solve_time + res.time)")
     ctx.last_solve_time = T_commit
     return res
 end
