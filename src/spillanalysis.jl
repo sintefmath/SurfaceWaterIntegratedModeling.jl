@@ -34,7 +34,7 @@ documentation for details.
       if present, a mask (same size as `grid`) of cells already covered by standing
       water.  Each connected water region is flattened to a uniform height before the
       analysis so it forms a single body rather than spurious sub-traps.
-- `lengths::Union{Tuple{<:Real}, Nothing}=nothing`:
+- `lengths::Union{Tuple{<:Real, <:Real}, Nothing}=nothing`:
       tuple expressing the length and width of the grid (used to compute aspect ratios)
 - `domain::Union{Domain2D, Nothing}=nothing`: 
       restrict computation to the specified domain of the grid.  @@@ Note that this is not
@@ -58,7 +58,7 @@ function spillanalysis(grid::Matrix{<:Real};
                   clip_mask::Union{Matrix{<:Bool}, BitMatrix, Nothing}=nothing,
                   sinks::Union{Vector{CartesianIndex{2}}, Matrix{Bool}}=Vector{CartesianIndex{2}}(),
                   waterbodies::Union{Matrix{<:Bool}, Nothing}=nothing,
-                  lengths::Union{Tuple{<:Real}, Nothing}=nothing,
+                  lengths::Union{Tuple{<:Real, <:Real}, Nothing}=nothing,
                   domain::Union{Domain2D, Nothing}=nothing,
                   merge_outregions::Bool=false, 
                   verbose::Bool=false,

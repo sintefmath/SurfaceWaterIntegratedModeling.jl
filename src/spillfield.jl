@@ -48,7 +48,7 @@ returned as a second argument.
       dictionary mapping grid cells to lists of neighboring cells where flow is blocked
       by barriers. Flow from a cell will be redirected if it would normally go to a
       blocked neighbor.
-- `lengths::Union{Tuple{<:Real}, Nothing}=nothing`: 
+- `lengths::Union{Tuple{<:Real, <:Real}, Nothing}=nothing`: 
       tuple expressing the length and width of the grid (used to compute aspect ratios)
 - `domain::Union{Domain2D, Nothing}=nothing`: restrict computation to the specified domain
                                       of the grid
@@ -65,7 +65,7 @@ function spillfield(grid::Matrix{<:Real};
                     sinks::Vector{CartesianIndex{2}}=Vector{CartesianIndex{2}}(),
                     blocked_edges::Dict{CartesianIndex{2}, Vector{CartesianIndex{2}}}=
                         Dict{CartesianIndex{2}, Vector{CartesianIndex{2}}}(),
-                    lengths::Union{Tuple{<:Real}, Nothing}=nothing,
+                    lengths::Union{Tuple{<:Real, <:Real}, Nothing}=nothing,
                     domain::Union{Domain2D, Nothing}=nothing,
                     tiling::Union{Tuple{Int, Int}, Nothing}=nothing)
 
@@ -145,7 +145,7 @@ the topography grid has presumably changed).
       by barriers. Flow from a cell will be redirected if it would normally go to a
       blocked neighbor.
 - `usediags::Bool=true`: if true, also consider slopes along diagonals
-- `lengths::Union{Tuple{<:Real}, Nothing}=nothing`: 
+- `lengths::Union{Tuple{<:Real, <:Real}, Nothing}=nothing`: 
       tuple expressing the length and width of the grid (used to compute aspect ratios)
 
 See also [`spillfield`](@ref).
@@ -215,7 +215,7 @@ size of the addressed subdomain.)
 - `slope::Array{<:Real}`: output slope matrix (modified in place)
 - `grid::Matrix{<:Real}`: terrain raster grid with height values
 - `usediags::Bool=true`: if true, also consider slopes along diagonals
-- `lengths::Union{Tuple{<:Real}, Nothing}=nothing`: tuple expressing the length and width
+- `lengths::Union{Tuple{<:Real, <:Real}, Nothing}=nothing`: tuple expressing the length and width
       of the grid (used to compute aspect ratios). Defaults to size of grid if not provided.
 - `domain::Union{Domain2D, Nothing}=nothing`: restrict computation to the specified domain
       of the grid. Defaults to entire grid if not provided.
@@ -280,7 +280,7 @@ well as the associated slopes (corresponding to `[slope1; slope2]`)
 - `slope2::Matrix{<:Real}`: matrix with local slopes for second spill field
 - `grid2::Matrix{<:Real}`: topography grid from which `dir2` was computed
 - `usediags::Bool=true`: if true, also consider slopes along diagonals
-- `lengths::Union{Tuple{<:Real}, Nothing}=nothing`: 
+- `lengths::Union{Tuple{<:Real, <:Real}, Nothing}=nothing`: 
       tuple expressing the length and width of the combined grid (used to compute
       aspect ratios)
 
@@ -293,7 +293,7 @@ function vconcat_spillfields(dir1::Matrix{Int8}, # upper grid spillfield info
                              slope2::Matrix{<:Real},
                              grid2::Matrix{<:Real}; # lower grid spillfield info
                              usediags::Bool=true,
-                             lengths::Union{Tuple{<:Real}, Nothing}=nothing)
+                             lengths::Union{Tuple{<:Real, <:Real}, Nothing}=nothing)
 
     # @@@ TODO: Needs to be updated after changes to spillfield interface (reinstated)
     # Check that grids are of compatible sizes
@@ -353,7 +353,7 @@ well as the associated slopes (corresponding to `[slope1, slope2]`)
 - `slope2::Matrix{<:Real}`: matrix with local slopes for second spill field
 - `grid2::Matrix{<:Real}`: topography grid from which `dir2` was computed
 - `usediags::Bool=true`: if true, also consider slopes along diagonals
-- `lengths::Union{Tuple{<:Real}, Nothing}=nothing`: 
+- `lengths::Union{Tuple{<:Real, <:Real}, Nothing}=nothing`: 
       tuple expressing the length and width of the combined grid (used to compute
       aspect ratios)
 
@@ -366,7 +366,7 @@ function hconcat_spillfields(dir1::Matrix{Int8}, # upper grid spillfield info
                              slope2::Matrix{<:Real},
                              grid2::Matrix{<:Real}; # lower grid spillfield info
                              usediags::Bool=true,
-                             lengths::Union{Tuple{<:Real}, Nothing}=nothing)
+                             lengths::Union{Tuple{<:Real, <:Real}, Nothing}=nothing)
 
     # @@@ TODO: Needs to be updated after changes to spillfield interface (reinstated)
 
