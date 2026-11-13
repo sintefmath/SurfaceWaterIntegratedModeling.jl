@@ -237,10 +237,6 @@ function _spillfield!(dir::Matrix{Int8}, slope::Array{<:Real}, # output args
     # physical dimensions (lengths) of each pixel (aspect ratio may matter)
     dx, dy = lengths ./ size(grid);
 
-    # ensure the result grids have the same size as the input grid
-    _setsamesize!(dir, grid);  
-    _setsamesize!(slope, grid);
-    
     # compute the steepest downslopes along cardinal directions
     tmpdir, tmpslope = _find_downslopes(grid, dx, dy, :axes, domain);
 
@@ -554,15 +550,6 @@ end
 function _rangeintersect(r1, r2)
     return max(r1[1], r2[1]) : min(r1[end], r2[end]);
 end
-
-# ----------------------------------------------------------------------------
-# Ensure target grid has same size as modelgrid.  If it is already the case,
-# leave it alone.
-function _setsamesize!(targetgrid, modelgrid)
-    if size(targetgrid) != size(modelgrid)
-       targetgrid = Matrix{eltype(targetgrid)}(undef, size(modelgrid)...)
-    end
-end        
 
 # ----------------------------------------------------------------------------
 # Impose barriers in the spillfield by redirecting flow around them.
