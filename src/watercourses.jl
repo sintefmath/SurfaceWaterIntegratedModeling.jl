@@ -106,8 +106,11 @@ function watercourses(tstruct::TrapStructure{<:Real},
     
     # compute total infiltration
     remaining_infil_capacity = max.(-runoff, 0.0);
-    for tt in topmost_full_traps
-        remaining_infil_capacity[tstruct.footprints[tt]] .= 0.0;
+    for tt in topmost_full_traps                # submerged cells use all their capacity
+        sp = tstruct.spillpoints[tt].elevation
+        for c in tstruct.footprints[tt]
+            tstruct.topography[c] < sp && (remaining_infil_capacity[c] = 0.0)
+        end
     end
     used_infiltration = sum(infiltration - remaining_infil_capacity)
 
@@ -305,13 +308,15 @@ function _compute_trap_output(tstruct::TrapStructure{<:Real},
                              runoff::Matrix{<:Real}, 
                              region_accum::Vector{<:Real})
     # the runoff from a trap is the sum of the runoff entering all its bottommost
-    # subtraps, less the remaining infiltration capacity within the footprint
-    # of the trap (since this function should only be called on filled traps, and
-    # the footprint of the trap is thus submerged).
-
-    output =
-        sum(region_accum[tstruct.lowest_subtraps_for[trap_ix]]) -
-        sum(-min.(0, runoff[tstruct.footprints[trap_ix]]))
+    # subtraps, less the remaining infiltration capacity of the submerged part of its
+    # footprint (this function is only called on filled traps).  Cells at or above the
+    # spill level hold no water and are left out, as in fill_sequence (_ponding_infiltration).
+    sp = tstruct.spillpoints[trap_ix].elevation
+    loss = 0.0
+    for c in tstruct.footprints[trap_ix]
+        tstruct.topography[c] < sp && (loss -= min(runoff[c], 0.0))
+    end
+    output = sum(region_accum[tstruct.lowest_subtraps_for[trap_ix]]) - loss
 
     # there should not be negative flow out of the trap
     return max(output, 0.0), tstruct.spillpoints[trap_ix]

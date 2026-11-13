@@ -125,18 +125,18 @@ Propagate a signed `amount` of flow from trap `node`'s spillpoint downstream ove
 adding it to each cell's runoff until it is exhausted or the flow reaches a trap bottom, a sink,
 or the domain boundary.  Returns the amount still carried on arrival (`0.0` if it ran out).
 
-Each cell absorbs against its remaining infiltration capacity — a negative runoff — so the
-amount decays toward zero and stops once it changes sign.  Removal (a negative `amount`) is the
-mirror image, which is what lets `_update_flow!` retract a spill along the exact cells it filled.
-This is the terrain-side counterpart of the network solver's `_attenuate_range`, which builds on
-the grid this produces.
+Each cell's runoff changes by the amount arriving, and what passes on is
+`max(R + amount, 0) − max(R, 0)` (`R` the cell's runoff before): added flow first fills a cell's
+remaining infiltration capacity (negative runoff), and removed flow takes away at most what the
+cell was passing on.  The same rule in both directions is what makes a removal along the same
+cells exactly undo an earlier addition, as `_update_flow!` relies on when it retracts a spill.
+The network solver's `_attenuate_range` applies the same rule to the grid this produces.
 
 **Mutates `rateinfo`**: the runoff of every cell traversed, the `Smin`/`Smax` of the supertraps
 over the arrival region, and — when the flow lands on a trap bottom — that region's inflow.
 """
 function _track_flow!(rateinfo, node, amount, tstruct)
 
-    initial_sign = sign(amount)
     spoint = tstruct.spillpoints[node]
     
     # first, check that the spillpoint is not directly out of the domain, in which
@@ -150,30 +150,13 @@ function _track_flow!(rateinfo, node, amount, tstruct)
     while cell > 0
         prev_value = getrunoff(rateinfo, cell)
         setrunoff!(rateinfo, cell, prev_value + amount)
-
-        if initial_sign == 1 # (we are adding flow)
-            # In case there was remaining infiltration, deduct this from the amount
-            amount += min(prev_value, 0.0) # gradually reduce towards zero
-        else # (we are subtracting flow
-            amount -= min(prev_value, 0.0) # gradually increase towards zero
-        end
-
-        (sign(amount) != initial_sign) && break # stop when there is no more to
-                                                # propagate/remove
+        amount = max(prev_value + amount, 0.0) - max(prev_value, 0.0)
+        amount == 0.0 && break # nothing left to propagate/remove
         ds = Graphs.outneighbors(tstruct.flowgraph, cell)
         isempty(ds) && break # no downstream cell, stop here (either trap bottom, sink, or 
                              # domain boundary)
         @assert length(ds) == 1
         cell = ds[1]
-        
-        #_is_trap_bottom(cell, tstruct) && break # return if the cell is a trap bottom
-
-        #cell, = SurfaceWaterIntegratedModeling._downstream_cell(tstruct.spillfield, cell)
-        # downstream cell should exist since this is not a trap bottom
-        # @@@ TODO: we might combine this with _is_trap_bottom to avoid double lookup
-        #cell = Graphs.outneighbors(tstruct.flowgraph, cell)[1]
-
-        #_is_sink(cell, tstruct) && break # return if the new cell is a sink
     end
 
     # recompute inflow and footprint infiltration of affected supertraps
@@ -183,23 +166,10 @@ function _track_flow!(rateinfo, node, amount, tstruct)
         _update_Smin_Smax!(rateinfo, tstruct, tstruct.supertraps_of[reg])
     end
 
-    amount = (sign(amount) != initial_sign) ? 0.0 : amount
-
     if reg > 0 && _is_trap_bottom(cell, tstruct)
         setinflow!(rateinfo, reg, getinflow(rateinfo, reg) + amount)
     end
     
-    # # recompute inflow and footprint infiltration of affected supertraps
-    # reg = cell > 0 ? tstruct.regions[cell] : -1
-    # if reg > 0
-    #     _update_Smin_Smax!(rateinfo, tstruct, tstruct.supertraps_of[reg])
-    # end
-
-    # amount = (sign(amount) != initial_sign) ? 0.0 : amount
-
-    # if reg > 0 && _is_trap_bottom(cell, tstruct)
-    #     setinflow!(rateinfo, reg, getinflow(rateinfo, reg) + amount)
-    # end
     return amount
 end
 
