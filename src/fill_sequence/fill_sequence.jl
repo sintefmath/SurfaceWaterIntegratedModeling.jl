@@ -245,7 +245,7 @@ end
                             cur_time, fill_updates, driver, net_covered_set, old_covered,
                             network_touched) -> Vector{IncrementalUpdate{FilledAmount}}
 
-The amount updates for one event, in three parts: constant-rate traps whose inflow changed,
+The amount updates for one event, in three parts: constant-rate traps whose rates changed,
 traps that just flipped fill status (which sit at exactly their own capacity at that instant),
 and — when `network_touched` — the network-owned amounts read from the driver.
 
@@ -257,7 +257,7 @@ function _collect_amount_updates(rateinfo, cur_amounts, filled_traps, tstruct, z
                                  cur_time, fill_updates, driver, net_covered_set, old_covered,
                                  network_touched)
 
-    # amounts of non-network traps whose inflow changed
+    # amounts of non-network traps whose rates (inflow, Smax or Smin) changed
     amount_updates = _update_affected_amounts(rateinfo, cur_amounts, filled_traps, tstruct,
                                               z_vol_tables, cur_time, net_covered_set)
     # a trap sits at its own capacity at the instant its fill-status flips; record it
@@ -308,9 +308,9 @@ end
                              cur_time, net_covered_set = nothing)
         -> Vector{IncrementalUpdate{FilledAmount}}
 
-One amount update per trap whose inflow changed, each projected to `cur_time` under the trap's
-*saved* rates — the rates it was evolving under since the last event, not the newly-updated
-ones.
+One amount update per trap whose rates (inflow, Smax or Smin) changed, each projected to
+`cur_time` under the trap's *saved* rates — the rates it was evolving under since the last event,
+not the newly-updated ones.
 
 Traps in `net_covered_set` are skipped, taking their amount from the network state instead;
 `nothing` (the default) means no networks are active.  Nothing is mutated.
@@ -320,12 +320,12 @@ function _update_affected_amounts(rateinfo, cur_amounts, filled_traps, tstruct,
 
     results = Vector{IncrementalUpdate{FilledAmount}}()
 
-    for iu ∈ getinflowupdates(rateinfo)
+    for trap ∈ _rate_updated_traps(rateinfo)
         # covered traps get their amount from the network state, not this projection
-        net_covered_set !== nothing && iu.index ∈ net_covered_set && continue
-        amount = _compute_exact_fill(rateinfo, cur_amounts, iu.index,
+        net_covered_set !== nothing && trap ∈ net_covered_set && continue
+        amount = _compute_exact_fill(rateinfo, cur_amounts, trap,
                                      filled_traps, tstruct, cur_time, z_vol_tables, true)
-        push!(results, IncrementalUpdate(iu.index, FilledAmount(amount, cur_time)))
+        push!(results, IncrementalUpdate(trap, FilledAmount(amount, cur_time)))
     end
     return results
 end
@@ -416,7 +416,8 @@ end
     _update_changetime_estimates!(changetimeest, cur_amounts, cur_time, rateinfo, filled_traps,
                                   tstruct, net_covered_set = nothing) -> nothing
 
-Refresh the changetime estimate of every trap whose inflow changed in `rateinfo`.
+Refresh the changetime estimate of every trap whose rates (inflow, Smax or Smin) changed in
+`rateinfo`.
 
 Traps in `net_covered_set` are skipped: they are governed by the network prediction, not by
 this constant-rate estimate.  `nothing` (the default) means no networks are active.  Mutates
@@ -426,9 +427,7 @@ function _update_changetime_estimates!(changetimeest, cur_amounts, cur_time,
                                        rateinfo, filled_traps, tstruct,
                                        net_covered_set = nothing)
 
-    inflow_updates = getinflowupdates(rateinfo)
-    for update ∈ inflow_updates
-        trap = update.index
+    for trap ∈ _rate_updated_traps(rateinfo)
         # covered traps are governed by the network prediction, not this estimate — skip them
         net_covered_set !== nothing && trap ∈ net_covered_set && continue
         changetimeest[trap] =

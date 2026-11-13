@@ -10,6 +10,7 @@ include("network_driver_test.jl")      # gate Phase C: build/predict/step/finali
 include("nbs_routing_test.jl")         # NBS router element (agent/NBS_INVARIANTS.md)
 include("network_states_test.jl")      # network_states_at_timepoints: NBS-layer + trap-volume replay
 include("network_watercourses_test.jl")# network_watercourses: network-aware flow-intensity field
+include("fill_sequence_rates_test.jl")  # fill_sequence: refresh on rate-only changes
 
 
 surf1_file = joinpath(artifact"swim_testdata", "data", "small", "mini.txt")

@@ -6,7 +6,7 @@ include(joinpath(TD, "basicTestFuns.jl"))
 include(joinpath(TD, "watercourses_test.jl"))
 files = ["culvert_regions_test.jl", "dynamics_test.jl", "dynamic_membership_test.jl",
          "network_driver_test.jl", "nbs_routing_test.jl", "network_states_test.jl",
-         "network_watercourses_test.jl"]
+         "network_watercourses_test.jl", "fill_sequence_rates_test.jl"]
 fails = String[]
 for f in files
     try

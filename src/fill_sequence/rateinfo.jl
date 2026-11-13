@@ -141,6 +141,7 @@ end
 Set the current Smin value for the trap with index 'ix'.
 """
 function setsmin!(ri::RateInfo, ix, val)
+    val == ri.Smin[ix] && return # unchanged values are not recorded as updates
     if ri.save_active && !haskey(ri.stored_Smin_values, ix)
         ri.stored_Smin_values[ix] = ri.Smin[ix]
     end
@@ -151,6 +152,7 @@ end
 Set the current Smax value for the trap with index 'ix'.
 """
 function setsmax!(ri::RateInfo, ix, val)
+    val == ri.Smax[ix] && return # unchanged values are not recorded as updates
     if ri.save_active && !haskey(ri.stored_Smax_values, ix)
         ri.stored_Smax_values[ix] = ri.Smax[ix]
     end
@@ -225,3 +227,8 @@ function getinflowupdates(ri::RateInfo)
             for k in keys(ri.stored_inflow_values)]
 end
 
+# Indices of the traps whose inflow, Smax or Smin changed since the last savepoint.
+function _rate_updated_traps(ri::RateInfo)
+    return union(keys(ri.stored_inflow_values), keys(ri.stored_Smax_values),
+                 keys(ri.stored_Smin_values))
+end
