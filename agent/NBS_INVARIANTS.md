@@ -150,15 +150,12 @@ Each invariant names where it is enforced.
 1. **Field vs solver: how NBS output is split over exits.** *Fixed 2026-11-13; see F1.* The field's own baseline routes full network traps' spills through the footprint, while the solver's does not (they reach the NBS as draw). The field used to take its shares from its own baseline, so a spill entering a footprint unevenly skewed the field's split away from the solver's. It now takes the solver's shares.
 2. **Pond shares in the field.** See "Known simplifications": the share should continue along a full pond trap's spill path.
 3. **Remaining NBS items from the 2026-11 review.** They are in `agent/reports/perf_memory_review_2026-11.md`, §6.0 (NBS track), and §4 for the details.
-   - **C3:** the steady-state stop can end a *commit* early and drop slow flow; the sign test can wrongly settle a layer that drains then refills.
-   - **C4:** commit results are unchecked.
-   - **C5:** re-rooting drops co-located tributaries (`network_updating.jl`, `_promote_tributary!`, the `p != j` filter).
-   - **C6:** culvert draw from a trap is not capped by the water available.
-   - **D1:** the ODE solve keeps the full trajectory.
+   - C3, C4, C5, C6, C7 and C14 are fixed (2026-11-13; see the report for what each fix did). C4's fix also found and fixed early `:fill` events, which created water at each network fill.
+   - Still open from C3: in a *prediction*, a trap in a culvert/NBS network whose rate crosses zero smoothly is taken as settled, so a later event of that network can go unpredicted until the next touch. Commits are exact.
    - **D2:** a touch recommits and rebuilds every component; only the touched ones need it.
    - **D3:** RHS allocations, and a dense finite-difference Jacobian.
-   - C7 and C14 are fixed; D2's per-context params caching is done.
-4. **`Pkg.test()` stops early.** `runtests.jl` stops at the first failing testset, so the deprecated `MaskingTests` and the known bay-grid failures hide everything after them. To fix, isolate or retire the known-broken testsets. (The missing `Random` test dependency was added on 2026-11-13.)
+   - D1 is done; D2's per-context params caching is done.
+4. **Known-broken testsets.** `Pkg.test()` now runs the whole suite (2026-11-13): `MaskingTests` (deprecated) is wrapped so its failures don't stop the run, and the bay-grid drift (1091 vs 1119 traps) and the `raise_buildings!` API mismatch are `@test_broken`. The bay drift still needs explaining.
    - Meanwhile, run the NBS/dynamics tests with `julia --project=. agent/reports/nbs_debug/run_tests.jl`. It isolates the known-broken testsets.
 5. **Repro material** is in `agent/reports/nbs_debug/` (see its `README.md`):
    - `setup.jl`, `run1.jl`, `run2.jl`: the SUrbArea synthetic case, run outside the webapp, with a mass-balance check;

@@ -420,7 +420,7 @@ Fix these independently of the performance work. Each one needs a regression tes
   - The RHS floor (`:1179`) zeroes `dV` at V ≤ 0 while the outlet still receives `q`.
   - It is triggered for parent traps, where `zmin` is raised to the children's spill level (`:82`) but `inlet_invert` is raw terrain, giving a positive head at V=0. It is also triggered by overshoot to V<0.
   - **Fix:** mirror the path rule `min(capacity, available)` (AGENTS.md "Mass conservation"), and zero the draw at V ≤ 0.
-- **C7 [R]: NBS leaks.**
+- **C7 [R]: NBS leaks.** *Fixed: the layer leaks during the NBS restructure (2026-11-12); the culvert-inlet stub case is impossible and now asserted, and `_update_pathmap!` breaks after truncating (2026-11-13).*
   - `compute_outflow` uses `max(S − Smax, eps())^n` (`nbs_elements.jl:263`), so an empty layer emits `K·eps^n`. That is about 1.5e-8·K for n=0.5.
   - `:1194`: `max(O_0_total + nbs_draw, 0)` discards a negative remainder.
   - `_promote_tributary!` silently drops a culvert inlet in the cut stub (already flagged with `@@@` at `:196`).
