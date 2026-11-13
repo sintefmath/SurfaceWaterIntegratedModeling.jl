@@ -224,6 +224,7 @@ function _update_pathmap!(pathmap, path::Vector{Int}, path_ix)
             # it -> caller makes a zero-length connector (source kept in departure_point).
             splice!(path, ix:lastindex(path))
             isect_path, isect_cell = pathmap[cell], cell
+            break                       # the path now ends here; stop before iterating past it
         end
     end
     # register path in pathmap

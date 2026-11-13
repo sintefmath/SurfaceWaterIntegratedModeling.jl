@@ -193,11 +193,13 @@ head stub (cells `1:j-1`) is dropped, the target trap stays fed (`in_count` unch
 injections and the other merges all sit at positions `>= j` (`j` is the uppermost merge), so
 none is lost.  Mutates `net`.
 
-!!! note
-    @@@ a culvert *inlet* in the dropped stub (position < j) is dropped with it.
+The stub holds no culvert inlet: every inlet is a network seed, whose connector joins the path
+at the inlet's cell, so the uppermost merge `j` is at or above it.  That is asserted.
 """
 function _promote_tributary!(net::DynNetwork, path_id::Int, j::Int, q::Int)
     P, Q = net.flow_paths[path_id], net.flow_paths[q]
+    @assert(all(p >= j for (_, p) in P.culvert_inlets),
+            "re-rooting at position $j would drop a culvert inlet above it")
     lq = length(Q.cells)
     reb(p) = lq + p - j + 1
     ci = vcat(Q.culvert_inlets,  [(c, reb(p)) for (c, p) in P.culvert_inlets  if p >= j])
