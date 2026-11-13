@@ -139,7 +139,7 @@ updated.  Returns the solver result, so the caller can act on an event coincidin
 """
 function _commit_network!(ctx::DynNetworkContext, tstruct, T_commit)
     res = solveDynNetwork!(ctx.state, tstruct, ctx.params;
-                           tmax = T_commit - ctx.last_solve_time)
+                           tmax = T_commit - ctx.last_solve_time, stop_at_steady = false)
     ctx.last_solve_time = T_commit
     return res
 end

@@ -988,9 +988,12 @@ _layer_range(el::NBSElement, nt::Int) = (nt + el.state_base + 1):(nt + el.state_
 #    conditions starting at 0 (full traps, zero initial net inflow) wait for a genuine crossing
 #    rather than firing degenerately.
 #
-# 2. cb_ss (DiscreteCallback): steady state — max|dV/dt| < abstol at an accepted step.  Discrete,
-#    not Continuous: wetted_infiltration is a step function of V, so interpolated mid-step states
-#    would give spurious crossings.  Vetoes when any evolving trap is at V >= C (:fill wins).
+# 2. cb_ss (DiscreteCallback): steady state, checked at accepted steps — every evolving trap at
+#    rate exactly 0 or past a sign change (stalled at a wetted-area step), every NBS layer below a
+#    relative rate tolerance.  Discrete, not Continuous: wetted_infiltration is a step function of
+#    V, so interpolated mid-step states would give spurious crossings.  Vetoes when any evolving
+#    trap is at V >= C (:fill wins).  Only when predicting: a solve that must reach `tmax`
+#    (commit, sampling) never stops early, or the remaining flow would be lost.
 # ============================================================================
 
 """
@@ -1062,21 +1065,21 @@ end
 
 # ----------------------------------------------------------------------------
 """
-    _build_steadystate_callback(p, evolving, abstol, du0) -> DiscreteCallback
+    _build_steadystate_callback(p, evolving, du0) -> DiscreteCallback
 
 Steady-state detector for an NBS-free network.
 
 # Arguments
 - `p`: the [`DynNetworkRateParams`](@ref) for this solve.
 - `evolving`: local indices of the traps to watch.
-- `abstol`: the `|dV/dt|` threshold below which a trap counts as settled.
 - `du0`: each trap's rate at `t = 0`, for the sign-change test.
 
 # Returns
 A `DiscreteCallback` that terminates at the first accepted step where every evolving trap has
-settled — `|dV/dt| < abstol`, or its rate has crossed the sign it started at, meaning a trap
+settled — its rate is exactly 0, or has crossed the sign it started at, meaning a trap
 oscillating across a wetted-infiltration step has reached a sub-capacity equilibrium (the
-multi-trap analogue of `fill_trap_until`'s stagnation stop).
+multi-trap analogue of `fill_trap_until`'s stagnation stop).  A small but nonzero rate is not
+settled: the trap is still filling or draining, however slowly.
 
 Discrete rather than continuous because `wetted_infiltration` is a step function of `V`, so
 interpolated mid-step states would give spurious crossings.  Vetoes while any evolving trap sits
@@ -1084,7 +1087,6 @@ at `V >= C`, letting `:fill` terminate instead.
 """
 function _build_steadystate_callback(p::DynNetworkRateParams,
                                      evolving::AbstractVector{<:Integer},
-                                     abstol::Real,
                                      du0::AbstractVector{<:Real})
     function condition(u, t, integrator)
         inflow, spilling = _routed_inflow(u, p)
@@ -1098,13 +1100,11 @@ function _build_steadystate_callback(p::DynNetworkRateParams,
             # drained to V == 0 settle — its unclamped rate stays negative and the solve
             # marches to t → ∞).
             u[e] <= 0.0 && rate < 0.0 && (rate = 0.0)
-            # Settled if the actual rate is ~0, OR it has crossed its starting sign — a
+            # Settled if the actual rate is 0, OR it has crossed its starting sign — a
             # trap oscillating across a wetted-infiltration step has reached a
             # sub-capacity equilibrium and makes no further net progress (the multi-trap
             # analogue of `fill_trap_until`'s stagnation/sign-change stop).
-            settled = abs(rate) < abstol ||
-                      (du0[e] != 0.0 && signbit(rate) != signbit(du0[e]))
-            settled || return false
+            _trap_settled(rate, du0[e]) || return false
         end
         return true
     end
@@ -1112,24 +1112,26 @@ function _build_steadystate_callback(p::DynNetworkRateParams,
 end
 
 """
-    _build_steadystate_callback_nbs(p, ss_indices, abstol, du0) -> DiscreteCallback
+    _build_steadystate_callback_nbs(p, ss_indices, layer_tol, du0) -> DiscreteCallback
 
 Steady-state detector for a network with NBS.
 
 # Arguments
 - `p`: the [`DynNetworkRateParams`](@ref) for this solve.
 - `ss_indices`: state indices to watch — the evolving traps plus the NBS layer states.
-- `abstol`: the `|dV/dt|` threshold below which an index counts as settled.
-- `du0`: each state's rate at `t = 0`, for the sign-change test.
+- `layer_tol`: the `|dS/dt|` below which an NBS layer counts as settled.
+- `du0`: each state's rate at `t = 0`, for the traps' sign-change test.
 
 # Returns
 A `DiscreteCallback`, as [`_build_steadystate_callback`](@ref) but evaluating the *full* rate
-function: the cheap `_routed_inflow` check cannot express the layer dynamics.  A trap at
-capacity still vetoes, letting `:fill` terminate.
+function: the cheap `_routed_inflow` check cannot express the layer dynamics.  Traps settle as
+there.  A layer approaches its equilibrium exponentially, never reaching a zero rate, so it
+settles below `layer_tol`; a sign change does not settle it, since a layer can drain and then
+refill.  A trap at capacity still vetoes, letting `:fill` terminate.
 """
 function _build_steadystate_callback_nbs(p::DynNetworkRateParams,
                                          ss_indices::AbstractVector{<:Integer},
-                                         abstol::Real,
+                                         layer_tol::Real,
                                          du0::AbstractVector{<:Real})
     nt        = length(p.geom)
     trap_test = Int[i for i in ss_indices if i <= nt]
@@ -1140,15 +1142,20 @@ function _build_steadystate_callback_nbs(p::DynNetworkRateParams,
         end
         dynNetworkRateFunction!(dbuf, u, p, t)
         for i in ss_indices
-            rate    = dbuf[i]
-            settled = abs(rate) < abstol ||
-                      (du0[i] != 0.0 && signbit(rate) != signbit(du0[i]))
+            settled = i <= nt ? _trap_settled(dbuf[i], du0[i]) : abs(dbuf[i]) < layer_tol
             settled || return false
         end
         return true
     end
     return DiscreteCallback(condition, terminate!; save_positions = (false, false))
 end
+
+# A trap's rate is settled at exactly 0, or once it has crossed the sign `rate0` it started at.
+_trap_settled(rate, rate0) = rate == 0.0 || (rate0 != 0.0 && signbit(rate) != signbit(rate0))
+
+# Relative rate tolerance for NBS layers in the steady-state test, scaled by the largest
+# starting rate of the solve (`abstol` is a volume, not a rate).
+const _NBS_SETTLED_RTOL = 1e-6
 
 # ----------------------------------------------------------------------------
 """
@@ -1312,7 +1319,8 @@ end
 """
     solveDynNetwork!(state, tstruct, net, infiltration, inflow;
                      tmax=Inf, runoff=nothing, precipitation=nothing,
-                     abstol=1e-6, reltol=1e-4, zvt=nothing) -> (; time, trap, kind)
+                     abstol=1e-6, reltol=1e-4, stop_at_steady=true, zvt=nothing)
+                     -> (; time, trap, kind)
 
 Evolve the trap volumes of a [`DynNetwork`](@ref) forward until the first topology-changing
 event, steady state, or `tmax`.  `state` is updated in place.
@@ -1337,7 +1345,10 @@ event, steady state, or `tmax`.  `state` is updated in place.
 - `precipitation`: the period's rain rate (scalar or per-cell), needed only when `net` has NBS —
   each placement's throughput is the rain on its footprint plus the flow entering it
 - `zvt`: cached volume↔level tables ([`_compute_z_vol_tables`](@ref))
-- `abstol`, `reltol`: ODE tolerances; `abstol` also sets the steady-state |dV/dt| threshold
+- `abstol`, `reltol`: ODE tolerances
+- `stop_at_steady`: stop early at steady state, returning `time = Inf` (default `true`, for
+  predicting the next event).  Pass `false` when the state at `tmax` is needed (a commit, a
+  timepoint sample): the solve then always runs to `tmax`, so slow flow is not dropped.
 
 # Returns
 `(; time, trap, kind)` (state is in place): `time` the event time (`Inf` = steady state,
@@ -1376,17 +1387,18 @@ function solveDynNetwork!(state::AbstractVector{Float64},
                           precipitation::Union{AbstractMatrix{<:Real},Real,Nothing} = nothing,
                           # 1e-6 m^3 (~mL) / 1e-4: enough for physical accuracy, and ~halves the
                           # step count vs 1e-8 on the culvert worst case (see PARITY_TOL in tests)
-                          abstol = 1e-6, reltol = 1e-4,
+                          abstol = 1e-6, reltol = 1e-4, stop_at_steady = true,
                           zvt = nothing)
     # Returns an (immutable) `DynNetworkRateParams` with all the static data the ODE needs
     p = _build_rate_params(tstruct, net, infiltration, inflow;
                            runoff=runoff, precipitation=precipitation, zvt=zvt)
-    return solveDynNetwork!(state, tstruct, p; tmax=tmax, abstol=abstol, reltol=reltol)
+    return solveDynNetwork!(state, tstruct, p; tmax=tmax, abstol=abstol, reltol=reltol,
+                            stop_at_steady=stop_at_steady)
 end
 
 """
     solveDynNetwork!(state, tstruct, p::DynNetworkRateParams;
-                     tmax=Inf, abstol=1e-6, reltol=1e-4) -> (; time, trap, kind)
+                     tmax=Inf, abstol=1e-6, reltol=1e-4, stop_at_steady=true) -> (; time, trap, kind)
 
 As above, but from prebuilt rate params `p` (see [`_build_rate_params`](@ref)), which already
 hold the network, its inflow and everything read from the runoff and precipitation grids.  A
@@ -1396,7 +1408,7 @@ context's creation even when the live grids change before a commit.
 function solveDynNetwork!(state::AbstractVector{Float64},
                           tstruct::TrapStructure,
                           p::DynNetworkRateParams;
-                          tmax = Inf, abstol = 1e-6, reltol = 1e-4)
+                          tmax = Inf, abstol = 1e-6, reltol = 1e-4, stop_at_steady = true)
     net = p.net
     nt  = length(net.traps)
     @assert length(state) == nt + _nbs_state_count(p) """
@@ -1426,24 +1438,28 @@ function solveDynNetwork!(state::AbstractVector{Float64},
     ss_indices = p.nbsplan === nothing ? evolving :
         vcat(evolving, collect((nt + 1):(nt + p.nbsplan.nlayer_total)))
 
-    # already steady: nothing evolving, or every evolving rate ~0
-    isempty(ss_indices) && return (time = Inf, trap = 0, kind = :none)
-    all(abs(du0[i]) <= abstol for i in ss_indices) &&
+    # nothing evolving: nothing can change
+    isempty(ss_indices) && return (time = stop_at_steady ? Inf : tmax, trap = 0, kind = :none)
+    # already steady (only when predicting; a solve to `tmax` must integrate even slow flow)
+    layer_tol = _NBS_SETTLED_RTOL * maximum(i -> abs(du0[i]), ss_indices)
+    stop_at_steady &&
+        all(i <= nt ? du0[i] == 0.0 : abs(du0[i]) < layer_tol for i in ss_indices) &&
         return (time = Inf, trap = 0, kind = :none)
 
     # cb_topo: topology events (:fill/:empty/:unspill).  cb_ss: steady state — a DiscreteCallback
     # because step-function infil must be checked at accepted steps, not interpolated ones.  A
     # trap-free NBS-only net has no topology events, so cb_topo is skipped.
-    cb_ss = p.nbsplan === nothing ?
-        _build_steadystate_callback(p, evolving, abstol, du0) :
-        _build_steadystate_callback_nbs(p, ss_indices, abstol, du0)
+    cbs = Any[]
     if nt == 0 # no traps
-        event    = DynNetworkEvent()
-        callback = cb_ss
+        event = DynNetworkEvent()
     else
         cb_topo, event = _build_event_callback(p, evolving, V0, nreg)
-        callback = CallbackSet(cb_topo, cb_ss)
+        push!(cbs, cb_topo)
     end
+    stop_at_steady && push!(cbs, p.nbsplan === nothing ?
+        _build_steadystate_callback(p, evolving, du0) :
+        _build_steadystate_callback_nbs(p, ss_indices, layer_tol, du0))
+    callback = CallbackSet(cbs...)
     # finite cap so DiffEq never gets Inf as a tspan endpoint (its internal range(t,Inf,n) rejects it)
     tmax_ode = min(tmax, 1e12)
     # Auto-switching Tsit5/Rodas5P. A NBS layer's overflow k*(S-Smax) is a fast decaying mode

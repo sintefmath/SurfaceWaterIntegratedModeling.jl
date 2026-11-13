@@ -454,7 +454,8 @@ function _sample_network(driver, tstruct, tp::Float64)
     driver === nothing && return (; trap_volumes, nbs_layers)
     for ctx in driver.contexts
         s = copy(ctx.state)
-        solveDynNetwork!(s, tstruct, ctx.params; tmax = tp - ctx.last_solve_time)
+        solveDynNetwork!(s, tstruct, ctx.params; tmax = tp - ctx.last_solve_time,
+                         stop_at_steady = false)
         for (i, g) in enumerate(ctx.global_ix)
             trap_volumes[g] = s[i]
         end

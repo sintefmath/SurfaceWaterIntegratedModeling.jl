@@ -960,3 +960,34 @@ end
     s3 = [0.0]
     @test solveDynNetwork!(s3, ts, net, zeros(size(ts.topography)), [1.0]).kind == :fill
 end
+
+# A slow but nonzero flow must not be dropped: a solve to a fixed time (commit, sampling) runs
+# to that time, and a slow trap still gets its fill predicted (review item C3).
+@testset "solveDynNetwork!: slow flow is integrated, not treated as steady" begin
+    grid  = loadgrid(joinpath(artifact"swim_testdata", "data", "small", "mini.txt"))
+    ts    = spillanalysis(grid, usediags=true)
+    net   = DynNetwork([srcpath(0)], [DynTrap(57, 0)], DynCulvert[])   # one isolated trap
+    dry   = zeros(size(ts.topography))
+    cap   = SWIM._build_trap_geometry(ts, net, dry)[1].capacity
+
+    # inflow below the ODE's abstol (1e-6): a commit over T stores q*T
+    q = 5e-7
+    s = [0.0]
+    res = solveDynNetwork!(s, ts, net, dry, [q]; tmax = 1000.0, stop_at_steady = false)
+    @test res.kind == :none && res.time == 1000.0
+    @test s[1] ≈ q * 1000.0
+    # and predicting finds the fill, at capacity / q
+    # @@@ rtol 1e-2: the solver's fill-event time is off by ~1e-3 relative here (4e-4 even at
+    #     q = 1), more than its tolerances suggest; to be looked into separately
+    res = solveDynNetwork!([0.0], ts, net, dry, [q])
+    @test res.kind == :fill && isapprox(res.time, cap / q; rtol = 1e-2)
+
+    # a trap whose wetted infiltration leaves a small residual rate (q - 3 cells * 0.1) keeps
+    # rising at that rate for the whole window
+    infil = zeros(size(ts.topography)); infil[ts.footprints[57]] .= 0.1
+    r = 5e-7
+    s1, s2 = [0.0], [0.0]
+    solveDynNetwork!(s1, ts, net, infil, [0.3 + r]; tmax = 1e4, stop_at_steady = false)
+    solveDynNetwork!(s2, ts, net, infil, [0.3 + r]; tmax = 2e4, stop_at_steady = false)
+    @test s2[1] - s1[1] ≈ r * 1e4 rtol = 1e-6
+end
