@@ -714,7 +714,7 @@ Per trap, a table mapping trap water volume to water level (z), for fast level l
 
 Returns one `(z, v)` pair per trap of `tstruct`, both ascending and of equal length, so a level
 is read by interpolating `v -> z`.  `z` runs from the trap's bottom to its spillpoint
-elevation, with duplicate levels dropped; a parent trap's bottom is raised to its subtraps'
+elevation (for a closed basin, to one unit above its highest cell), with duplicate levels dropped; a parent trap's bottom is raised to its subtraps'
 spillpoint, so `v` counts only its own volume.  `tstruct` is not mutated.
 """
 function _compute_z_vol_tables(tstruct)
@@ -731,7 +731,10 @@ function _compute_z_vol_tables(tstruct)
             trap_bottom = max.(trap_bottom, tstruct.spillpoints[children[1]].elevation)
         end
         zsorted = sort(trap_bottom)
-        append!(zsorted, tstruct.spillpoints[tix].elevation)
+        # a closed basin (no outer boundary: spill elevation Inf) has no top, so end its table
+        # one unit above its highest cell; the level then extrapolates with the full footprint
+        top = tstruct.spillpoints[tix].elevation
+        append!(zsorted, isinf(top) ? zsorted[end] + 1.0 : top)
         vsorted = (zsorted .* (1:length(zsorted))) .- cumsum(zsorted) # trapvolume
         # drop duplicate z levels, keeping the last (its volume is the correct one)
         keep = fill(true, length(zsorted))

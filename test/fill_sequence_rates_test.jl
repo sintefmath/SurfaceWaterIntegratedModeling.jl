@@ -74,3 +74,23 @@ end
     @test fill_time(seq, P) ≈ fill_time(ref, P)
     @test all(filled_at(seq, length(seq))) && all(filled_at(ref, length(ref)))
 end
+
+# A basin enclosed by clipped cells has no outer boundary: spill elevation and volume are Inf.
+# Once the water stands above its highest cell, every footprint cell is wet and infiltrates.
+@testset "fill_sequence: closed basin above its highest cell" begin
+    z = [10.0 + 0.1j + 0.01i for i in 1:9, j in 1:12]
+    z[5, 5] = 2.0; z[5, 6] = 3.0; z[5, 7] = 1.5        # two pits and a ridge
+    mask = falses(size(z)); mask[3:7, 3:9] .= true; mask[4:6, 4:8] .= false  # ring of buildings
+    ts = spillanalysis(z; clip_mask = mask)
+    @test numtraps(ts) == 3
+    P = 3                                               # the merged, enclosed basin
+    @test isinf(ts.spillpoints[P].elevation) && isinf(ts.trapvolumes[P])
+    @test !any(isnan, SurfaceWaterIntegratedModeling._compute_z_vol_tables(ts)[P][2])
+
+    # rain 1 on the 15 cells; the 10 cells off the middle row infiltrate 1.2, so they hand on
+    # nothing and keep 0.2 of spare capacity each: the basin gains 5 - 10 * 0.2 = 3 when all wet
+    infil = zeros(size(z)); infil[4, 4:8] .= 1.2; infil[6, 4:8] .= 1.2
+    seq = fill_sequence(ts, [WeatherEvent(0.0, 1.0)]; infiltration = infil)
+    st = trap_states_at_timepoints(ts, seq, [40.0, 60.0]; verbose = false)
+    @test (st[2][2][P] - st[1][2][P]) / 20 ≈ 3.0
+end
