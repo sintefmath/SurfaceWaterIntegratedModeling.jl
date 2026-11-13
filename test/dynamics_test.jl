@@ -208,13 +208,14 @@ end
 # *infiltration*, negated into the residual the router charges flow against.  There is no
 # oblivious runoff grid here, so every cell sits at its capacity floor — the same convention
 # `_build_rate_params` applies when `runoff === nothing`.
-_rf(net, ext, spilling, fp_infil, cell_infil; cvplan = nothing, trap_level = nothing) =
+_rf(net, ext, spilling, fp_infil, cell_infil; cvplan = nothing, trap_level = nothing,
+    trap_volume = nothing) =
     first(SWIM._route_flow(net, ext, spilling, fp_infil,
                      [Float64[-c for c in ci] for ci in cell_infil],
                      SWIM._path_event_templates(net),
                      first(SWIM._network_order(net)),
                      SWIM._merge_targets(net),
-                     cvplan, trap_level))       # trap inflows (drop the NBS draws)
+                     cvplan, trap_level; trap_volume = trap_volume))  # trap inflows (drop NBS draws)
 
 @testset "networksolver: flow routing (pure topology)" begin
     T(ix, sp) = DynTrap(ix, sp)
@@ -701,6 +702,23 @@ end
     # without a culvert plan the culvert is ignored entirely
     @test _rf(net, [5.0, 7.0], [false, false], [0.0, 0.0],
                            Vector{Float64}[]) == [5.0, 7.0]
+end
+
+# A culvert cannot draw from an empty trap more than reaches it, whatever the head (a parent's
+# floor is its children's spill level, so it has head at V = 0) - or it would create water at
+# its outlet (review item C6).
+@testset "_route_flow: a culvert draws no more than an empty trap receives" begin
+    inlet, outlet = c(1, 1), c(1, 2)
+    cv  = DynCulvert(inlet, outlet, 0.5, 0.6, 0.5, 1.0, 1.7)
+    net = DynNetwork(DynFlowPath[], [DynTrap(101, 0, [1], Int[]), DynTrap(102, 0, Int[], [1])], [cv])
+    plan = SWIM._build_culvert_plan(net, mock_ts([0.0 0.0]))
+    rf(ext, V) = _rf(net, ext, [false, false], [0.0, 0.0], Vector{Float64}[];
+                     cvplan = plan, trap_level = [3.0, 0.0], trap_volume = V)
+    Q = rf([0.0, 0.0], [1.0, 0.0])[2]                 # a trap holding water drains at capacity
+    @test Q > 0.1
+    @test rf([0.0, 0.0], [0.0, 0.0]) == [0.0, 0.0]    # empty, nothing arriving: no draw
+    inflow = rf([0.1, 0.0], [0.0, 0.0])               # empty, 0.1 arriving: draws just that
+    @test inflow ≈ [0.0, 0.1]
 end
 
 @testset "_route_flow: flow-path culvert endpoint (capped by passing flow)" begin

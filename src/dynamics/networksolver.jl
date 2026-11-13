@@ -463,6 +463,8 @@ Route one trap node: apply the culverts touching it, then spill its surplus if i
 - `spilling`: whether each trap spills (is FULL in this network).
 - `cvplan`, `trap_level`: passed to [`_culvert_flow`](@ref); `nothing` cvplan skips culverts.
 - `culvert_actual`: **mutated** — records what each culvert leaving this trap draws.
+- `trap_volume`: per-trap volume, or `nothing`.  An empty trap's culverts draw at most what
+  reaches it, whatever their head (a parent's floor sits at its children's spill level).
 
 # Returns
 `nothing`; everything lands in the mutated accumulators.
@@ -471,14 +473,17 @@ A full trap emits `max(trap_inflow[i] - footprint_infil[i], 0)`.  If its `spill_
 spills out of the domain, so the surplus simply leaves.
 """
 function _route_trap_node!(i, net, trap_inflow, path_flow, footprint_infil,
-                           spilling, cvplan, trap_level, culvert_actual)
+                           spilling, cvplan, trap_level, culvert_actual, trap_volume = nothing)
     if cvplan !== nothing
         trap = net.traps[i]
         for ci in trap.culvert_outlets                # deliver (source drew earlier)
             trap_inflow[i] += culvert_actual[ci]
         end
+        empty = trap_volume !== nothing && trap_volume[i] <= 0.0
         for ci in trap.culvert_inlets                 # drain (delivered at its outlet)
             q = _culvert_flow(cvplan, net, ci, trap_level)
+            # an empty trap only passes on what reaches it (mass conservation)
+            empty && (q = min(q, max(trap_inflow[i], 0.0)))
             culvert_actual[ci] = q
             trap_inflow[i]    -= q
         end
@@ -495,7 +500,8 @@ end
     _route_flow(net, external_inflow, spilling, footprint_infil, path_runoff,
                 path_events, order, merge_target,
                 cvplan = nothing, trap_level = nothing,
-                path_inject = nothing, trap_inject = nothing) -> (trap_inflow, nbs_draw)
+                path_inject = nothing, trap_inject = nothing; trap_volume = nothing)
+                -> (trap_inflow, nbs_draw)
 
 The router: how much water arrives at each trap, given who is spilling right now.
 
@@ -514,6 +520,8 @@ solve onto [`DynNetworkRateParams`](@ref) — so the per-step cost here is just 
 - `trap_level`: per-trap water surface, needed only for culvert heads.
 - `path_inject`, `trap_inject`: NBS output added at path heads / into traps
   ([`_nbs_injections`](@ref)), or `nothing` with no NBS.
+- `trap_volume` (keyword): per-trap volume, so an empty trap's culverts draw no more than
+  reaches it; `nothing` skips that cap.
 
 # Returns
 Total inflow at each trap (`net.traps` order), and the flow each NBS placement intercepts at its
@@ -535,7 +543,8 @@ function _route_flow(net::DynNetwork,
                      cvplan = nothing,
                      trap_level = nothing,
                      path_inject = nothing,
-                     trap_inject = nothing)
+                     trap_inject = nothing;
+                     trap_volume = nothing)
 
     np = length(net.flow_paths)
     nt = length(net.traps)
@@ -565,7 +574,7 @@ function _route_flow(net::DynNetwork,
             end                                      # else: exits the domain
         else                                        # a trap
             _route_trap_node!(node - np, net, trap_inflow, path_flow, footprint_infil,
-                              spilling, cvplan, trap_level, culvert_actual)
+                              spilling, cvplan, trap_level, culvert_actual, trap_volume)
         end
     end
     return trap_inflow, nbs_draw
@@ -914,7 +923,7 @@ function _routed_inflow(V, p::DynNetworkRateParams)
     inflow, nbs_draw = _route_flow(p.net, p.external_inflow, spilling,
                                    p.footprint_infil, p.path_runoff,
                                    p.path_events, p.order, p.merge_target,
-                                   p.cvplan, trap_level, inject...)
+                                   p.cvplan, trap_level, inject...; trap_volume = V)
     return inflow, spilling, nbs_draw
 end
 
