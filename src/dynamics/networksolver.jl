@@ -1455,7 +1455,9 @@ function solveDynNetwork!(state::AbstractVector{Float64},
     sol = solve(ODEProblem(dynNetworkRateFunction!, V0, (0.0, tmax_ode), p),
                 AutoTsit5(Rodas5P(autodiff = AutoFiniteDiff()));
                 callback = callback,
-                abstol = abstol, reltol = reltol)
+                abstol = abstol, reltol = reltol,
+                # only the end point is read: don't keep the trajectory
+                save_everystep = false, save_start = false, dense = false)
 
     state .= sol.u[end]        # write ODE result back in place
 

@@ -844,7 +844,8 @@ function fill_trap_until(trap, rateinfo, cur_amount, endtime, tstruct, z_vol_tab
     # point the internal event-check range(t, Inf, n) overflows.  1e12 is far beyond
     # any physical horizon; if no callback fires within it, the caller sees tstop=nothing.
     dt = min(endtime - cur_amount.time, 1e12)
-    sol = solve(ODEProblem(dvdt, v0, [0, dt]), callback = cb, abstol=1e-6, reltol=1e-4)
+    sol = solve(ODEProblem(dvdt, v0, [0, dt]), callback = cb, abstol=1e-6, reltol=1e-4,
+                save_everystep = false, save_start = false, dense = false) # end point only
 
     return (sol.u[end][1], # amount of water at end of integration
             (condition_reached[1] ∈ [1,2]) ? sol.t[end] : nothing) # integration duration
