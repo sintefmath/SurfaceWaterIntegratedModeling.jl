@@ -54,8 +54,11 @@ function sshierarchy!(
 
     # identify cycles to merge into higher-level traps, keep doing this until
     # there are no more cycles (we have found the highest-level traps)
-    spillgraph = Graphs.SimpleDiGraph(Graphs.Edge.(
-        [(i, spillpoints[i].downstream_region) for i in 1:length(spillpoints)]))
+    # (a trap spilling out of the domain, downstream_region <= 0, has no edge)
+    spillgraph = Graphs.SimpleDiGraph(length(spillpoints))
+    for (i, sp) in enumerate(spillpoints)
+        sp.downstream_region > 0 && Graphs.add_edge!(spillgraph, i, sp.downstream_region)
+    end
 
     lowest_regions = [[r] for r in 1:length(spillpoints)]
 
