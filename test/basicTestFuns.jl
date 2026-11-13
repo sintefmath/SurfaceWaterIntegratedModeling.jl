@@ -271,3 +271,22 @@ function test_sequencing(grid, use_infiltration, seqlength, maxtime; mask=nothin
     return true
 end
 
+# At every event of a fill sequence, its runoff grid must equal the flow field `watercourses`
+# computes for the same set of full traps.  Patchy infiltration, so streams cross both
+# infiltrating and runoff-producing cells.
+function test_sequence_runoff_matches_watercourses(grid)
+
+    tstruct = spillanalysis(grid)
+    infiltration = [((i + 3j) % 4 == 0) ? 4.0 : 0.0 for i in 1:size(grid, 1), j in 1:size(grid, 2)]
+    seq = fill_sequence(tstruct, [WeatherEvent(0.0, 1.0)], infiltration=infiltration,
+                        verbose=false)
+
+    for ix in eachindex(seq)
+        R_wc, = watercourses(tstruct, filled_at(seq, ix); precipitation=1.0,
+                             infiltration=infiltration)
+        # compare flow only: negative values are remaining infiltration capacity
+        isapprox(max.(runoff_at(seq, ix), 0.0), max.(R_wc, 0.0), atol=1e-9) || return false
+    end
+    return true
+end
+

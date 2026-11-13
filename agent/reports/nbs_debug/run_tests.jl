@@ -19,7 +19,7 @@ end
 lines = readlines(joinpath(TD, "runtests.jl"))
 grids = join(lines[15:24], "\n")
 include_string(Main, grids, joinpath(TD, "runtests.jl"))
-for name in ("Upstream area", "Sequencing")
+for name in ("Upstream area", "Sequencing", "Sequence runoff matches watercourses")
     a = findfirst(l -> occursin("@testset \"$name\"", l), lines)
     b = a + findfirst(l -> l == "end", lines[a+1:end])
     try

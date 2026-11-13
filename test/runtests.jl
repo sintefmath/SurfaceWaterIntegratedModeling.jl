@@ -136,3 +136,9 @@ end
     @test test_sequencing(grid3, true, 8, 4.5241752066)
 
 end
+
+@testset "Sequence runoff matches watercourses" begin
+    @test test_sequence_runoff_matches_watercourses(grid1)
+    @test test_sequence_runoff_matches_watercourses(grid2)
+    @test test_sequence_runoff_matches_watercourses(grid3)
+end
