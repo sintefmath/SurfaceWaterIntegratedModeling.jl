@@ -322,38 +322,61 @@ end
 
 # ----------------------------------------------------------------------------
 """
-    _propagate_amount!(rateinfo, trap, outflow, tstruct, sgraph; old_edges=nothing) -> nothing
+    _propagate_amount!(rateinfo, trap, delta_outflow, tstruct, sgraph; old_edges=nothing) -> nothing
 
-Push a signed `outflow` from `trap` along the spill chain, cascading downstream for as long as
+Push a signed `delta_outflow` from `trap` along the spill chain, cascading downstream for as long as
 each target is itself full, and stopping at the first non-filled trap or the domain boundary.
 
-Each hop either hands the amount straight to a parent trap (a merge, no terrain involved) or
-tracks it over terrain via [`_track_flow!`](@ref), which may exhaust it en route — once it
-reaches zero the walk ends.  A negative `outflow` retracts a previous spill along the same
-chain.
+Each hop either hands the amount straight to a parent trap (a merge, no terrain involved: the
+parent's inflow changes by the same amount) or tracks it over terrain via [`_track_flow!`](@ref),
+which may absorb some or all of it en route.  A terrain path can also change the `Smax` of the
+traps it flows into, so when a trap reached that way spills over land in turn, it sends the change
+in its outflow, `max(inflow - Smax, 0)`, not just the change in its inflow.  The walk ends at a
+non-filled trap, at the domain boundary, or when there is nothing left to send over land.  A
+negative `delta_outflow` retracts a previous spill along the same chain.
 
 **Mutates `rateinfo`** (runoff, trap inflows, and `Smin`/`Smax` via `_track_flow!`).  Pass
 `old_edges` to walk the *pre-update* spillgraph, which is what makes retraction follow the route
 the water actually took; it falls back to `sgraph` for traps it does not name.
 """
-function _propagate_amount!(rateinfo, trap, outflow, tstruct, sgraph; old_edges=nothing)
+function _propagate_amount!(rateinfo, trap, delta_outflow, tstruct, sgraph; old_edges=nothing)
 
-    while outflow != 0.0
+    # Smax, before the latest terrain path, of the traps that path flowed into (the supertraps of
+    # its target region); `nothing` until a terrain path has been tracked
+    smax_orig = nothing
 
-        target = isnothing(old_edges) ? 
-            get(sgraph.edges, trap, 0) :
-            get(old_edges, trap, get(sgraph.edges, trap, 0))
+    get_target(t) = isnothing(old_edges) ?
+        get(sgraph.edges, t, 0) :
+        get(old_edges, t, get(sgraph.edges, t, 0))
 
+    target = get_target(trap)
+
+    while true
         (target == 0) && break # we reached a non-filled trap.  Stop propagating here
 
         if _is_parent(target, trap, tstruct)
-            setinflow!(rateinfo, target, getinflow(rateinfo, target) + outflow)
-            trap = target 
+            setinflow!(rateinfo, target, getinflow(rateinfo, target) + delta_outflow)
+            trap, target = target, get_target(target)
         else
-            outflow = _track_flow!(rateinfo, trap, outflow, tstruct)
-            (target > numtraps(tstruct)) && break # exit if we reach domain boundary
+            # `trap` spills over land.  If the water reached it via a terrain path, that path may
+            # also have changed its Smax: send the change in its outflow, max(inflow - Smax, 0)
+            if !isnothing(smax_orig)
+                inflow = getinflow(rateinfo, trap)
+                delta_outflow = max(inflow - getsmax(rateinfo, trap), 0.0) -
+                                max(inflow - delta_outflow - smax_orig[trap], 0.0)
+            end
+            (delta_outflow == 0.0) && break
 
-            trap = target
+            spills_out = target > numtraps(tstruct)
+            if !spills_out
+                @assert(target <= numregions(tstruct), "should be a lowest-level trap, or out of domain")
+                smax_orig = Dict(t => getsmax(rateinfo, t) for t in tstruct.supertraps_of[target])
+            end
+
+            delta_outflow = _track_flow!(rateinfo, trap, delta_outflow, tstruct)
+            spills_out && break
+
+            trap, target = target, get_target(target)
         end
     end
 end
