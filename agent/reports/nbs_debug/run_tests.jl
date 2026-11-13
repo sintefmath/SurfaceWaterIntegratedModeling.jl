@@ -17,7 +17,8 @@ for f in files
 end
 # testsets from runtests.jl that exercise fill_sequence (skip the known-broken ones)
 lines = readlines(joinpath(TD, "runtests.jl"))
-grids = join(lines[15:24], "\n")
+g0 = findfirst(l -> startswith(l, "surf1_file ="), lines)   # the grid definitions block
+grids = join(lines[g0:g0+9], "\n")
 include_string(Main, grids, joinpath(TD, "runtests.jl"))
 for name in ("Upstream area", "Sequencing", "Sequence runoff matches watercourses")
     a = findfirst(l -> occursin("@testset \"$name\"", l), lines)
