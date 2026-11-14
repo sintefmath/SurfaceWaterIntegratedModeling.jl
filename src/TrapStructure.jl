@@ -24,8 +24,8 @@ A struct representing a watershed drainage trap for topographical analysis.
                                               lowest-level subtraps
 - `supertraps_of::Vector{Vector{Int}}`: one entry per lowest-level trap, listing all
                                         the supertraps it belongs to (including itself).
-- `agglomerations::Graphs.SimpleDiGraph`: hierarchy of sub/supertraps, presented as a
-                                          graph structure
+- `agglomerations::Graphs.SimpleDiGraph{Int}`: hierarchy of sub/supertraps, presented as a
+                                               graph structure
 - `clip_mask::Union{Matrix{Bool}, Nothing}`: clip mask (0: active terrain, 1: clipped away)
 - `sinks::Vector{CartesianIndex{2}}`: list of sinks, in term of grid
                                       cell coordinates
@@ -49,7 +49,8 @@ mutable struct TrapStructure{T<:Real}
     supertraps_of::Vector{Vector{Int}} # one entry per _lowest-level_ trap,
                                        # listing all the supertraps it belongs
                                        # to (including itself)
-    agglomerations::Graphs.SimpleDiGraph # hierarchy of sub/supertraps
+    # hierarchy of sub/supertraps (concrete type: it is read per trap at every event)
+    agglomerations::Graphs.SimpleDiGraph{Int}
     clip_mask::Union{Matrix{Bool}, Nothing} # clip mask (0: active terrain, 1: clipped away)
     sinks::Vector{CartesianIndex{2}}      # list cells being sinks
     waterbodies::Set{CartesianIndex{2}} # list of cells belonging to waterbodies

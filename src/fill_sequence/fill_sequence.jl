@@ -573,11 +573,12 @@ function _identify_next_status_change!(changetimeest, cur_amounts, rateinfo,
     # identify traps that may change their status before the earliest identified
     # changetime.  Explicit loop (no per-trap `filled_traps[subtrapsof(ix)]` temporary,
     # which allocated O(num_traps) small arrays every event and dominated GC on large
-    # terrains); `all_subtraps_filled` short-circuits without allocating.
+    # terrains); `all_subtraps_filled` short-circuits without allocating.  The time test comes
+    # first: it is one array read, and rules out every trap that cannot change this period.
     num_traps = numtraps(tstruct)
     candidates = Int[]
     for ix in 1:num_traps
-        (!is_subsumed(ix) && changetimeest[ix].min < earliest_changetime &&
+        (changetimeest[ix].min < earliest_changetime && !is_subsumed(ix) &&
          all_subtraps_filled(tstruct, ix, filled_traps)) && push!(candidates, ix)
     end
 
