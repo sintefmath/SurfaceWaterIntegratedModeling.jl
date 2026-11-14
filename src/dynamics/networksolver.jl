@@ -1331,7 +1331,8 @@ end
 """
     solveDynNetwork!(state, tstruct, net, infiltration, inflow;
                      tmax=Inf, runoff=nothing, precipitation=nothing,
-                     abstol=1e-6, reltol=1e-4, stop_at_steady=true, zvt=nothing)
+                     abstol=1e-6, reltol=1e-4, stop_at_steady=true, stop_at=nothing,
+                     zvt=nothing)
                      -> (; time, trap, kind)
 
 Evolve the trap volumes of a [`DynNetwork`](@ref) forward until the first topology-changing
@@ -1361,6 +1362,9 @@ event, steady state, or `tmax`.  `state` is updated in place.
 - `stop_at_steady`: stop early at steady state, returning `time = Inf` (default `true`, for
   predicting the next event).  Pass `false` when the state at `tmax` is needed (a commit, a
   timepoint sample): the solve then always runs to `tmax`, so slow flow is not dropped.
+- `stop_at`: stop at this elapsed time (`<= tmax`) instead of `tmax`, returning `time = stop_at`.
+  The step sequence is then that of a solve to `tmax` (the solver's steps depend on the window),
+  so a commit can reproduce its prediction exactly.  Default `nothing` (stop at `tmax`).
 
 # Returns
 `(; time, trap, kind)` (state is in place): `time` the event time (`Inf` = steady state,
@@ -1400,17 +1404,18 @@ function solveDynNetwork!(state::AbstractVector{Float64},
                           # 1e-6 m^3 (~mL) / 1e-4: enough for physical accuracy, and ~halves the
                           # step count vs 1e-8 on the culvert worst case (see PARITY_TOL in tests)
                           abstol = 1e-6, reltol = 1e-4, stop_at_steady = true,
-                          zvt = nothing)
+                          stop_at = nothing, zvt = nothing)
     # Returns an (immutable) `DynNetworkRateParams` with all the static data the ODE needs
     p = _build_rate_params(tstruct, net, infiltration, inflow;
                            runoff=runoff, precipitation=precipitation, zvt=zvt)
     return solveDynNetwork!(state, tstruct, p; tmax=tmax, abstol=abstol, reltol=reltol,
-                            stop_at_steady=stop_at_steady)
+                            stop_at_steady=stop_at_steady, stop_at=stop_at)
 end
 
 """
     solveDynNetwork!(state, tstruct, p::DynNetworkRateParams;
-                     tmax=Inf, abstol=1e-6, reltol=1e-4, stop_at_steady=true) -> (; time, trap, kind)
+                     tmax=Inf, abstol=1e-6, reltol=1e-4, stop_at_steady=true, stop_at=nothing)
+                     -> (; time, trap, kind)
 
 As above, but from prebuilt rate params `p` (see [`_build_rate_params`](@ref)), which already
 hold the network, its inflow and everything read from the runoff and precipitation grids.  A
@@ -1420,7 +1425,8 @@ context's creation even when the live grids change before a commit.
 function solveDynNetwork!(state::AbstractVector{Float64},
                           tstruct::TrapStructure,
                           p::DynNetworkRateParams;
-                          tmax = Inf, abstol = 1e-6, reltol = 1e-4, stop_at_steady = true)
+                          tmax = Inf, abstol = 1e-6, reltol = 1e-4, stop_at_steady = true,
+                          stop_at = nothing)
     net = p.net
     nt  = length(net.traps)
     @assert length(state) == nt + _nbs_state_count(p) """
@@ -1439,8 +1445,11 @@ function solveDynNetwork!(state::AbstractVector{Float64},
     ev0 = _t0_fast_path(V0, du0, p, nreg)
     ev0 === nothing || return ev0
 
+    # where a solve that meets no event ends (elapsed)
+    t_stop = stop_at === nothing ? tmax : stop_at
+    @assert t_stop <= tmax "stop_at must lie within the window"
     # empty window: nothing to advance
-    tmax <= 0.0 && return (time = max(tmax, 0.0), trap = 0, kind = :none)
+    t_stop <= 0.0 && return (time = max(t_stop, 0.0), trap = 0, kind = :none)
 
     # evolving = every non-FULL trap.  Empty/zero-inflow traps are included: their inflow can
     # start mid-integration (culverts, NBS) and without a :fill callback V could exceed capacity.
@@ -1451,7 +1460,7 @@ function solveDynNetwork!(state::AbstractVector{Float64},
         vcat(evolving, collect((nt + 1):(nt + p.nbsplan.nlayer_total)))
 
     # nothing evolving: nothing can change
-    isempty(ss_indices) && return (time = stop_at_steady ? Inf : tmax, trap = 0, kind = :none)
+    isempty(ss_indices) && return (time = stop_at_steady ? Inf : t_stop, trap = 0, kind = :none)
     # already steady (only when predicting; a solve to `tmax` must integrate even slow flow)
     layer_tol = _NBS_SETTLED_RTOL * maximum(i -> abs(du0[i]), ss_indices)
     stop_at_steady &&
@@ -1471,6 +1480,10 @@ function solveDynNetwork!(state::AbstractVector{Float64},
     stop_at_steady && push!(cbs, p.nbsplan === nothing ?
         _build_steadystate_callback(p, evolving, du0) :
         _build_steadystate_callback_nbs(p, ss_indices, layer_tol, du0))
+    # stop at `stop_at`: a step lands on it (tstops) and the solve ends there
+    stop_at === nothing ||
+        push!(cbs, DiscreteCallback((u, t, integrator) -> t >= stop_at, terminate!;
+                                    save_positions = (false, false)))
     callback = CallbackSet(cbs...)
     # finite cap so DiffEq never gets Inf as a tspan endpoint (its internal range(t,Inf,n) rejects it)
     tmax_ode = min(tmax, 1e12)
@@ -1482,7 +1495,7 @@ function solveDynNetwork!(state::AbstractVector{Float64},
     # because the RHS (_nbs_injections) allocates Float64 and isn't Dual-safe for ForwardDiff.
     sol = solve(ODEProblem(dynNetworkRateFunction!, V0, (0.0, tmax_ode), p),
                 AutoTsit5(Rodas5P(autodiff = AutoFiniteDiff()));
-                callback = callback,
+                callback = callback, tstops = stop_at === nothing ? Float64[] : [stop_at],
                 abstol = abstol, reltol = reltol,
                 # only the end point is read: don't keep the trajectory
                 save_everystep = false, save_start = false, dense = false)
@@ -1491,6 +1504,8 @@ function solveDynNetwork!(state::AbstractVector{Float64},
 
     # no topology event: tmax cutoff (stopped at tmax_ode) vs genuine steady state (earlier)
     if event.kind == :none
+        stop_at === nothing || sol.t[end] < stop_at ||
+            return (time = stop_at, trap = 0, kind = :none)
         return sol.t[end] >= tmax_ode ? (time = tmax, trap = 0, kind = :none) :
                                         (time = Inf,  trap = 0, kind = :none)
     end

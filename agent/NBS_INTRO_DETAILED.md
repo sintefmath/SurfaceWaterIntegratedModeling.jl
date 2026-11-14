@@ -154,7 +154,7 @@ Each iteration:
 1. **Next change.** `_identify_next_status_change!` picks the earliest trap status change from the estimates. Network traps take part through their predicted times. Covered traps that are not network traps (full sub-traps inside one) never do.
 2. **Base SWIM update.** The changed traps' filled status is set. For traps *not* covered by a network, the spill graph is updated (`update_spillgraph!`), and `_update_flow!` updates the baseline rates. Both are plain base SWIM.
 3. **Touch.** `_touch_affected_networks!`: a component is *touched* if one of its traps changed status, or the baseline inflow to one of its network traps' leaf regions changed. If any is touched, `_touch_networks_driver!` does the following:
-   1. **Commit** every context to the current time (`_commit_network!`, with its frozen rates). A commit always integrates to that time (`stop_at_steady = false`): it never stops at a steady state, so slow flow is not dropped. Only the event that triggered the touch may fire, at that time; anything earlier is an assertion error (S8).
+   1. **Commit** every context to the current time (`_commit_network!`, with its frozen rates). A commit always integrates to that time (`stop_at_steady = false`): it never stops at a steady state, so slow flow is not dropped. It integrates over the same window as the context's last prediction and stops at the commit time (`stop_at`), so it takes the prediction's solver steps and cannot meet an event the prediction did not. The only event it may meet is the context's own predicted one; anything else is an assertion error (S8).
    2. **Harvest:** trap volumes go into `vol_by_trapix` and layer volumes into `nbs_state` (`_harvest!` → `_store_nbs_state!`).
    3. **Apply the change.** The solver reports each event as `:fill`, `:unspill` or `:empty` (§6), handled by `apply_fill!`, `apply_unfill!` and `apply_empty!` (`network_updating.jl`) respectively. A component can:
       - grow along a newly active spill path;
@@ -227,7 +227,7 @@ The next period's driver restores the layers from `nbs_state`.
 **`network_states_at_timepoints(tstruct, seq, times; nbs, culverts, dyn_traps, infiltration)`.** `seq` holds no layer volumes, so this replays the network forward through `seq`:
 - at each weather-period start, it rebuilds a driver from that event's full snapshot (`_rebuild_replay_driver`), carrying the layer volumes (`_carry_nbs!`);
 - at events that touch a component, it commits, then rebuilds the network from scratch with `setup_network` (not with the incremental `apply_*` updates of the run). Component boundaries can therefore differ from the run's (the run postpones splitting a component after a trap stops spilling); the covered traps and paths should be the same, so the volumes agree up to solver tolerance;
-- it samples each requested time with `_sample_network`, which integrates a copy of the state.
+- it samples each requested time with `_sample_network`, which integrates a copy of the state, over the prediction's window and stopping at the sample time, as a commit does (S8).
 
 The result, per time, is `trap_volumes` (network traps) and `nbs_layers` (per `id`, top layer first).
 

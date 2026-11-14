@@ -28,6 +28,9 @@ Fields:
   event's new flows (e.g. a just-filled trap's spill crossing an NBS) and lose water.
 - `next_event`: cached prediction `(; time, trap, kind)` of the network's next
   event, with `time` an ABSOLUTE timestamp and `trap` a global trap index.
+- `horizon`: absolute end of the window that prediction integrated over (`Inf` before any).  A
+  commit integrates over the same window and stops early, so it takes the same steps as the
+  prediction and cannot meet an event before the predicted one.
 """
 mutable struct DynNetworkContext
     net             ::DynNetwork
@@ -37,6 +40,7 @@ mutable struct DynNetworkContext
     last_solve_time ::Float64
     params          ::DynNetworkRateParams       # rates frozen at the last touch
     next_event      ::NamedTuple
+    horizon         ::Float64
 end
 
 # ----------------------------------------------------------------------------
@@ -114,21 +118,21 @@ end
 Predict `ctx`'s next event, bounded by the time remaining to `endtime`.  Solves under the
 frozen `ctx.params` (the rates the state is evolving under).
 
-Mutates `ctx.next_event` only, storing `time` as an ABSOLUTE timestamp and `trap` as a global
-trap index; the solve runs on a COPY, so the committed `ctx.state` is left untouched.  Returns
-that `next_event`.
+Mutates `ctx.next_event` and `ctx.horizon` only, storing `time` as an ABSOLUTE timestamp and
+`trap` as a global trap index; the solve runs on a COPY, so the committed `ctx.state` is left
+untouched.  Returns that `next_event`.
 """
 function _predict_network!(ctx::DynNetworkContext, tstruct, endtime)
     res = solveDynNetwork!(copy(ctx.state), tstruct, ctx.params;
                            tmax = endtime - ctx.last_solve_time)
     ctx.next_event = (; time = res.time + ctx.last_solve_time,
                         trap = res.trap, kind = res.kind)
+    ctx.horizon = endtime
     return ctx.next_event
 end
 
-# how far before T_commit (relative to the window) a commit may meet its triggering event: the
-# solver's default reltol
-const _COMMIT_EVENT_RTOL = 1e-4
+# how far (relative to the absolute time) T_commit may lie past the predicted event: rounding only
+const _COMMIT_EVENT_RTOL = 1e-9
 
 """
     _commit_network!(ctx, tstruct, T_commit) -> (; time, trap, kind)
@@ -140,18 +144,26 @@ spillgraph/flow update).
 Mutates `ctx`: `state` is left at the exact `T_commit` volumes and `last_solve_time` is
 updated.  Returns the solver result.
 
-Every event before `T_commit` has been handled by the caller, so the advance is event-free: only
-the event that triggered this commit may fire, at `T_commit` itself.  Anything earlier would
-leave `state` at that event while the clock says `T_commit`, so it is an error.  "At `T_commit`"
-allows the solver's relative tolerance on the window: prediction and commit integrate windows
-of different length, so for nonlinear (NBS, culvert) dynamics their event times differ slightly.
+The commit integrates over the same window as the last prediction (`ctx.horizon`) and stops at
+`T_commit`, so the solver takes exactly the prediction's steps up to the last one.  (Over a
+shorter window it would choose other steps, and an event could shift by the integration error to
+well before `T_commit`.)  Every event before `T_commit` has been handled by the caller, so the
+commit may meet only this context's own predicted event, and `T_commit` must not lie past it;
+anything else is an error.  It can meet that event slightly before `T_commit`, within the last
+step, which the commit shortens to land on `T_commit`: for stiff (NBS) dynamics the event's
+position inside a step is only accurate to about `reltol` times the step.
 """
 function _commit_network!(ctx::DynNetworkContext, tstruct, T_commit)
-    window = T_commit - ctx.last_solve_time
-    res = solveDynNetwork!(ctx.state, tstruct, ctx.params; tmax = window, stop_at_steady = false)
-    @assert(res.kind == :none || window - res.time <= _COMMIT_EVENT_RTOL * window,
+    horizon = ctx.horizon >= T_commit ? ctx.horizon : T_commit
+    res = solveDynNetwork!(ctx.state, tstruct, ctx.params;
+                           tmax = horizon - ctx.last_solve_time,
+                           stop_at = T_commit - ctx.last_solve_time, stop_at_steady = false)
+    t_end, ev = ctx.last_solve_time + res.time, ctx.next_event
+    @assert(res.kind == :none ||
+            (res.trap == ev.trap && res.kind == ev.kind &&
+             T_commit <= ev.time + _COMMIT_EVENT_RTOL * abs(ev.time)),
             "network commit to $T_commit stopped at a $(res.kind) event of trap $(res.trap) " *
-            "at $(ctx.last_solve_time + res.time)")
+            "at $t_end (predicted: $(ev.kind) of trap $(ev.trap) at $(ev.time))")
     ctx.last_solve_time = T_commit
     return res
 end
@@ -254,7 +266,7 @@ function _make_context(net::DynNetwork, tstruct, rateinfo, state0, cur_time,
                              _inflow_regions(node_leaves),
                              cur_time,
                              params,
-                             (; time = Inf, trap = 0, kind = :none))
+                             (; time = Inf, trap = 0, kind = :none), Inf)
 end
 
 """
