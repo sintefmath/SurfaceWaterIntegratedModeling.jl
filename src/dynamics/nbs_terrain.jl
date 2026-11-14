@@ -44,18 +44,22 @@ function _nbs_link(tstruct, footprint::Vector{Int})
     CI     = CartesianIndices(tstruct.topography)
     LI     = LinearIndices(tstruct.topography)
     inside = Set(footprint)
-    inflow, exits = Set{Int}(), Set{Int}()
+    inflow = Set{Int}()
+    feeds  = Tuple{Int,Int}[]                       # (footprint cell, exit cell)
     for c in footprint
         for u in Graphs.inneighbors(g, c)
             u in inside || push!(inflow, u)
         end
         ds, terminus = _downstream_cell(g, c)
-        terminus || ds in inside || push!(exits, ds)
+        terminus || ds in inside || push!(feeds, (c, ds))
     end
+    exits = sort!(unique(last.(feeds)))
     # a closed basin is legal only if its layers drain through piped outlets
     isempty(exits) && @warn "NBS placement footprint has no outflow cells."
     ponds = [b for b in tstruct.trap_bottoms if LI[b] in inside]
-    return NBSLink(CI[sort!(collect(inflow))], CI[sort!(collect(exits))], ponds)
+    exit_ix = Dict(e => k for (k, e) in enumerate(exits))
+    return NBSLink(CI[sort!(collect(inflow))], CI[exits], ponds,
+                   [(c, exit_ix[e]) for (c, e) in feeds])
 end
 
 """
@@ -73,7 +77,7 @@ function _nbs_baseline(nb::DynNBSPlacement, tstruct, runoff, precipitation)
     link = nb.link
     O_0  = _footprint_rain(precipitation, nb.footprint) +
            sum(max(Float64(runoff[c]), 0.0) for c in link.inflow_cells; init = 0.0)
-    w_exit = _exit_throughput(tstruct, nb.footprint, link.exits, runoff)
+    w_exit = _exit_throughput(link, runoff)
     w_pond = Float64[max(Float64(runoff[c]), 0.0) for c in link.ponds]
     W = sum(w_exit; init = 0.0) + sum(w_pond; init = 0.0)
     @assert isapprox(W, O_0; rtol = 1e-6, atol = 1e-9) || (W < _NBS_O0_EPS && O_0 < _NBS_O0_EPS) """
@@ -83,18 +87,14 @@ function _nbs_baseline(nb::DynNBSPlacement, tstruct, runoff, precipitation)
     return O_0, share.(w_exit), share.(w_pond)
 end
 
-# Oblivious flow the footprint hands to each exit (aligned with `exits`): the runoff of the
+# Oblivious flow the footprint hands to each exit (aligned with `link.exits`): the runoff of the
 # footprint cells draining straight out to it.
-function _exit_throughput(tstruct, footprint::Vector{Int}, exits, runoff)
-    inside = Set(footprint)
-    LI = LinearIndices(tstruct.topography)
-    w  = Dict{Int,Float64}()
-    for c in footprint
-        ds, terminus = _downstream_cell(tstruct.flowgraph, c)
-        (terminus || ds in inside) && continue
-        w[ds] = get(w, ds, 0.0) + max(Float64(runoff[c]), 0.0)
+function _exit_throughput(link::NBSLink, runoff)
+    w = zeros(length(link.exits))
+    for (c, e) in link.exit_feeds
+        w[e] += max(Float64(runoff[c]), 0.0)
     end
-    return Float64[get(w, LI[e], 0.0) for e in exits]
+    return w
 end
 
 """

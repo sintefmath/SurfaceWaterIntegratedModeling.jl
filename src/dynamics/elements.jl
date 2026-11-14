@@ -162,12 +162,15 @@ end
 
 The cells through which an NBS footprint exchanges water with the terrain (see
 [`_nbs_link`](@ref)): `inflow_cells` drain into it from outside, `exits` are the outside cells
-it drains to, `ponds` are the trap bottoms inside it.
+it drains to, `ponds` are the trap bottoms inside it.  `exit_feeds` lists, for each footprint
+cell draining straight out, the cell and the index of its exit in `exits`; it depends only on
+the terrain, so the baseline is summed over it instead of re-walking the footprint every touch.
 """
 struct NBSLink
     inflow_cells::Vector{CartesianIndex{2}}
     exits       ::Vector{CartesianIndex{2}}
     ponds       ::Vector{CartesianIndex{2}}
+    exit_feeds  ::Vector{Tuple{Int,Int}}       # (footprint cell, index into `exits`)
 end
 
 """

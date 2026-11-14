@@ -59,7 +59,7 @@ DynNBSPlacement(system, footprint, n_terrain, outlets)
   - **Mantilla:** 1 outlet, for the drainage layer.
 
 Two fields are filled in later by `_prepare_nbs!` (§3):
-- **`link::NBSLink`:** the placement's *inflow cells*, *exits* and *ponds*.
+- **`link::NBSLink`:** the placement's *inflow cells*, *exits* and *ponds*, plus which footprint cells drain straight out to which exit (`exit_feeds`, so the exit weights are a sum over a stored list).
 - **`id`:** its position in the `nbs` vector. It labels the stored layer volumes and the `nbs_layers` results.
 
 ---

@@ -131,7 +131,7 @@ function network_watercourses(tstruct::TrapStructure{<:Real},
             # the layers' outflow
             O_t = _nbs_terrain_outflow(nb.system, layers, A, nb.n_terrain)
             _, exit_shares, _ = _nbs_baseline(nb, tstruct, runoff_solver, precip)
-            delivered = _exit_throughput(tstruct, nb.footprint, nb.link.exits, runoff_orig)
+            delivered = _exit_throughput(nb.link, runoff_orig)
             for (c, sh, w) in zip(nb.link.exits, exit_shares, delivered)
                 _propagate_field_delta!(runoff_live, footprint_set, tstruct, full_traps_int,
                                         LI[c], O_t * sh - w)
