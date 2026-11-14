@@ -321,7 +321,8 @@ function _touch_networks_driver!(driver::NetworkDriver, changetimeest, sgraph, t
     # reconcile the spillgraph/rateinfo to the new coverage before the rebuild reads inflow
     new_covered = _covered_of(driver.comps, tstruct)
     old_covered != new_covered &&
-        _reconcile_spillgraph!(sgraph, rateinfo, filled_traps, new_covered, tstruct)
+        _reconcile_spillgraph!(sgraph, rateinfo, filled_traps, new_covered,
+                               symdiff(old_covered, new_covered), tstruct)
 
     # rebuild the contexts off the mutated component set and re-predict
     _rebuild_contexts!(driver, tstruct, rateinfo, infiltration, z_vol_tables,

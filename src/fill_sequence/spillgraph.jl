@@ -81,37 +81,27 @@ See also [`TrapStructure`](@ref), [`update_spillgraph!`](@ref).
 function compute_complete_spillgraph(tstruct::TrapStructure{T},
                                      full_traps::Vector{Bool}) where T <: Real
 
-    num_traps = numtraps(tstruct)
-    @assert num_traps == length(full_traps)
-
-    # defining two simple shorthands
-    children_of = x -> Graphs.inneighbors(tstruct.agglomerations, x)
-    parent_of = x -> Graphs.outneighbors(tstruct.agglomerations, x)
-    
-    # identify the traps that are filled 
+    @assert numtraps(tstruct) == length(full_traps)
     @assert _valid_trap_status(full_traps, tstruct)
 
-    # identify traps that are active 
-    active_traps = [full_traps[x] | all(full_traps[children_of(x)]) for x in 1:num_traps]
-
-    # determine where the filled traps spill
-    full_trap_ixs = findall(full_traps)
-
-    function target(x)
-        parent = parent_of(x)
-        ds_reg = tstruct.spillpoints[x].downstream_region
-        if !isempty(parent) && active_traps[parent[1]]
-            return parent[1]
-        end
-        return ds_reg > 0 ? ds_reg : num_traps + 1 # latter value flags out-of-domain
-    end
-
     spillgraph = SpillGraph()
-    for x in full_trap_ixs
-        _set_outedge!(spillgraph, x, target(x))
+    for x in findall(full_traps)
+        _set_outedge!(spillgraph, x, _spill_target(tstruct, x, t -> full_traps[t]))
     end
-
     return spillgraph
+end
+
+# Where the full trap `x` spills, given `isfull(t)` for every trap: into its parent if the parent
+# is active (full, or all its children are), so the siblings fill it together; otherwise
+# downstream, with `numtraps + 1` meaning out of the domain.
+function _spill_target(tstruct, x::Int, isfull)
+    parent = Graphs.outneighbors(tstruct.agglomerations, x)
+    if !isempty(parent)
+        p = parent[1]
+        (isfull(p) || all(isfull, Graphs.inneighbors(tstruct.agglomerations, p))) && return p
+    end
+    ds_reg = tstruct.spillpoints[x].downstream_region
+    return ds_reg > 0 ? ds_reg : numtraps(tstruct) + 1
 end
 
 # ----------------------------------------------------------------------------

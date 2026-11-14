@@ -188,3 +188,26 @@ end
     other = net.flow_paths[surv.merges[1][1]]
     @test other.departure_point == ci(7,7) && surv.merges[1][2] == 2   # still joins at (6,6)
 end
+
+# ---------------------------------------------------------------------------
+# When traps enter or leave network coverage, only the spill edges they can affect are
+# recomputed (_update_spill_edges!); the result must equal a complete rebuild.
+@testset "incremental spill-graph update equals a complete rebuild" begin
+    ts  = _mini_tstruct
+    seq = fill_sequence(ts, [WeatherEvent(0.0, 1.0)]; verbose = false)
+    filled = filled_at(seq, length(seq) ÷ 2)                  # a consistent, partly filled state
+    agg = ts.agglomerations
+    tops = [t for t in findall(filled)
+            if all(p -> !filled[p], DM.Graphs.outneighbors(agg, t))]
+    subtree(t) = push!(DM._descendants(ts, t), t)
+    complete(cov) = DM.compute_complete_spillgraph(ts, [filled[t] && !(t in cov) for t in eachindex(filled)])
+    rng = MersenneTwister(3)
+    covered = Set{Int}()
+    sg = complete(covered)
+    for _ in 1:20
+        new_cov = reduce(union, (subtree(t) for t in tops if rand(rng) < 0.2); init = Set{Int}())
+        DM._update_spill_edges!(sg, t -> filled[t] && !(t in new_cov), symdiff(covered, new_cov), ts)
+        @test sg.edges == complete(new_cov).edges
+        covered = new_cov
+    end
+end

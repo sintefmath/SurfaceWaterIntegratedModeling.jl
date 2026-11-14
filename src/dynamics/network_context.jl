@@ -306,31 +306,48 @@ end
 
 # ----------------------------------------------------------------------------
 """
-    _reconcile_spillgraph!(sgraph, rateinfo, filled_traps, covered, tstruct)
+    _reconcile_spillgraph!(sgraph, rateinfo, filled_traps, covered, changed, tstruct)
         -> Vector{IncrementalUpdate{Tuple{Int,Int}}}
 
 Reconcile the spillgraph (and the flow it drives in `rateinfo`) to the invariant "spillgraph =
 exactly the FULL ∧ ¬COVERED traps": a trap absorbed into a network has its outflow routed by
 the ODE, not the spillgraph, so its deposit must be withdrawn (and restored when it leaves
-coverage).  Recomputes the target spillgraph from the effective filled state, diffs it, and
-propagates only the changed edges' flow.
+coverage).  `changed` are the traps whose coverage changed; only edges they can affect are
+recomputed ([`_update_spill_edges!`](@ref)), and only the changed edges' flow is propagated.
 
 Mutates `sgraph.edges` and, via `_update_flow!`, `rateinfo`; `filled_traps` and `covered` are
 read only.  Returns the applied edge diffs (empty when already reconciled).
 """
-function _reconcile_spillgraph!(sgraph, rateinfo, filled_traps, covered, tstruct)
-    n         = numtraps(tstruct)
-    effective = Bool[filled_traps[t] && !(t in covered) for t in 1:n]
-    new_sg    = compute_complete_spillgraph(tstruct, effective)
-    graph_updates = IncrementalUpdate{Tuple{Int,Int}}[]
-    for t in union(keys(sgraph.edges), keys(new_sg.edges))
-        old_t = get(sgraph.edges, t, 0)
-        new_t = get(new_sg.edges, t, 0)
-        old_t != new_t && push!(graph_updates, IncrementalUpdate(t, (old_t, new_t)))
-    end
-    sgraph.edges = new_sg.edges
+function _reconcile_spillgraph!(sgraph, rateinfo, filled_traps, covered, changed, tstruct)
+    graph_updates = _update_spill_edges!(sgraph, t -> filled_traps[t] && !(t in covered),
+                                         changed, tstruct)
     isempty(graph_updates) || _update_flow!(rateinfo, graph_updates, tstruct, sgraph)
     return graph_updates
+end
+
+# Recompute the spill edges that a change of `isfull` at the traps `changed` can affect - their
+# own, their children's (which may now spill into them) and their siblings' (which spill into
+# the shared parent) - and return the edges that differ, as (trap, (old target, new target)).
+# Every other edge is unaffected, so the result equals a complete rebuild.
+function _update_spill_edges!(sgraph, isfull, changed, tstruct)
+    agg = tstruct.agglomerations
+    affected = Set{Int}()
+    for t in changed
+        push!(affected, t)
+        union!(affected, Graphs.inneighbors(agg, t))
+        for p in Graphs.outneighbors(agg, t)
+            union!(affected, Graphs.inneighbors(agg, p))
+        end
+    end
+    updates = IncrementalUpdate{Tuple{Int,Int}}[]
+    for t in affected
+        old_t = get(sgraph.edges, t, 0)
+        new_t = isfull(t) ? _spill_target(tstruct, t, isfull) : 0
+        old_t == new_t && continue
+        new_t == 0 ? delete!(sgraph.edges, t) : (sgraph.edges[t] = new_t)
+        push!(updates, IncrementalUpdate(t, (old_t, new_t)))
+    end
+    return updates
 end
 
 # ----------------------------------------------------------------------------
