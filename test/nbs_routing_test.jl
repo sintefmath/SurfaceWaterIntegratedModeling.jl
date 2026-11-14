@@ -224,10 +224,10 @@ end
     R = first(watercourses(ts, fill(false, numtraps(ts)); precipitation = 3e-3))
     reused = SWIM._with_flows(old, ts, infil, fill(0.4, nt); runoff = R, precipitation = 3e-3)
     for f in fieldnames(SWIM.DynNetworkRateParams)
-        f in (:geom, :nbsplan) && continue
+        f in (:geom, :nbsplan, :buffers) && continue
         @test getfield(reused, f) == getfield(new, f)
     end
-    @test reused.geom === old.geom                     # the structural part is shared, not rebuilt
+    @test reused.geom === old.geom && reused.buffers === old.buffers   # shared, not rebuilt
     for (a, b) in zip(reused.nbsplan.elems, new.nbsplan.elems), f in fieldnames(SWIM.NBSElement)
         @test getfield(a, f) == getfield(b, f)
     end

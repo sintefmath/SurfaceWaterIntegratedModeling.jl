@@ -187,7 +187,7 @@ fix the path/trap interleaving once tributaries exist.  Nothing is mutated.
     outlet then delivers exactly that, so the inlet must be visited first.
 
     An NBS has none.  Its output depends only on the stored layer state, so
-    [`_nbs_injections`](@ref) fixes it before the pass, and the draws the pass collects feed
+    [`_nbs_injections!`](@ref) fixes it before the pass, and the draws the pass collects feed
     only the layers' rates.  A carrier path may therefore be visited before the inflow path
     feeding the same placement.
 
@@ -517,9 +517,11 @@ solve onto [`DynNetworkRateParams`](@ref) — so the per-step cost here is just 
 - `cvplan`: [`CulvertPlan`](@ref), or `nothing` to ignore culverts entirely.
 - `trap_level`: per-trap water surface, needed only for culvert heads.
 - `path_inject`, `trap_inject`: NBS output added at path heads / into traps
-  ([`_nbs_injections`](@ref)), or `nothing` with no NBS.
+  ([`_nbs_injections!`](@ref)), or `nothing` with no NBS.
 - `trap_volume` (keyword): per-trap volume, so an empty trap's culverts draw no more than
   reaches it; `nothing` skips that cap.
+- `buffers` (keyword): the [`RoutingBuffers`](@ref) to work in; fresh ones by default.  The
+  returned arrays are these buffers, valid until the next pass.
 
 # Returns
 Total inflow at each trap (`net.traps` order), and the flow each NBS placement intercepts at its
@@ -542,7 +544,8 @@ function _route_flow(net::DynNetwork,
                      trap_level = nothing,
                      path_inject = nothing,
                      trap_inject = nothing;
-                     trap_volume = nothing)
+                     trap_volume = nothing,
+                     buffers = RoutingBuffers(net))
 
     np = length(net.flow_paths)
     nt = length(net.traps)
@@ -550,12 +553,10 @@ function _route_flow(net::DynNetwork,
     @assert length(path_maps) == length(merge_target) == length(path_events) == np
 
     # every path's water arrives from an upstream trap's spill or an NBS injection at its head
-    trap_inflow = Float64.(external_inflow)
+    trap_inflow = copyto!(buffers.trap_inflow, external_inflow)
     trap_inject === nothing || (trap_inflow .+= trap_inject)
-    path_flow   = zeros(Float64, np)
-    trib_output = zeros(Float64, np)
-    culvert_actual = cvplan === nothing ? Float64[] : zeros(Float64, length(net.culverts))
-    nbs_draw = zeros(Float64, length(net.nbs))
+    path_flow, trib_output = fill!(buffers.path_flow, 0.0), fill!(buffers.trib_output, 0.0)
+    culvert_actual, nbs_draw = fill!(buffers.culvert_actual, 0.0), fill!(buffers.nbs_draw, 0.0)
 
     for node in order
         if node <= np                               # a flow path
@@ -629,7 +630,7 @@ end
 # ============================================================================
 # NBS in the solver (model and invariants: agent/NBS_INVARIANTS.md).  Each placement adds its
 # layer states after the trap volumes, injects (O_t − O_0)·share at its exits and ponds and its
-# piped overflow at its outlets (`_nbs_injections`), and is fed O_0 plus the `:nbsin` draws the
+# piped overflow at its outlets (`_nbs_injections!`), and is fed O_0 plus the `:nbsin` draws the
 # routing pass collects.
 # ============================================================================
 
@@ -784,17 +785,17 @@ function _build_nbs_plan(net::DynNetwork, tstruct, runoff::AbstractMatrix{<:Real
 end
 
 """
-    _nbs_injections(V, plan, nt, np) -> (path_inject, trap_inject)
+    _nbs_injections!(path_inject, trap_inject, V, plan, nt) -> (path_inject, trap_inject)
 
 What every NBS placement adds to the routing at state `V`, computed from the layer storage
 alone, before the routing pass.  Each exit's carrier path gets `(O_terrain - O_0)·share` at its
 head and each pond's trap the same share term; each piped outlet's carrier path gets that layer's
 overflow.  Adding the *difference* to `O_0` is what keeps `external_inflow`, which already holds
-`O_0`, from being counted twice.
+`O_0`, from being counted twice.  Fills the two (zeroed) work arrays and returns them.
 """
-function _nbs_injections(V, plan::NBSPlan, nt::Int, np::Int)
-    path_inject = zeros(Float64, np)
-    trap_inject = zeros(Float64, nt)
+function _nbs_injections!(path_inject, trap_inject, V, plan::NBSPlan, nt::Int)
+    fill!(path_inject, 0.0)
+    fill!(trap_inject, 0.0)
     for el in plan.elems
         Vs   = view(V, _layer_range(el, nt))
         diff = _nbs_terrain_outflow(el.system, Vs, el.A, el.n_terrain) - el.O_0_total
@@ -808,6 +809,29 @@ function _nbs_injections(V, plan::NBSPlan, nt::Int, np::Int)
 end
 
 # ----------------------------------------------------------------------------
+"""
+    RoutingBuffers(net)
+
+The work arrays of one routing pass, allocated once per rate params.  Routing runs at every
+evaluation of the rate function and the event condition, so allocating them each time
+dominated the garbage collection.  What a pass leaves in them is valid only until the next pass.
+"""
+struct RoutingBuffers
+    trap_inflow   ::Vector{Float64}
+    trap_level    ::Vector{Float64}
+    trap_inject   ::Vector{Float64}
+    path_flow     ::Vector{Float64}
+    path_inject   ::Vector{Float64}
+    trib_output   ::Vector{Float64}
+    culvert_actual::Vector{Float64}
+    nbs_draw      ::Vector{Float64}
+end
+function RoutingBuffers(net::DynNetwork)
+    nt, np = length(net.traps), length(net.flow_paths)
+    return RoutingBuffers(zeros(nt), zeros(nt), zeros(nt), zeros(np), zeros(np), zeros(np),
+                          zeros(length(net.culverts)), zeros(length(net.nbs)))
+end
+
 """
     DynNetworkRateParams
 
@@ -829,6 +853,8 @@ network-locally (`net.traps` / `net.flow_paths` order).
   culvert inlet/outlet and NBS-inlet positions when the net has culverts / NBS
 - `cvplan`: culvert routing data (`nothing` if no culverts)
 - `nbsplan`: NBS signed-diff routing data (`nothing` if no NBS)
+- `spilling`: whether each trap spills (is FULL in this network); fixed for a solve
+- `buffers`: the routing pass's work arrays ([`RoutingBuffers`](@ref))
 """
 struct DynNetworkRateParams
     net::DynNetwork                       # The network being solved
@@ -842,6 +868,8 @@ struct DynNetworkRateParams
     cvplan::Union{CulvertPlan,Nothing}    # key information per culvert for routing, or nothing if none
     path_events::Vector{Vector{Tuple{Int,Symbol,Int}}}  # in-order tributary/culvert/NBS-inlet stops per path
     nbsplan::Union{NBSPlan,Nothing}      # NBS signed-diff routing data, or nothing if none
+    spilling::Vector{Bool}                # whether each trap is FULL in this network
+    buffers::RoutingBuffers               # work arrays of one routing pass
 end
 
 # ----------------------------------------------------------------------------
@@ -878,7 +906,9 @@ function _build_rate_params(tstruct::TrapStructure,
                                      Vector{NTuple{2,Float64}}[], first(_network_order(net)),
                                      _merge_targets(net),
                                      isempty(net.culverts) ? nothing : _build_culvert_plan(net, tstruct),
-                                     _path_event_templates(net), nothing)
+                                     _path_event_templates(net), nothing,
+                                     Bool[t.spill_path != 0 for t in net.traps],
+                                     RoutingBuffers(net))
     return _with_flows(structure, tstruct, infiltration, external_inflow;
                        runoff = runoff, precipitation = precipitation)
 end
@@ -906,7 +936,8 @@ function _with_flows(p::DynNetworkRateParams, tstruct, infiltration, external_in
     nbsplan = isempty(net.nbs) ? nothing : _build_nbs_plan(net, tstruct, runoff, precipitation)
     return DynNetworkRateParams(net, p.geom, Float64.(external_inflow), p.footprint_infil,
                                 _segment_maps.(path_runoff, p.path_events), p.order,
-                                p.merge_target, p.cvplan, p.path_events, nbsplan)
+                                p.merge_target, p.cvplan, p.path_events, nbsplan,
+                                p.spilling, p.buffers)
 end
 
 # ----------------------------------------------------------------------------
@@ -931,20 +962,19 @@ is spilling.  `nbs_draw` is complete only because every path crossing a placemen
 is in the placement's component (`_nbs_coupled_nodes`; invariant C1 in NBS_INVARIANTS.md).
 """
 function _routed_inflow(V, p::DynNetworkRateParams)
-    geom = p.geom
-    nt   = length(geom)
-    spilling = Bool[p.net.traps[i].spill_path != 0 for i in 1:nt]
+    b, nt = p.buffers, length(p.geom)
     # culverts need each trap's water-surface elevation for the head calc
     trap_level = p.cvplan === nothing ? nothing :
-                 Float64[water_level(geom[i], V[i]) for i in 1:nt]
+                 map!(i -> water_level(p.geom[i], V[i]), b.trap_level, 1:nt)
     # NBS output depends on the layer state only, so it is fixed before the routing pass
     inject = p.nbsplan === nothing ? (nothing, nothing) :
-             _nbs_injections(V, p.nbsplan, nt, length(p.net.flow_paths))
-    inflow, nbs_draw = _route_flow(p.net, p.external_inflow, spilling,
+             _nbs_injections!(b.path_inject, b.trap_inject, V, p.nbsplan, nt)
+    inflow, nbs_draw = _route_flow(p.net, p.external_inflow, p.spilling,
                                    p.footprint_infil, p.path_maps,
                                    p.path_events, p.order, p.merge_target,
-                                   p.cvplan, trap_level, inject...; trap_volume = V)
-    return inflow, spilling, nbs_draw
+                                   p.cvplan, trap_level, inject...; trap_volume = V,
+                                   buffers = b)
+    return inflow, p.spilling, nbs_draw
 end
 
 """
@@ -1512,7 +1542,7 @@ function solveDynNetwork!(state::AbstractVector{Float64},
     # accuracy — over a long tmax (a last-period solve with no next event marching to a distant
     # trap fill) that means ~1e6 tiny steps. The stiff switch integrates that mode A-stably, so
     # dt is accuracy-bound and grows; Tsit5 still handles the easy segments. Finite-diff Jacobian
-    # because the RHS (_nbs_injections) allocates Float64 and isn't Dual-safe for ForwardDiff.
+    # because the RHS works in Float64 buffers (RoutingBuffers), so it isn't Dual-safe for ForwardDiff.
     sol = solve(ODEProblem(dynNetworkRateFunction!, V0, (0.0, tmax_ode), p),
                 AutoTsit5(Rodas5P(autodiff = AutoFiniteDiff()));
                 callback = callback, tstops = stop_at === nothing ? Float64[] : [stop_at],
