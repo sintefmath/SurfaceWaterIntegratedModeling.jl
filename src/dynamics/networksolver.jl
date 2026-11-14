@@ -149,6 +149,15 @@ function wetted_infiltration(g::TrapGeometry, V::Real)
     return k == 0 ? 0.0 : g.infil_below[k]
 end
 
+# A trap's net rate that would change its volume by less than `_RATE_RTOL` of its capacity per
+# time unit is rounding noise (flows that cancel up to the last digits), not flow.  Deciding on it
+# made a full trap whose inflow balances its losses flip full / not full forever on the noise's
+# sign, so such a rate counts as zero: in the rate, the events and the steady-state tests.  The
+# volume this ignores is below the rounding level of the trap's own volume.
+const _RATE_RTOL = 1e-12
+_rate_tol(g::TrapGeometry) = _RATE_RTOL * g.capacity
+_net_rate(rate, g::TrapGeometry) = abs(rate) <= _rate_tol(g) ? 0.0 : rate
+
 # ============================================================================
 # Flow routing through the network (lossy paths).
 #
@@ -980,7 +989,8 @@ A *full* trap (`V >= capacity`) passes excess downstream at steady volume:
 `dV = inflow - footprint_infil - max(inflow - footprint_infil, 0)` (0 while well fed, negative
 once inflow drops below its losses).  An *accumulating* trap fills at its wetted-area rate:
 `dV = inflow - wetted_infiltration(V)`.  `inflow` is the external inflow plus everything routed
-in from upstream (see [`_route_flow`](@ref)).
+in from upstream (see [`_route_flow`](@ref)).  A net rate below rounding level of the trap's
+volume counts as zero (`_net_rate`), so balanced flows do not drift a full trap off capacity.
 
 # Arguments
 - `dV`: **written in place** — the rate for each trap, then for each NBS layer.  The only
@@ -1001,16 +1011,11 @@ function dynNetworkRateFunction!(dV, V, p::DynNetworkRateParams, t = 0.0)
 
     @assert length(dV) == length(V) == nt + _nbs_state_count(p)
     @inbounds for i in 1:nt
-        if spilling[i]
-            # full: whole footprint wetted; excess overflows, so dV is ~0 while fed
-            loss  = p.footprint_infil[i]
-            spill = max(inflow[i] - loss, 0.0)
-        else
-            # accumulating: infiltrate only through the wetted footprint, no spill
-            loss  = wetted_infiltration(geom[i], V[i])
-            spill = 0.0
-        end
-        dV[i] = inflow[i] - loss - spill
+        # full: whole footprint wetted and the surplus spills, so only a deficit drains it;
+        # accumulating: infiltrates only through the wetted footprint
+        dV[i] = spilling[i] ?
+            min(_net_rate(inflow[i] - p.footprint_infil[i], geom[i]), 0.0) :
+            _net_rate(inflow[i] - wetted_infiltration(geom[i], V[i]), geom[i])
         # Physical floor: volume cannot go below zero.  When an EMPTY trap has negative
         # computed dV (e.g. a culvert trying to draw from it), clamp to zero rather than
         # letting the ODE push V < 0 and blow up the v2z interpolation.
@@ -1150,7 +1155,7 @@ function _build_steadystate_callback(p::DynNetworkRateParams,
         end
         inflow, _ = _routed_inflow(u, p)
         for e in evolving
-            rate = inflow[e] - wetted_infiltration(p.geom[e], u[e])
+            rate = _net_rate(inflow[e] - wetted_infiltration(p.geom[e], u[e]), p.geom[e])
             # Match the rate function's physical floor: an empty trap cannot drain
             # further, so its actual dV is 0 (otherwise cb_ss never sees a leaf that has
             # drained to V == 0 settle — its unclamped rate stays negative and the solve
@@ -1250,8 +1255,9 @@ function _build_event_callback(p::DynNetworkRateParams,
                 out[k] = p.geom[ec.trap].capacity - V[ec.trap]
             elseif ec.kind == :empty
                 out[k] = V[ec.trap]
-            else   # :unspill: fire when the full trap's net inflow drops below its losses
-                out[k] = inflow[ec.trap] - p.footprint_infil[ec.trap]
+            else   # :unspill: fire when the full trap's net inflow drops below its losses, by
+                   # more than rounding noise (as the rate function counts it)
+                out[k] = inflow[ec.trap] - p.footprint_infil[ec.trap] + _rate_tol(p.geom[ec.trap])
             end
         end
     end
@@ -1358,7 +1364,7 @@ function _t0_fast_path(V0, du0, p::DynNetworkRateParams, nreg::Int)
     inflow0, _ = _routed_inflow(V0, p)
     for i in 1:nt
         (V0[i] == 0.0 && p.net.traps[i].trap_ix > nreg) || continue
-        inflow0[i] - wetted_infiltration(p.geom[i], 0.0) < 0.0 || continue
+        _net_rate(inflow0[i] - wetted_infiltration(p.geom[i], 0.0), p.geom[i]) < 0.0 || continue
         return (time = 0.0, trap = p.net.traps[i].trap_ix, kind = :empty)
     end
     return nothing

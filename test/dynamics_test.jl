@@ -1008,3 +1008,24 @@ end
     solveDynNetwork!(s2, ts, net, infil, [0.3 + r]; tmax = 2e4, stop_at_steady = false)
     @test s2[1] - s1[1] ≈ r * 1e4 rtol = 1e-6
 end
+
+# A trap's net rate below rounding level of its volume is noise, not flow: a full trap whose
+# inflow balances its losses up to the last digits must stay full, not flip full / not full on
+# the noise's sign (seen on vakaas with green roofs holding their water in a dry period).
+@testset "solveDynNetwork!: rounding-level net flow does not flip a trap" begin
+    grid = loadgrid(joinpath(artifact"swim_testdata", "data", "small", "mini.txt"))
+    ts   = spillanalysis(grid, usediags=true)
+    dry  = zeros(size(ts.topography))
+    full = DynNetwork(DynFlowPath[], [DynTrap(57, -1)], DynCulvert[])   # full, spills out
+    cap  = SWIM._build_trap_geometry(ts, full, dry)[1].capacity
+
+    s = [cap]
+    @test solveDynNetwork!(s, ts, full, dry, [-1e-16]; tmax = 100.0).kind == :none
+    @test s[1] == cap                                      # stays exactly full
+    @test solveDynNetwork!([cap], ts, full, dry, [-1e-3]).kind == :unspill   # a real deficit
+
+    filling = DynNetwork([srcpath(0)], [DynTrap(57, 0)], DynCulvert[])     # just below capacity
+    s = [prevfloat(cap)]
+    @test solveDynNetwork!(s, ts, filling, dry, [1e-16]; tmax = 100.0).kind == :none
+    @test solveDynNetwork!([prevfloat(cap)], ts, filling, dry, [1e-3]).kind == :fill
+end
