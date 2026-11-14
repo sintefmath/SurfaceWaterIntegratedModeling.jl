@@ -136,10 +136,24 @@ amount per segment rather than per cell, with the same routing and infiltration.
 
 ## 5. Order and decision points
 
-1. Steps 1–3: per-touch work that gives identical results.  Expected: a large share of the
-   92 %, also when everything has merged.
-2. Step 6 (D3): independent; could also go first.
-3. Step 4: selective touch.
-4. Step 5: prediction horizon.  The most involved; decided after measuring 1–4.
+Updated 2026-11-14, after steps 1–3 and a second profile of the 10-roof run.  Steps 1–3 removed
+what they targeted (about 35 points of the old time: baselines, context rebuilds, spill-graph
+reconcile); the 10-roof run still takes more than 93 minutes, and the ODE solves are now 64 % of
+the time (predict 45 %, commit 24 %), with routing (`_routed_inflow`) at 46 %, 28 % of it from
+the event condition.
+
+1. Steps 1–3: done.
+2. **Step 6 (D3)**: cheaper routing and solver evaluations - now the largest share.
+3. **Commit from the stored prediction** (new): a commit integrates the same trajectory the
+   prediction already computed (same window and steps, S8).  Keep the prediction's solution on
+   the context and read the committed state at `T_commit` from it, instead of solving again;
+   timepoint sampling likewise.  Roughly halves the solves, and replaces the `horizon` /
+   `stop_at` machinery.
+4. Step 4: selective touch (prepared on branch `d2-step4`); matters for separate networks.
+5. **Kept on the list, deferred:** bounded, on-demand predictions - give each network a cheap
+   lower bound on its next event and solve only when that bound could be the next event, as for
+   constant-rate traps.  The largest potential saving on predictions, but it reaches into the
+   branch-and-bound and needs bounds that are valid for every event kind; step 5 (a prediction
+   horizon) is the simpler variant.  Decided after measuring 2–4.
 
 Each step needs your go-ahead.
