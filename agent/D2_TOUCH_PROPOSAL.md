@@ -151,6 +151,10 @@ the event condition.
    timepoint sampling likewise.  Roughly halves the solves, and replaces the `horizon` /
    `stop_at` machinery.
 4. Step 4: selective touch (prepared on branch `d2-step4`); matters for separate networks.
+   - Note (later on 2026-11-14): the 10-roof run's "70x" was a never-ending fill/unspill loop on
+     rounding noise, fixed in `06f8eba`; it now takes 51.6 s (1 roof 36.7 s, no NBS 33 s).  A fresh
+     profile of the finished run should decide what comes next; the stiff solver's
+     finite-difference Jacobian (21 % in the last, loop-dominated profile) is a candidate.
 5. **Kept on the list, deferred:** bounded, on-demand predictions - give each network a cheap
    lower bound on its next event and solve only when that bound could be the next event, as for
    constant-rate traps.  The largest potential saving on predictions, but it reaches into the

@@ -115,3 +115,25 @@ with (touches × networks × network size).
    topological order), which matters where the viewer calls it per timepoint.
 
 Measure again after each step, with the same scripts.
+
+## 5. Update (later on 2026-11-14): the 10-roof slowdown was a never-ending loop
+
+The 10-roof run did not crawl through the rain: it **never ended**.  In the final, open-ended dry
+period, a full network trap (23359) flipped `:unspill` / `:fill` every 0.11 min for days of
+simulated time.  Its losses were 0 and its routed inflow 5.5e-16: the roofs hold their water at
+their thresholds, so the net rate was rounding noise around zero, and its sign decided the events.
+Fixed in `06f8eba`: a net rate below 1e-12 of a trap's capacity per time unit counts as zero
+(NBS_INVARIANTS S9).  Found with `fill_sequence`'s extended progress line and
+`watch_progress.py`.
+
+With that fix and the D2 steps 1–3, step 6 and commit-from-prediction (pinned, same case):
+
+| `fill_sequence` | Before the work | Now |
+|---|---|---|
+| no NBS | 31 s | 33 s |
+| 1 roof | 40.5 s | 36.7 s (network share 9.2 s → 3.5 s) |
+| 10 roofs | never finished | **51.6 s** |
+
+The profile shares of section 3 measured mostly that loop; a profile of the finished 10-roof run is
+still to be taken.  Remaining items: `agent/D2_TOUCH_PROPOSAL.md` (step 4, bounded predictions,
+the stiff solver's finite-difference Jacobian).
