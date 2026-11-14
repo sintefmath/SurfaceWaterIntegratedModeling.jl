@@ -31,11 +31,11 @@ end
     ev   = [(2, :nbsin, 1)]                          # one :nbsin at cell 2
 
     nd = [0.0]                                       # positive release from upstream
-    d  = D(run3, 5.0, ev, Float64[], Float64[], nothing, net, nothing, nd)
+    d  = D(SWIM._segment_maps(run3, ev), 5.0, ev, Float64[], Float64[], nothing, net, nothing, nd)
     @test nd[1] ≈ 5.0 && d ≈ 0.0                     # fully captured, nothing passes on
 
     nd = [0.0]                                       # negative: upstream NBS storing (deficit)
-    d  = D(run3, -3.0, ev, Float64[], Float64[], nothing, net, nothing, nd)
+    d  = D(SWIM._segment_maps(run3, ev), -3.0, ev, Float64[], Float64[], nothing, net, nothing, nd)
     @test nd[1] ≈ -3.0 && d ≈ 0.0                    # deficit captured (not dropped onto the trap)
 end
 
@@ -200,10 +200,10 @@ end
     nt = SWIM.DynNetwork()
     ev = [(2, :nbsin, 1)]                            # inflow cell at position 2
     nd = [0.0]
-    D([10.0, -3.0, 10.0], 5.0, ev, Float64[], Float64[], nothing, nt, nothing, nd)
+    D(SWIM._segment_maps([10.0, -3.0, 10.0], ev), 5.0, ev, Float64[], Float64[], nothing, nt, nothing, nd)
     @test nd[1] ≈ 2.0                                # 3 of the 5 fill the cell's spare capacity
     nd = [0.0]
-    D([10.0, 2.0, 10.0], -3.0, ev, Float64[], Float64[], nothing, nt, nothing, nd)
+    D(SWIM._segment_maps([10.0, 2.0, 10.0], ev), -3.0, ev, Float64[], Float64[], nothing, nt, nothing, nd)
     @test nd[1] ≈ -2.0                               # cannot remove more than the 2 leaving the cell
 end
 

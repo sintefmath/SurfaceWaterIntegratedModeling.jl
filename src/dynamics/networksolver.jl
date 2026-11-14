@@ -395,14 +395,14 @@ end
 
 # ----------------------------------------------------------------------------
 """
-    _path_delivered!(path_runoff, head_flow, events, trib_output, culvert_actual, cvplan, net,
+    _path_delivered!(maps, head_flow, events, trib_output, culvert_actual, cvplan, net,
                      trap_level, nbs_draw) -> Float64
 
 Walk one flow path, applying every stop along it, and return what arrives at the far end.
 
 # Arguments
-- `path_runoff`: this path's per-cell oblivious residual — the reference the flow is attenuated
-  against ([`_attenuate_range`](@ref)).  Read only.
+- `maps`: this path's flow-tracking maps, one per stretch between its stops
+  ([`_segment_maps`](@ref)).  Read only.
 - `head_flow`: signed flow entering at the path's head.
 - `events`: this path's ordered stops, from [`_path_event_templates`](@ref).
 - `trib_output`: delivered flow per tributary path, read at each `:trib` stop.
@@ -417,18 +417,17 @@ The signed flow delivered at the end of the path.
 At each stop: a tributary adds its signed output; a culvert outlet adds what its inlet drew; a
 culvert inlet draws `min(capacity, available)`; an NBS inflow cell intercepts everything leaving
 it, i.e. after its own residual is charged, which is what enters the footprint (and what `O_0`
-counts there), and zeroes the path.  Cell `k`'s residual is charged on the segment *leaving* `k`.
+counts there), and zeroes the path.  Cell `k`'s residual is charged on the stretch *leaving* `k`.
 
 Writing the drawn amount to `culvert_actual` and delivering exactly that at the outlet is the
 mass-conservation invariant — never the requested capacity.  `nbs_draw` is signed: a negative
 draw is an upstream NBS's deficit.
 """
-function _path_delivered!(path_runoff, head_flow, events,
+function _path_delivered!(maps, head_flow, events,
                           trib_output, culvert_actual, cvplan, net, trap_level, nbs_draw)
     current = head_flow
-    lo = 1
-    for (pos, kind, idx) in events
-        current = _attenuate_range(path_runoff, lo, pos - 1, current)
+    for (k, (_, kind, idx)) in enumerate(events)
+        current = _apply_map(maps[k], current)
         if kind === :trib
             current += trib_output[idx]
         elseif kind === :cvout
@@ -438,14 +437,13 @@ function _path_delivered!(path_runoff, head_flow, events,
             culvert_actual[idx] = a                       # drawn == delivered
             current -= a
         else                                              # :nbsin — intercept ALL flow leaving the
-            # inflow cell (charged by its own residual first, as O_0 counts it); signed: an
-            # upstream NBS storing shows up as a deficit in this NBS's input Q_in
-            nbs_draw[idx] += _attenuate_range(path_runoff, pos, pos, current)
+            # inflow cell (its map includes that cell, as O_0 counts it); signed: an upstream
+            # NBS storing shows up as a deficit in this NBS's input Q_in
+            nbs_draw[idx] += current
             current = 0.0
         end
-        lo = pos
     end
-    return _attenuate_range(path_runoff, lo, length(path_runoff), current)
+    return _apply_map(maps[end], current)
 end
 
 """
@@ -497,7 +495,7 @@ function _route_trap_node!(i, net, trap_inflow, path_flow, footprint_infil,
 end
 
 """
-    _route_flow(net, external_inflow, spilling, footprint_infil, path_runoff,
+    _route_flow(net, external_inflow, spilling, footprint_infil, path_maps,
                 path_events, order, merge_target,
                 cvplan = nothing, trap_level = nothing,
                 path_inject = nothing, trap_inject = nothing; trap_volume = nothing)
@@ -513,7 +511,7 @@ solve onto [`DynNetworkRateParams`](@ref) — so the per-step cost here is just 
 - `external_inflow`: constant inflow per trap (terrain runoff); seeds the result.
 - `spilling`: whether each trap spills (is FULL in this network), hence emitting.
 - `footprint_infil`: whole-footprint loss per trap, deducted from a full trap's spill.
-- `path_runoff`: per-path oblivious residual, the attenuation reference.  Read only.
+- `path_maps`: per-path flow-tracking maps ([`_segment_maps`](@ref)).  Read only.
 - `path_events`: per-path ordered stops ([`_path_event_templates`](@ref)).
 - `order`, `merge_target`: the routing plan ([`_network_order`](@ref), [`_merge_targets`](@ref)).
 - `cvplan`: [`CulvertPlan`](@ref), or `nothing` to ignore culverts entirely.
@@ -536,7 +534,7 @@ function _route_flow(net::DynNetwork,
                      external_inflow::AbstractVector{<:Real},
                      spilling::AbstractVector{Bool},
                      footprint_infil::AbstractVector{<:Real},
-                     path_runoff::AbstractVector{<:AbstractVector{<:Real}},
+                     path_maps::AbstractVector,
                      path_events::AbstractVector{<:AbstractVector},
                      order::AbstractVector{<:Integer},
                      merge_target::AbstractVector{<:Integer},
@@ -549,7 +547,7 @@ function _route_flow(net::DynNetwork,
     np = length(net.flow_paths)
     nt = length(net.traps)
     @assert length(external_inflow) == length(spilling) == length(footprint_infil) == nt
-    @assert length(path_runoff) == length(merge_target) == length(path_events) == np
+    @assert length(path_maps) == length(merge_target) == length(path_events) == np
 
     # every path's water arrives from an upstream trap's spill or an NBS injection at its head
     trap_inflow = Float64.(external_inflow)
@@ -563,7 +561,7 @@ function _route_flow(net::DynNetwork,
         if node <= np                               # a flow path
             p = node
             head = path_inject === nothing ? path_flow[p] : path_flow[p] + path_inject[p]
-            delivered = _path_delivered!(path_runoff[p], head,
+            delivered = _path_delivered!(path_maps[p], head,
                                          path_events[p], trib_output, culvert_actual,
                                          cvplan, net, trap_level, nbs_draw)
             tt = net.flow_paths[p].target_trap
@@ -699,12 +697,37 @@ carrying background flow (`V >= 0`) passes it unchanged; negative `d` is symmetr
 the *residual* rather than the raw infiltration is what avoids re-charging a cell the background
 already saturated.  Mirrors `_track_flow!` (`flow.jl`), which builds the very grid it reads.
 """
-function _attenuate_range(runoff, lo::Int, hi::Int, d::Float64)
-    @inbounds for k in lo:hi
-        V = runoff[k]
-        d = max(V + d, 0.0) - max(V, 0.0)
+_attenuate_range(runoff, lo::Int, hi::Int, d::Float64) = _apply_map(_range_map(runoff, lo, hi), d)
+
+# The per-cell rule d -> max(V+d, 0) - max(V, 0) is d -> max(d + min(V,0), -max(V,0)), and maps
+# of the form max(d + a, b) compose into one of the same form.  So the cells between two stops of
+# a path collapse into a single (a, b), and routing costs per stop, not per cell.
+_cell_map(V) = (min(V, 0.0), -max(V, 0.0))
+_compose((a1, b1), (a2, b2)) = (a1 + a2, max(b1 + a2, b2))
+_apply_map((a, b), d) = max(d + a, b)
+_range_map(runoff, lo, hi) =
+    foldl((m, k) -> _compose(m, _cell_map(Float64(runoff[k]))), lo:hi; init = (0.0, -Inf))
+
+"""
+    _segment_maps(runoff, events) -> Vector{NTuple{2,Float64}}
+
+The flow-tracking map of each stretch of a path between its stops, from the path's per-cell
+oblivious residual `runoff`: one per stop in `events` (the stretch leading up to it), then the
+stretch after the last stop.  Built once per touch, applied by [`_path_delivered!`](@ref) at
+every routing.
+
+The stretch up to an NBS inflow stop includes the inflow cell itself: what enters the footprint
+is what leaves that cell.  The flow is zero after that stop, and every map sends 0 to 0, so the
+next stretch starting at the same cell changes nothing.
+"""
+function _segment_maps(runoff, events)
+    maps, lo = NTuple{2,Float64}[], 1
+    for (pos, kind, _) in events
+        push!(maps, _range_map(runoff, lo, kind === :nbsin ? pos : pos - 1))
+        lo = pos
     end
-    return d
+    push!(maps, _range_map(runoff, lo, length(runoff)))
+    return maps
 end
 
 """
@@ -799,8 +822,8 @@ network-locally (`net.traps` / `net.flow_paths` order).
   flow paths: a path cell lies in its downstream trap's spill region, so `watercourses`
   accumulates it into that trap's inflow.  Paths therefore carry no inflow of their own.
 - `footprint_infil`: whole-footprint infiltration per trap
-- `path_runoff`: per-path oblivious residual runoff, the read-only reference the router
-  attenuates all flow against (real grid where available, else `-infiltration`)
+- `path_maps`: per-path flow-tracking maps ([`_segment_maps`](@ref)), from the oblivious
+  residual runoff along each path (real grid where available, else `-infiltration`)
 - `order`, `merge_target`: the static routing plan ([`_network_order`](@ref), [`_merge_targets`](@ref))
 - `path_events`: per-path in-order `(cell_pos, kind, idx)` stops — tributary junctions, plus
   culvert inlet/outlet and NBS-inlet positions when the net has culverts / NBS
@@ -812,9 +835,8 @@ struct DynNetworkRateParams
     geom::Vector{TrapGeometry}            # struct holding info about trap's geometry
     external_inflow::Vector{Float64}      # constant inflow from terrain/weather per trap
     footprint_infil::Vector{Float64}      # total footprint infiltration per trap (full trap loss)
-    path_runoff::Vector{Vector{Float64}}  # per-path oblivious residual runoff, the read-only reference
-                                          # the router attenuates all flow against (real grid where
-                                          # available, else -infiltration = cells at their capacity floor)
+    path_maps::Vector{Vector{NTuple{2,Float64}}}  # per-path flow-tracking maps, one per stretch
+                                                  # between stops (_segment_maps)
     order::Vector{Int}                    # topological sort of the flowgraph
     merge_target::Vector{Int}             # path that each tributary feeds into (0 if none)
     cvplan::Union{CulvertPlan,Nothing}    # key information per culvert for routing, or nothing if none
@@ -834,7 +856,7 @@ traps.
 - `tstruct`, `net`: the terrain and the network to solve.
 - `infiltration`: per-cell infiltration-rate grid (0 = impermeable).
 - `external_inflow`: constant inflow per trap, `net.traps` order.
-- `runoff`: the oblivious runoff grid.  Used for `path_runoff`, and required for the NBS plan.
+- `runoff`: the oblivious runoff grid.  Used for the path maps, and required for the NBS plan.
 - `precipitation`: the period's rain rate; required only when the net has NBS.
 - `zvt`: cached volume↔level tables ([`_compute_z_vol_tables`](@ref)).
 
@@ -853,7 +875,7 @@ function _build_rate_params(tstruct::TrapStructure,
                             zvt = nothing)
     tgeom = _build_trap_geometry(tstruct, net, infiltration; zvt=zvt)
     structure = DynNetworkRateParams(net, tgeom, Float64[], _footprint_infiltration(tgeom),
-                                     Vector{Float64}[], first(_network_order(net)),
+                                     Vector{NTuple{2,Float64}}[], first(_network_order(net)),
                                      _merge_targets(net),
                                      isempty(net.culverts) ? nothing : _build_culvert_plan(net, tstruct),
                                      _path_event_templates(net), nothing)
@@ -883,8 +905,8 @@ function _with_flows(p::DynNetworkRateParams, tstruct, infiltration, external_in
     end
     nbsplan = isempty(net.nbs) ? nothing : _build_nbs_plan(net, tstruct, runoff, precipitation)
     return DynNetworkRateParams(net, p.geom, Float64.(external_inflow), p.footprint_infil,
-                                path_runoff, p.order, p.merge_target, p.cvplan, p.path_events,
-                                nbsplan)
+                                _segment_maps.(path_runoff, p.path_events), p.order,
+                                p.merge_target, p.cvplan, p.path_events, nbsplan)
 end
 
 # ----------------------------------------------------------------------------
@@ -919,7 +941,7 @@ function _routed_inflow(V, p::DynNetworkRateParams)
     inject = p.nbsplan === nothing ? (nothing, nothing) :
              _nbs_injections(V, p.nbsplan, nt, length(p.net.flow_paths))
     inflow, nbs_draw = _route_flow(p.net, p.external_inflow, spilling,
-                                   p.footprint_infil, p.path_runoff,
+                                   p.footprint_infil, p.path_maps,
                                    p.path_events, p.order, p.merge_target,
                                    p.cvplan, trap_level, inject...; trap_volume = V)
     return inflow, spilling, nbs_draw

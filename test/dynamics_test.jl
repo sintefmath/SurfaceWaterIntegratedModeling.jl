@@ -211,7 +211,8 @@ end
 _rf(net, ext, spilling, fp_infil, cell_infil; cvplan = nothing, trap_level = nothing,
     trap_volume = nothing) =
     first(SWIM._route_flow(net, ext, spilling, fp_infil,
-                     [Float64[-c for c in ci] for ci in cell_infil],
+                     SWIM._segment_maps.([Float64[-c for c in ci] for ci in cell_infil],
+                                         SWIM._path_event_templates(net)),
                      SWIM._path_event_templates(net),
                      first(SWIM._network_order(net)),
                      SWIM._merge_targets(net),
