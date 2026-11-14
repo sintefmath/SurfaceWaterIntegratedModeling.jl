@@ -206,3 +206,29 @@ end
     D([10.0, 2.0, 10.0], -3.0, ev, Float64[], Float64[], nothing, nt, nothing, nd)
     @test nd[1] ≈ -2.0                               # cannot remove more than the 2 leaving the cell
 end
+
+# A context whose network did not change keeps the structural part of its rate params at a touch
+# and recomputes only the flow-dependent part (_with_flows); that must equal a full rebuild.
+@testset "NBS: reused rate params equal a full rebuild" begin
+    ts = _plane_with_pit()
+    pl = SWIM.DynNBSPlacement(SWIM.puddle(60.0; kOUT = 0.005), _upstream_footprint(ts),
+                              CartesianIndex{2}[])
+    SWIM._prepare_nbs!([pl], ts)
+    net = only(SWIM.setup_network(ts, Int[]; nbs = [pl]))
+    infil = zeros(size(ts.topography))
+    params(rain, inflow) = SWIM._build_rate_params(ts, net, infil, inflow;
+        runoff = first(watercourses(ts, fill(false, numtraps(ts)); precipitation = rain)),
+        precipitation = rain)
+    nt = length(net.traps)
+    old, new = params(1e-3, fill(0.1, nt)), params(3e-3, fill(0.4, nt))
+    R = first(watercourses(ts, fill(false, numtraps(ts)); precipitation = 3e-3))
+    reused = SWIM._with_flows(old, ts, infil, fill(0.4, nt); runoff = R, precipitation = 3e-3)
+    for f in fieldnames(SWIM.DynNetworkRateParams)
+        f in (:geom, :nbsplan) && continue
+        @test getfield(reused, f) == getfield(new, f)
+    end
+    @test reused.geom === old.geom                     # the structural part is shared, not rebuilt
+    for (a, b) in zip(reused.nbsplan.elems, new.nbsplan.elems), f in fieldnames(SWIM.NBSElement)
+        @test getfield(a, f) == getfield(b, f)
+    end
+end

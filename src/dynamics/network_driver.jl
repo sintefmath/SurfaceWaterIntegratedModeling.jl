@@ -115,24 +115,31 @@ end
 
 """
     _rebuild_contexts!(driver, tstruct, rateinfo, infiltration, z_vol_tables, cur_amounts,
-                       full_set, cur_time, endtime) -> driver
+                       full_set, cur_time, endtime; changed = nothing) -> driver
 
 Discard `driver.contexts` and rebuild one context per current component, each seeded from the
 committed volumes and re-predicted out to `endtime`.  A context is a pure function of its
 component plus those volumes, so a full rebuild is correct after any structural change.
+`changed`, when given, holds the components whose structure an event changed; every other
+component that already had a context keeps the structural part of its rate params.
 
 Mutates `driver.contexts` (replaced wholesale); the committed volumes and NBS layers it reads
 are left as they are.
 """
 function _rebuild_contexts!(driver::NetworkDriver, tstruct, rateinfo, infiltration,
-                            z_vol_tables, cur_amounts, full_set, cur_time, endtime)
+                            z_vol_tables, cur_amounts, full_set, cur_time, endtime;
+                            changed = nothing)
 
     state0 = _driver_state0(driver, tstruct, rateinfo, cur_amounts, full_set,
                             cur_time, z_vol_tables)
+    # components are matched by identity: a merge creates new objects, a grow changes its owner
+    reusable = changed === nothing ? IdDict() :
+        IdDict(ctx.net => ctx.params for ctx in driver.contexts if !(ctx.net in changed))
     driver.contexts = DynNetworkContext[]
     for net in driver.comps
         ctx = _make_context(net, tstruct, rateinfo, state0, cur_time, infiltration,
-                            z_vol_tables, driver.precip, driver.nbs_state)
+                            z_vol_tables, driver.precip, driver.nbs_state,
+                            get(reusable, net, nothing))
         _predict_network!(ctx, tstruct, endtime)
         push!(driver.contexts, ctx)
     end
@@ -299,6 +306,10 @@ function _touch_networks_driver!(driver::NetworkDriver, changetimeest, sgraph, t
     _harvest!(driver)
     _apply_fired_boundaries!(driver.vol_by_trapix, fired, tstruct)
 
+    # the components a fired trap belongs to change structure; the others keep their rate params
+    changed = Base.IdSet{DynNetwork}(ctx.net for ctx in driver.contexts
+                                     if any(ft in ctx.global_ix for ft in keys(fired)))
+
     # apply each fired structural transition to the live components
     full_traps = findall(filled_traps)
     for (ft, k) in fired
@@ -314,7 +325,7 @@ function _touch_networks_driver!(driver::NetworkDriver, changetimeest, sgraph, t
 
     # rebuild the contexts off the mutated component set and re-predict
     _rebuild_contexts!(driver, tstruct, rateinfo, infiltration, z_vol_tables,
-                       cur_amounts, Set(full_traps), cur_time, endtime)
+                       cur_amounts, Set(full_traps), cur_time, endtime; changed = changed)
     nts = _net_trap_set(driver.contexts)
     ncs = _net_covered_set(driver.contexts, tstruct)
     _apply_network_changetimeest!(changetimeest, driver.contexts, ncs)

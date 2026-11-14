@@ -236,13 +236,15 @@ end
 
 """
     _make_context(net, tstruct, rateinfo, state0, cur_time, infiltration, z_vol_tables,
-                  precipitation, nbs_state) -> DynNetworkContext
+                  precipitation, nbs_state, reuse = nothing) -> DynNetworkContext
 
 Build one context from a single network component, committed at `cur_time`.  `state0(g)`
 supplies the initial committed volume for the global trap index `g`; NBS placements travel on
 `net.nbs`, their layer states restored from the persistent `nbs_state` store.  The rate params
 are built here from the current `rateinfo` (inflow and runoff), `infiltration` and
-`precipitation` (the weather period's rain rate) and frozen on the context.
+`precipitation` (the weather period's rain rate) and frozen on the context.  `reuse`, the params
+of an earlier context of the same, unchanged `net`, supplies their structural part, so only the
+flow-dependent part is recomputed.
 
 No argument is mutated (`nbs_state` is read only); `net` is stored by reference into the
 returned context.
@@ -250,7 +252,8 @@ returned context.
 function _make_context(net::DynNetwork, tstruct, rateinfo, state0, cur_time,
                        infiltration, z_vol_tables,
                        precipitation = 0.0,
-                       nbs_state = Dict{Int,Vector{Float64}}())
+                       nbs_state = Dict{Int,Vector{Float64}}(),
+                       reuse = nothing)
     global_ix = Int[t.trap_ix for t in net.traps]
     # Trap volumes, then one appended state per NBS layer (in `net.nbs` order, matching
     # `_build_nbs_plan`'s state_base offsets), restored from the persistent store so NBS
@@ -258,10 +261,12 @@ function _make_context(net::DynNetwork, tstruct, rateinfo, state0, cur_time,
     state     = vcat(Float64[state0(g) for g in global_ix],
                      _nbs_layer_block(net, nbs_state))
     node_leaves = _node_leaf_regions(net, tstruct)
-    params = _build_rate_params(tstruct, net, infiltration,
-                                _external_inflow(rateinfo, node_leaves);
-                                runoff = rateinfo.runoff, precipitation = precipitation,
-                                zvt = z_vol_tables)
+    inflow = _external_inflow(rateinfo, node_leaves)
+    params = reuse === nothing ?
+        _build_rate_params(tstruct, net, infiltration, inflow; runoff = rateinfo.runoff,
+                           precipitation = precipitation, zvt = z_vol_tables) :
+        _with_flows(reuse, tstruct, infiltration, inflow; runoff = rateinfo.runoff,
+                    precipitation = precipitation)
     return DynNetworkContext(net, state, global_ix,
                              _inflow_regions(node_leaves),
                              cur_time,

@@ -851,41 +851,39 @@ function _build_rate_params(tstruct::TrapStructure,
                             runoff::Union{AbstractMatrix{<:Real},Nothing} = nothing,
                             precipitation::Union{AbstractMatrix{<:Real},Real,Nothing} = nothing,
                             zvt = nothing)
-    nt = length(net.traps)
-    np = length(net.flow_paths)
-    @assert length(external_inflow) == nt
-    order, _        = _network_order(net)
-    # Per-path oblivious residual runoff — the reference the router attenuates all flow against.
-    # With a real grid it is background-aware (a cell the background saturated charges the network
-    # flow nothing); without one (hand-built nets) cells sit at their capacity floor (-infiltration),
-    # which reproduces the plain infiltration-prefix behaviour.
+    tgeom = _build_trap_geometry(tstruct, net, infiltration; zvt=zvt)
+    structure = DynNetworkRateParams(net, tgeom, Float64[], _footprint_infiltration(tgeom),
+                                     Vector{Float64}[], first(_network_order(net)),
+                                     _merge_targets(net),
+                                     isempty(net.culverts) ? nothing : _build_culvert_plan(net, tstruct),
+                                     _path_event_templates(net), nothing)
+    return _with_flows(structure, tstruct, infiltration, external_inflow;
+                       runoff = runoff, precipitation = precipitation)
+end
+
+# `p` with its flow-dependent parts recomputed: external inflow, path residuals and NBS plan.  The
+# rest depends only on the network and the period's infiltration, so a context whose network did
+# not change keeps it across a touch.
+function _with_flows(p::DynNetworkRateParams, tstruct, infiltration, external_inflow;
+                     runoff = nothing, precipitation = nothing)
+    net = p.net
+    @assert length(external_inflow) == length(net.traps)
+    # The reference the router attenuates all flow against.  With a real grid it is
+    # background-aware (a cell the background saturated charges the network flow nothing); without
+    # one (hand-built nets) cells sit at their capacity floor (-infiltration).
     path_runoff = runoff === nothing ?
         [Float64[-c for c in ci] for ci in _path_cell_values(net, infiltration)] :
         _path_cell_values(net, runoff)
-    cvplan  = isempty(net.culverts) ? nothing : _build_culvert_plan(net, tstruct)
-    if isempty(net.nbs)
-        nbsplan = nothing
-    else
+    if !isempty(net.nbs)
         runoff === nothing &&
             error("_build_rate_params: net has NBS but no runoff grid was supplied")
         precipitation === nothing &&
             error("_build_rate_params: net has NBS but no precipitation was supplied " *
                   "(needed for each placement's throughput: rain on the footprint + inflow)")
-        nbsplan = _build_nbs_plan(net, tstruct, runoff, precipitation)
     end
-    # in-order tributary/culvert stops per path (tributaries only when there are no culverts)
-    events = _path_event_templates(net)
-    tgeom = _build_trap_geometry(tstruct, net, infiltration; zvt=zvt)
-    footprint_infil = _footprint_infiltration(tgeom)
-    return DynNetworkRateParams(net,
-                                tgeom,
-                                Float64.(external_inflow),
-                                footprint_infil,
-                                path_runoff,
-                                order,
-                                _merge_targets(net),
-                                cvplan,
-                                events,
+    nbsplan = isempty(net.nbs) ? nothing : _build_nbs_plan(net, tstruct, runoff, precipitation)
+    return DynNetworkRateParams(net, p.geom, Float64.(external_inflow), p.footprint_infil,
+                                path_runoff, p.order, p.merge_target, p.cvplan, p.path_events,
                                 nbsplan)
 end
 
