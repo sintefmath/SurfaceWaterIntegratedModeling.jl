@@ -145,7 +145,6 @@ function _fill_sequence_for_weather_event!(seq, sgraph, rateinfo, changetimeest,
 
     count = 0
     while cur_time < endtime
-        verbose && (mod(count+=1, 10) == 0) && println("Fill sequence iteration: ", count)
 
         cur_time, fill_updates =
             _identify_next_status_change!(changetimeest, cur_amounts, rateinfo,
@@ -154,6 +153,11 @@ function _fill_sequence_for_weather_event!(seq, sgraph, rateinfo, changetimeest,
                                           net_trap_set, net_covered_set)
 
         (cur_time > endtime || isempty(fill_updates)) && break # no more events to register
+        # progress, with the time reached and what changed, to tell a crawl or a trap flipping
+        # back and forth from steady progress
+        verbose && mod(count += 1, 10) == 0 &&
+            println("Fill sequence iteration: ", count, ", t = ", cur_time, ", changed: ",
+                    [(u.index, u.value) for u in fill_updates])
 
         # an emptied dynamic network parent exposes its children as transitory traps; flush
         fill_updates = _expand_empty_network_fill_updates(fill_updates, driver.contexts, tstruct)

@@ -77,7 +77,9 @@ placements(K) = [SWIM.DynNBSPlacement(roof(), cells_of[b], 2, CartesianIndex{2}[
 for K in (isempty(ARGS) ? [1, 10] : parse.(Int, ARGS))
     nbs = placements(K)
     @printf("K = %d green roofs, %d footprint cells\n", K, sum(length(p.footprint) for p in nbs))
-    s = phase("fill_sequence (K=$K NBS)", () -> SWIM.fill_sequence(ts, w; infiltration = infil, nbs = nbs))
+    # SWIM_VERBOSE=1 prints fill_sequence's progress lines, for the progress monitor
+    s = phase("fill_sequence (K=$K NBS)", () -> SWIM.fill_sequence(ts, w; infiltration = infil, nbs = nbs,
+                                                                  verbose = get(ENV, "SWIM_VERBOSE", "0") == "1"))
     @printf("events %d\n", length(s))
     flush(stdout)
 end
