@@ -116,13 +116,17 @@ before) commits it there and predicts on.
 - **Results:** identical up to rounding.
 - **Risk:** low to medium.
 
-## 3. Separate question for you: exits per roof
+## 3. Exits per roof: deferred (2026-11-14)
 
-A roof drains over its whole edge, and every edge cell water leaves through becomes an exit with
-its own path: 200–570 per roof on vakaas, 2,570 paths in the merged network.  Most run side by
-side to the same few traps.  Merging exits whose paths lead to the same place would shrink the
-networks considerably, but it changes how an NBS's outflow reaches the terrain (where it enters,
-and what it passes on the way), so it is a modelling decision, not just a speed-up.
+A roof drains over its whole edge, and every edge cell water leaves through has its own path down
+the terrain: 200–570 per roof on vakaas, 2,570 paths in the merged network.  Paths that reach the
+same cell are already joined there (the later one becomes a tributary), so they stay separate
+only while they really run on different cells.
+
+Merging exits would send the water of several edge cells down one path: only that path's cells
+would infiltrate, and the overland flow would change.  **Decision: not now; possibly revisited
+later.**  The cost of many paths is addressed instead by step 6, which makes a path cost a fixed
+amount per segment rather than per cell, with the same routing and infiltration.
 
 ## 4. What stays the same
 
