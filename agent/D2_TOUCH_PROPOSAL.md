@@ -143,8 +143,9 @@ the time (predict 45 %, commit 24 %), with routing (`_routed_inflow`) at 46 %, 2
 the event condition.
 
 1. Steps 1–3: done.
-2. **Step 6 (D3)**: cheaper routing and solver evaluations - now the largest share.
-3. **Commit from the stored prediction** (new): a commit integrates the same trajectory the
+2. **Step 6 (D3)**: done - composed path maps, routing buffers, lookup wetted infiltration and
+   water level.
+3. **Commit from the stored prediction** (new; done): a commit integrates the same trajectory the
    prediction already computed (same window and steps, S8).  Keep the prediction's solution on
    the context and read the committed state at `T_commit` from it, instead of solving again;
    timepoint sampling likewise.  Roughly halves the solves, and replaces the `horizon` /

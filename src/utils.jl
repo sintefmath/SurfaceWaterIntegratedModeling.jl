@@ -445,20 +445,15 @@ function _rebuild_replay_driver(driver, tstruct, seeds, culverts, nbs, filled, a
                                 nbs_state = nbs_state)
 end
 
-# sample the network state at absolute time `tp`: for each component, integrate a COPY of its
-# committed state forward (no topology event can fall before the next seq event, which is > tp),
-# then read the trap volumes and per-placement NBS layer volumes off the result.
+# sample the network state at absolute time `tp`: for each component, read its state at `tp`
+# (from its stored prediction where that covers `tp`; no topology event can fall before the next
+# seq event, which is > tp), then the trap volumes and per-placement NBS layer volumes.
 function _sample_network(driver, tstruct, tp::Float64)
     trap_volumes = Dict{Int,Float64}()
     nbs_layers   = Dict{Int,Vector{Float64}}()
     driver === nothing && return (; trap_volumes, nbs_layers)
     for ctx in driver.contexts
-        s = copy(ctx.state)
-        # over the prediction's window, stopping at tp, so the solver takes the prediction's
-        # steps and meets no event before the predicted one
-        horizon = ctx.horizon >= tp ? ctx.horizon : tp
-        solveDynNetwork!(s, tstruct, ctx.params; tmax = horizon - ctx.last_solve_time,
-                         stop_at = tp - ctx.last_solve_time, stop_at_steady = false)
+        s = _state_at(ctx, tstruct, tp)
         for (i, g) in enumerate(ctx.global_ix)
             trap_volumes[g] = s[i]
         end
