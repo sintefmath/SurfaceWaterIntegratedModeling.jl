@@ -56,6 +56,19 @@ standing guidance.
   `test/runtests.jl`); do not add threading or task-based concurrency without
   discussion.
 
+## Running Julia: always pin to the P-cores
+
+On the development machine, **never run Julia without pinning it to the P-cores**:
+
+```
+taskset -c 0,2,4,6,8,10,12,14 julia ...
+```
+
+This applies to every invocation: tests, `Pkg.test()`, scripts, `-e` one-liners, background
+runs and timing/profiling runs.  Left to the scheduler, Julia lands on the E-cores, which is
+about an order of magnitude slower, invalidates timings and profiles, and slows down the whole
+development loop.
+
 ## Running tests
 
 Tests require the `swim_testdata` artifact (downloaded automatically via

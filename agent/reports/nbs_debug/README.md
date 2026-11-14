@@ -2,6 +2,9 @@
 
 Scripts used while fixing and restructuring the NBS module. See `agent/NBS_INVARIANTS.md` ("Open follow-ups").
 
+On the development machine, always pin Julia to the P-cores: prefix every command below with
+`taskset -c 0,2,4,6,8,10,12,14` (on E-cores runs are an order of magnitude slower).
+
 | Script | What it does | Run with |
 |---|---|---|
 | `run_tests.jl` | Runs every NBS/dynamics test file plus the `Upstream area`, `Sequencing` and `Sequence runoff matches watercourses` testsets, each isolated, so one failure cannot hide the others. (`Pkg.test()` also runs the whole suite now: the known-broken checks are wrapped or `@test_broken`.) | `julia --project=. agent/reports/nbs_debug/run_tests.jl` (from the repo root) |
