@@ -282,7 +282,7 @@ end
         end
         for g in geom
             g.capacity <= 0 && continue
-            nfp = length(g.footprint)
+            nfp = length(g.bottoms)
             # empty: level at bottom; full: level held at the spillpoint (whole footprint wetted)
             @test SWIM.water_level(g, 0.0) == g.zmin
             @test SWIM.water_level(g, g.capacity) ≈ ts.spillpoints[g.trap_ix].elevation
@@ -290,7 +290,7 @@ end
             # above the spillpoint never pond as part of the trap, so they carry no
             # infiltration (see `_ponding_mask`); the full-capacity loss is therefore
             # <= the whole-footprint value and equals 0.5 times the ponding-cell count.
-            nland = count(<(ts.spillpoints[g.trap_ix].elevation), g.bottom)
+            nland = count(<(ts.spillpoints[g.trap_ix].elevation), g.bottoms)
             @test SWIM.wetted_infiltration(g, g.capacity) ≈ 0.5 * nland
             @test SWIM.wetted_infiltration(g, g.capacity) <= 0.5 * nfp + 1e-12
             # half-full: level within the trap, infiltration monotone in fill

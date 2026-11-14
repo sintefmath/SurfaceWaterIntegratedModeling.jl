@@ -26,21 +26,22 @@ and the state `V` ranges over `0 .. capacity`.
 # Fields
 - `trap_ix`: index of the trap in the [`TrapStructure`](@ref)
 - `capacity`: own storage volume, net of subtraps
-- `footprint`: linear indices of the footprint cells
-- `bottom`: terrain bottom per footprint cell; parent-trap cells over a subtrap are raised
-  to the subtrap's spillpoint so a submerged subtrap reads as wetted
-- `infil`: infiltration rate per footprint cell (0 where impermeable)
 - `zmin`: lowest bottom elevation (level of an empty trap)
-- `v2z`: stored-volume -> water-level interpolation (see [`water_level`](@ref))
+- `vknots`, `zknots`: the volume -> level table ([`_compute_z_vol_tables`](@ref)), read by
+  [`water_level`](@ref)
+- `bottoms`: the footprint cells' bottoms, sorted; parent-trap cells over a subtrap are raised to
+  the subtrap's spillpoint so a submerged subtrap reads as wetted
+- `infil_below`: infiltration rate summed over the cells up to `bottoms[k]` (cells at or above
+  the spillpoint count 0), so the wetted loss at any level is one lookup
 """
 struct TrapGeometry
-    trap_ix::Int            # index of the trap in the TrapStructure
-    capacity::Float64       # own storage volume, net of subtraps
-    footprint::Vector{Int}  # linear indices of the footprint cells
-    bottom::Vector{Float64} # terrain bottom per footprint cell
-    infil::Vector{Float64}  # infiltration rate per footprint cell (0 where impermeable)
-    zmin::Float64           # lowest bottom elevation (level of an empty trap)
-    v2z   # volume -> level map; untyped (perf is a later concern, correctness first)
+    trap_ix    ::Int
+    capacity   ::Float64
+    zmin       ::Float64
+    vknots     ::Vector{Float64}
+    zknots     ::Vector{Float64}
+    bottoms    ::Vector{Float64}
+    infil_below::Vector{Float64}
 end
 
 # ----------------------------------------------------------------------------
@@ -85,14 +86,6 @@ function _build_trap_geometry(tstruct::TrapStructure,
             capacity = Float64(tstruct.trapvolumes[tix])
         end
 
-        zmin    = minimum(bottom)
-        zvtable = zvt[tix]
-        # a single-row table is a degenerate flat trap with no storage: level is always zmin
-        v2z = length(zvtable[2]) == 1 ?
-            (_ -> zmin) :
-            Interpolations.linear_interpolation(zvtable[2], zvtable[1],
-                                                extrapolation_bc = Interpolations.Line())
-
         infil = Float64.(infiltration[footprint])
 
         # Cells at/above the spillpoint never pond, so drop their infiltration.  This keeps the
@@ -104,7 +97,9 @@ function _build_trap_geometry(tstruct::TrapStructure,
             tstruct.topography[footprint[k]] >= _sp && (infil[k] = 0.0)
         end
 
-        geom[i] = TrapGeometry(tix, capacity, footprint, bottom, infil, zmin, v2z)
+        order   = sortperm(bottom)
+        geom[i] = TrapGeometry(tix, capacity, minimum(bottom), zvt[tix][2], zvt[tix][1],
+                               bottom[order], cumsum(infil[order]))
     end
     return geom
 end
@@ -120,11 +115,16 @@ Water surface elevation of a trap at a given stored volume.
 - `V`: stored volume, net of subtraps.
 
 # Returns
-The surface elevation: `g.zmin` when empty (`V <= 0`), else `g.v2z(V)`, held at the spillpoint
-once `V` reaches `g.capacity`.
+The surface elevation: `g.zmin` when empty (`V <= 0`), else interpolated linearly in the
+volume -> level table, held at the spillpoint once `V` reaches `g.capacity`.  A single-row table
+is a flat trap with no storage, whose level is always `g.zmin`.
 """
 function water_level(g::TrapGeometry, V::Real)
-    return V <= 0.0 ? g.zmin : Float64(g.v2z(min(V, g.capacity)))
+    v, z = g.vknots, g.zknots
+    (V <= 0.0 || length(v) == 1) && return g.zmin
+    Vc = min(V, g.capacity)
+    k  = clamp(searchsortedlast(v, Vc), 1, length(v) - 1)
+    return z[k] + (z[k+1] - z[k]) * (Vc - v[k]) / (v[k+1] - v[k])
 end
 
 # ----------------------------------------------------------------------------
@@ -139,20 +139,14 @@ water.
 - `V`: stored volume, net of subtraps.
 
 # Returns
-The per-cell rate summed over cells whose `bottom` lies at or below [`water_level`](@ref)`(g, V)`.
+The per-cell rate summed over cells whose bottom lies at or below [`water_level`](@ref)`(g, V)`, read from `g.infil_below`.
 A step function of `V` (cells wet in whole units), which is why the steady-state detector must be
 discrete.  At capacity the level reaches the spillpoint and the whole footprint infiltrates,
 matching `_footprint_infiltration`.
 """
 function wetted_infiltration(g::TrapGeometry, V::Real)
-    z = water_level(g, V)
-    s = 0.0
-    @inbounds for k in eachindex(g.bottom)
-        if g.bottom[k] <= z
-            s += g.infil[k]
-        end
-    end
-    return s
+    k = searchsortedlast(g.bottoms, water_level(g, V))
+    return k == 0 ? 0.0 : g.infil_below[k]
 end
 
 # ============================================================================
@@ -589,11 +583,11 @@ The loss a full trap incurs, when its whole footprint is submerged.
 - `geom`: per-trap geometry, from [`_build_trap_geometry`](@ref).
 
 # Returns
-Per-cell `infil` summed over each trap's footprint, in `geom` order — the ceiling that
+The infiltration summed over each trap's footprint, in `geom` order — the ceiling that
 [`wetted_infiltration`](@ref) approaches as `V` reaches capacity.  Nothing is mutated.
 """
 function _footprint_infiltration(geom::Vector{TrapGeometry})
-    return [sum(g.infil) for g in geom]
+    return [isempty(g.infil_below) ? 0.0 : g.infil_below[end] for g in geom]
 end
 
 # ----------------------------------------------------------------------------
