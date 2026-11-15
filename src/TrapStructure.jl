@@ -11,7 +11,7 @@ A struct representing a watershed drainage trap for topographical analysis.
 # Fieldnames
 
 - `topography::Matrix{T}`: raster grid of terrain height values.
-- `flowgraph::Graphs.SimpleDiGraph`: graph describing flow routing between cells
+- `flowgraph::Graphs.SimpleDiGraph{Int}`: graph describing flow routing between cells
 - `regions::Matrix{Int}`: raster grid with region numbers (see [`spillregions`](@ref))
 - `spillpoints::Vector{Spillpoint{T}}`: vector with spill point information per trap
                                      (see [`spillpoints`](@ref))
@@ -36,7 +36,8 @@ A struct representing a watershed drainage trap for topographical analysis.
 mutable struct TrapStructure{T<:Real}
 
     topography::Matrix{T}           # raster grid of terrain height values
-    flowgraph::Graphs.SimpleDiGraph  # graph describing flow routing between cells
+    # graph describing flow routing between cells (concrete type: it is walked cell by cell)
+    flowgraph::Graphs.SimpleDiGraph{Int}
     trap_bottoms::Vector{CartesianIndex{2}} # list of trap bottom cells in grid
     regions::Matrix{Int}            # raster grid with region numbers
     spillpoints::Vector{Spillpoint{T}} # vector with spill point information per trap
