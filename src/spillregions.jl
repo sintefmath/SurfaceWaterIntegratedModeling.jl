@@ -54,17 +54,16 @@ function spillregions(spillfield::Matrix{Int8};
     
     isnothing(tiling) || _not_implemented_yet("tiling")
     regions = similar(spillfield, Int64)
-    edges = Set{Tuple{Int, Int}}()
     domain = Domain2D(1:size(spillfield,1), 1:size(spillfield,2))
     cut_edges_bidir = _prepare_cut_edges_bidir(cut_edges, size(spillfield))
     bottomcells = Vector{CartesianIndex{2}}()
     
     if tiling == nothing
-        _process_domain!(regions, edges, bottomcells, spillfield, domain, 
-                         grid=grid,
-                         usediags=usediags,
-                         cut_edges=cut_edges_bidir,
-                         directed_culverts=culverts)
+        culvert_of, leak_flow = _process_domain!(regions, bottomcells, spillfield, domain,
+                                                 grid=grid,
+                                                 usediags=usediags,
+                                                 cut_edges=cut_edges_bidir,
+                                                 directed_culverts=culverts)
     else
         @assert false "proper parallel implementation of spillregions not yet complete."
         # @@@ TODO What needs to be done is ensure that edges crossing tile boundaries
@@ -102,11 +101,7 @@ function spillregions(spillfield::Matrix{Int8};
     # the domain.
     _renumerate_regions!(regions, exitregions=enoderegs)
 
-    # create spillfield graph; skip edges representing self-loops
-    N = prod(size(spillfield)) # total number of grid cells (vertices)
-    g = Graphs.SimpleDiGraph([Graphs.SimpleEdge{Int64}((e[1], e[2])) for e in edges
-                                  if e[1] != e[2]])
-    Graphs.add_vertices!(g, N - Graphs.nv(g)) # add any missing vertices (i.e. those without edges)
+    g = _build_flowgraph(spillfield, culvert_of, leak_flow)
 
     println("Number of gridcells: ", prod(size(spillfield)))
     println("Number of graph nodes; ", Graphs.nv(g))
@@ -262,7 +257,6 @@ end
 
 # ----------------------------------------------------------------------------
 function _process_domain!(regions::Matrix{Int64},
-                          edges::Set{Tuple{Int, Int}},
                           bottomcells::Vector{CartesianIndex{2}},
                           spillfield::Matrix{Int8},
                           domain;
@@ -279,20 +273,16 @@ function _process_domain!(regions::Matrix{Int64},
 
     println("Identifying edges connecting neighbor 'trap bottom' cells...") #@@@
     # Identify grid edges connecting neighbor 'trap bottom' cells.
-    all_connections = Set{Tuple{Int, Int}}()
+    flat_edges = Set{Tuple{Int, Int}}()
     leak_edges = Set{Tuple{Int, Int}}() # potential leak points from zero volume traps
-    _flat_zone_connecting_edges!(all_connections, leak_edges, spilldomain, gdomain, usediags)
+    _flat_zone_connecting_edges!(flat_edges, leak_edges, spilldomain, gdomain, usediags)
 
     # eliminate the edges where barriers split flat zones into separate regions
-    setdiff!(all_connections, cut_edges)
+    setdiff!(flat_edges, cut_edges)
     setdiff!(leak_edges, cut_edges)
-    
-    # Identify grid edges constituting "streamlines"
-    _spillfield_flow_edges!(edges, spilldomain)
 
-    # Redirect flow across culverts: If the culvert is between p1 to p2, insert
-    # an edge between these two points, directed from highest (p1) to lowest
-    # (p2) elevation, and remove any edges flowing out from p1.
+    # Redirect flow across culverts: if the culvert is between p1 and p2, the
+    # water at p1 flows to p2 (highest to lowest elevation) instead of downhill.
     LI = LinearIndices(size(spilldomain))
     @assert gdomain != nothing || isempty(directed_culverts) "Culverts only supported if grid is present, since we need to identify the direction of flow through the culvert"
 
@@ -306,14 +296,8 @@ function _process_domain!(regions::Matrix{Int64},
     ignored > 0 &&
         @info "Ignored $ignored culvert(s) sharing an inlet with an earlier one"
 
-    # Out-edges of an inlet are replaced by its culvert edge.  Remove them first:
-    # deleting afterwards would also take a culvert edge that coincides with one.
-    setdiff!(edges, Set(e for e in edges if haskey(culverts, e[1])))
-
+    culvert_of = Dict(p1 => LI[c[2]] for (p1, c) in culverts)
     for (p1, c) in culverts
-        # add edge from p1 to p2
-        push!(edges, (p1, LI[c[2]]))
-
         # a sloping culvert can serve as a leak edge.  A completely flat
         # culvert should not be considered a leak edge, since this may cause loops
         # in the flowgraph when leak points are connected below.
@@ -323,16 +307,11 @@ function _process_domain!(regions::Matrix{Int64},
         end
     end
 
-    # identify regions connected by streamlines
-    union!(all_connections, edges)
-    components = _determine_connected_components(all_connections, length(regions))
-    
-    # filling in spill regions
-    regionsdomain .= 0 # masked areas do not have any spill regions, and will be
-                       # left with region value 0 (masked, inactive)
-    for i in 1:length(components)
-        regionsdomain[components[i]] .= i
-    end
+    # identify regions connected by streamlines and flat zones; masked areas have no spill
+    # region, and keep region value 0 (masked, inactive)
+    labels, ncomponents = _spill_components(spilldomain, culvert_of, flat_edges)
+    regionsdomain .= reshape(labels, size(regionsdomain))
+    leak_flow = Tuple{Int, Int}[]    # flow added from zero-volume traps' bottoms to their leak
     
     # set leak points from zero volume traps
     println("Setting leak points from zero volume traps...") 
@@ -344,7 +323,7 @@ function _process_domain!(regions::Matrix{Int64},
         reg_bcells = _region_bottomcells(regionsdomain, spilldomain,
                                          culverts=directed_culverts) # a Dict
 
-        remap = Vector{Int}(1:length(components)) # remapping of region numbers
+        remap = Vector{Int}(1:ncomponents) # remapping of region numbers
         for e in unique_leak_edges
             src_reg = regionsdomain[e[1]]
             # remap all regions that were mapped to the zero-volume trap to the
@@ -357,7 +336,7 @@ function _process_domain!(regions::Matrix{Int64},
             # would also assign edges from the cells that are _actual_ bottom cells of
             # the region.  Hence the elevation comparison below.
             for bc in get(reg_bcells, src_reg, CartesianIndex{2}[])
-                (gdomain[bc] == gdomain[e[1]]) && push!(edges, (LI[bc], LI[e[2]]))
+                (gdomain[bc] == gdomain[e[1]]) && push!(leak_flow, (LI[bc], LI[e[2]]))
             end
         end
 
@@ -373,6 +352,67 @@ function _process_domain!(regions::Matrix{Int64},
         append!(bottomcells,
                 setdiff(findall(spilldomain .== -1), [x[1] for x in directed_culverts]))
     end
+    return culvert_of, leak_flow
+end
+
+# Where cell `c` sends its flow: a culvert inlet to its outlet, a trap bottom, sink or cell draining
+# out of the domain to itself, any other active cell to its downhill neighbour.  0 for cells
+# without flow (inactive or masked).  The one rule behind both the spill regions and the flow graph.
+function _flow_target(spillfield, c::Int, culvert_of)
+    haskey(culvert_of, c) && return culvert_of[c]
+    dir = spillfield[c]
+    (dir == _SPILLFIELD_INACTIVE_FLAG || dir == -2) && return 0
+    (dir == -3 || dir == -1) && return c
+    ishift = (dir == 0 || dir == 4 || dir == 7) ? -1 : (dir == 1 || dir == 5 || dir == 6) ? 1 : 0
+    jshift = (dir == 2 || dir == 4 || dir == 6) ? -1 : (dir == 3 || dir == 5 || dir == 7) ? 1 : 0
+    nb = CartesianIndices(spillfield)[c] + CartesianIndex(ishift, jshift)
+    return checkbounds(Bool, spillfield, nb) ? LinearIndices(spillfield)[nb] : c
+end
+
+# The spill regions: the connected components of the links between cells - each cell with its
+# `_flow_target`, and neighbouring cells of a flat zone - found with union-find.  Components are
+# numbered by their lowest cell, as `Graphs.connected_components` does, since the leak-point merge
+# depends on that order.  Returns the label per cell (0 for cells in no link) and their count.
+function _spill_components(spillfield, culvert_of, flat_edges)
+    N = length(spillfield)
+    parent = collect(1:N)          # a root is always its component's lowest cell
+    linked = falses(N)
+    function root(x)
+        while parent[x] != x
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        end
+        return x
+    end
+    function link!(a, b)
+        linked[a] = linked[b] = true
+        ra, rb = root(a), root(b)
+        ra != rb && (parent[max(ra, rb)] = min(ra, rb))
+    end
+    for c in 1:N
+        t = _flow_target(spillfield, c, culvert_of)
+        t == 0 || link!(c, t)
+    end
+    foreach(e -> link!(e...), flat_edges)
+    labels, n = zeros(Int, N), 0
+    for c in 1:N                   # ascending, so a component's root comes first
+        linked[c] || continue
+        r = root(c)
+        labels[c] = r == c ? (n += 1) : labels[r]
+    end
+    return labels, n
+end
+
+# The flow graph: an edge from each cell to its `_flow_target` (self-loops skipped), plus the flow
+# added from zero-volume traps' bottoms to their leak points.
+function _build_flowgraph(spillfield, culvert_of, leak_flow)
+    g = Graphs.SimpleDiGraph(length(spillfield))
+    for c in eachindex(spillfield)
+        t = _flow_target(spillfield, c, culvert_of)
+        (t == 0 || t == c) || Graphs.add_edge!(g, c, t)
+    end
+    foreach(((a, b),) -> a != b && Graphs.add_edge!(g, a, b), leak_flow)
+    return g
 end
 
 # ----------------------------------------------------------------------------
