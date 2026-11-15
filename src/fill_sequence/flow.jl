@@ -2,7 +2,8 @@ import Graphs
 export compute_flow
 
 """
-    compute_flow(spillgraph, precipitation, infiltration, tstruct, verbose=false)
+    compute_flow(spillgraph, precipitation, infiltration, tstruct, verbose=false;
+                 cell_order=nothing)
 
 For a given spillgraph, precipitation and infiltration rates, compute the runoff
 and trap inflows, in the form of a [`RateInfo`](@ref) object.
@@ -16,6 +17,8 @@ and trap inflows, in the form of a [`RateInfo`](@ref) object.
         Can be given either as a single scalar, or cell-wise in the form of a Matrix
 - `tstruct::TrapStructure{<:Real}`: object representing the trap sturcture
 - `verbose::Bool`: if `true`, dump progress information during computation
+- `cell_order`: a topological order of `tstruct.flowgraph`, passed on to
+                [`watercourses`](@ref) (computed there if `nothing`)
 
 See also [`SpillGraph`](@ref), [`TrapStructure`](@ref).
 """
@@ -23,13 +26,14 @@ function compute_flow(spillgraph::SpillGraph,
                       precipitation::Union{Real, Matrix{<:Real}},
                       infiltration::Union{Real, Matrix{<:Real}},
                       tstruct::TrapStructure{<:Real},
-                      verbose::Bool=false)
+                      verbose::Bool=false;
+                      cell_order = nothing)
     num_traps = length(tstruct.spillpoints)
     num_regions = length(tstruct.supertraps_of)
 
     # compute initial spillfield with all traps empty
     println("compute initial rateinfo with all traps empty")
-    rateinfo = _compute_initial_rateinfo(precipitation, infiltration, tstruct)
+    rateinfo = _compute_initial_rateinfo(precipitation, infiltration, tstruct; cell_order)
 
     # --- Add influence of traps spilling over ---
 
@@ -175,7 +179,8 @@ end
 
 # ----------------------------------------------------------------------------
 """
-    _compute_initial_rateinfo(precipitation, infiltration, tstruct) -> RateInfo
+    _compute_initial_rateinfo(precipitation, infiltration, tstruct; cell_order = nothing)
+        -> RateInfo
 
 The [`RateInfo`](@ref) for a terrain with every trap empty: the baseline runoff field and each
 lowest-level trap's inflow, before any trap spills.  Scalar `precipitation` / `infiltration` are
@@ -185,7 +190,7 @@ Higher-level traps start at zero inflow — they only receive once their childre
 runoff field is NBS-oblivious; an NBS's effect is applied later as a signed correction inside
 the network solver.  Nothing is mutated; the `RateInfo` is freshly built.
 """
-function _compute_initial_rateinfo(precipitation, infiltration, tstruct)
+function _compute_initial_rateinfo(precipitation, infiltration, tstruct; cell_order = nothing)
     if typeof(precipitation) <: Real
         precipitation = precipitation .* ones(size(tstruct.regions))
     end
@@ -198,7 +203,8 @@ function _compute_initial_rateinfo(precipitation, infiltration, tstruct)
     runoff, reg_accum, _, _ =
         watercourses(tstruct, [false],
                      precipitation=precipitation,
-                     infiltration=infiltration)
+                     infiltration=infiltration,
+                     cell_order=cell_order)
 
     Smin = zeros(length(tstruct.footprints))
     Smax = zeros(length(tstruct.footprints))

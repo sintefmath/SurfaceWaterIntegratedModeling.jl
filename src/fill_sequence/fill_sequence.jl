@@ -63,6 +63,9 @@ function fill_sequence(tstruct::TrapStructure{<:Real},
 
     # tables mapping water level -> trap volume
     z_vol_tables = _compute_z_vol_tables(tstruct)
+    # the cells in flow order, for every weather period's `watercourses` (it depends only on the
+    # terrain, and sorting a large grid is a noticeable share of each call)
+    cell_order = Graphs.topological_sort_by_dfs(tstruct.flowgraph)
 
     # set initial filled_traps, cur_amounts and spillgraph
     filled_traps = Vector{Bool}(tstruct.trapvolumes .== 0.0)
@@ -81,7 +84,7 @@ function fill_sequence(tstruct::TrapStructure{<:Real},
         @assert(all([ca.time == cur_time for ca ∈ cur_amounts]))
 
         # flow rates for the current spillgraph and rain rate
-        rateinfo = compute_flow(sgraph, we.rain_rate, infiltration, tstruct, verbose)
+        rateinfo = compute_flow(sgraph, we.rain_rate, infiltration, tstruct, verbose; cell_order)
 
         # supporting structures for the dynamic networks (empty if there are no seeds)
         driver = build_network_driver(tstruct,

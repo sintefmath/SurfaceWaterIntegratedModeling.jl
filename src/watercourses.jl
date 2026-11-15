@@ -3,7 +3,7 @@ import Graphs
 export watercourses, saturated_spillgraph, flow_path_from
 
 """
-    watercourses(tstruct, full_traps, precipitation, infiltration)
+    watercourses(tstruct, full_traps; precipitation, infiltration, cell_order = nothing)
 
 Compute the total intensity of flow of water across all non-lake grid cells in
 the terrain.
@@ -24,6 +24,10 @@ grid with the corresponding values.
 - `infiltration::Matrix{<:Real}`: A grid expressing the maximum infiltration rate
                                   per grid cell.  If left empty, it will be substituted
                                   by a grid filled with zeros.
+- `cell_order`: a topological order of `tstruct.flowgraph`
+                (`Graphs.topological_sort_by_dfs(tstruct.flowgraph)`), or `nothing` to compute
+                it here.  It depends only on the terrain; pass it when calling repeatedly,
+                since sorting a large grid takes a noticeable share of the call.
 
 # Returns
 - `runoff::Matrix{Float64}`: Grid expressing infiltration excess runoff rate
@@ -43,7 +47,8 @@ grid with the corresponding values.
 function watercourses(tstruct::TrapStructure{<:Real},
                       full_traps::Vector{Bool};
                       precipitation::Union{Matrix{<:Real}, Real} = 1.0,
-                      infiltration::Union{Matrix{<:Real}, Real} = 0.0)
+                      infiltration::Union{Matrix{<:Real}, Real} = 0.0,
+                      cell_order = nothing)
 
     # expand `precipitation` and `infiltration` to matrices if necessary
     gridres = size(tstruct.topography)
@@ -58,8 +63,8 @@ function watercourses(tstruct::TrapStructure{<:Real},
     # Compute basic flow field intensity, as if all traps were empty
     #g = compute_spillfield_graph(tstruct.spillfield)
     g = tstruct.flowgraph
-    sortedg = Graphs.topological_sort_by_dfs(g) # sort nodes to avoid invalidating
-                                                # earlier work
+    # sort nodes to avoid invalidating earlier work
+    sortedg = cell_order === nothing ? Graphs.topological_sort_by_dfs(g) : cell_order
     for cur_node in sortedg
 
         if runoff[cur_node] >= 0
