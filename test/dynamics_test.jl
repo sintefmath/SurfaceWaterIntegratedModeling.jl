@@ -315,12 +315,13 @@ end
         @test all(abs.(dV[findall(spilling)]) .< 1e-9)   # full traps dV ~ 0
         @test dV[end] > 0                                 # leaf fills
 
-        # starved (no inflow, only infiltration): every full trap drains
+        # starved (no inflow, only infiltration): a full trap is held at capacity (rate 0) and its
+        # deficit is the :unspill event, fired at once; the non-full leaf drains
         pC = SWIM._build_rate_params(ts, net, fill(0.1, size(ts.topography)), zeros(nt))
-        VC = [g.capacity for g in pC.geom]
+        VC = [g.capacity for g in pC.geom]; VC[end] = prevfloat(VC[end])
         dVC = similar(VC); dynNetworkRateFunction!(dVC, VC, pC, 0.0)
-        @test all(dVC .< 0)
-        @test dVC ≈ -pC.footprint_infil
+        @test all(dVC[pC.spilling] .== 0.0) && !pC.spilling[end] && dVC[end] < 0
+        @test SWIM._t0_fast_path(VC, pC, numregions(ts)).kind == :unspill
     end
 
     @testset "solveDynNetwork! events" begin
@@ -898,6 +899,29 @@ end
         @test Set(keys(ftF2)) == Set(keys(ftP))
         @test maxΔ(ftP, ftF2) < PARITY_TOL
     end
+end
+
+# A network trap's ponding loss is the infiltration capacity its cells' rain and through-flow leave
+# unused, as in base SWIM: the runoff has already taken the rest off its inflow.  Charging the full
+# rate counted the wetted cells' infiltration twice during rain, so network traps filled late
+# (1.2 min on vakaas at 20 mm/h).
+@testset "fill_sequence dyn_traps parity: rain with infiltration" begin
+    grid  = loadgrid(joinpath(artifact"swim_testdata", "data", "small", "mini.txt"))
+    ts    = spillanalysis(grid, usediags=true)
+    rain  = [WeatherEvent(0.0, 1.0)]
+    infil = fill(0.3, size(ts.topography))
+    function filltimes(seq)
+        d = Dict{Int,Float64}()
+        for e in seq[2:end], u in e.filled
+            u.value && get!(d, u.index, e.timestamp)
+        end
+        return d
+    end
+    base = filltimes(fill_sequence(ts, rain; infiltration = infil))
+    nets = filltimes(fill_sequence(ts, rain; infiltration = infil,
+                                   dyn_traps = collect(1:numtraps(ts))))
+    @test Set(keys(nets)) == Set(keys(base))
+    @test maximum(abs(base[t] - nets[t]) for t in keys(base)) < PARITY_TOL
 end
 
 @testset "culverts through fill_sequence (end-to-end structural invariants)" begin

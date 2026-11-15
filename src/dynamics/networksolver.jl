@@ -31,8 +31,10 @@ and the state `V` ranges over `0 .. capacity`.
   [`water_level`](@ref)
 - `bottoms`: the footprint cells' bottoms, sorted; parent-trap cells over a subtrap are raised to
   the subtrap's spillpoint so a submerged subtrap reads as wetted
-- `infil_below`: infiltration rate summed over the cells up to `bottoms[k]` (cells at or above
-  the spillpoint count 0), so the wetted loss at any level is one lookup
+- `pond_cells`: the cell at each `bottoms[k]`, or 0 for a cell at or above the spillpoint, which
+  never ponds
+- `infil_below`: the ponding loss summed over the cells up to `bottoms[k]`, so the wetted loss at
+  any level is one lookup (see [`_ponding_loss`](@ref))
 """
 struct TrapGeometry
     trap_ix    ::Int
@@ -41,19 +43,38 @@ struct TrapGeometry
     vknots     ::Vector{Float64}
     zknots     ::Vector{Float64}
     bottoms    ::Vector{Float64}
+    pond_cells ::Vector{Int}
     infil_below::Vector{Float64}
 end
 
+# What a ponded footprint cell loses: the infiltration capacity its own rain and the flow through
+# it leave unused, `-min(runoff, 0)`, as in base SWIM's `_ponding_infiltration`.  The runoff field
+# has already taken the rest off the trap's inflow, so charging the full rate counted it twice
+# during rain.  On an NBS footprint the runoff never goes below 0 (no infiltration there, I3), so
+# it loses nothing.  Without a runoff grid (hand-built nets) cells sit at their capacity floor and
+# lose the full rate.
+_ponding_loss(infiltration, runoff) =
+    runoff === nothing ? (c -> Float64(infiltration[c])) : (c -> -min(Float64(runoff[c]), 0.0))
+
+# `infil_below` for footprint cells in bottom order (0 = a cell that never ponds)
+_infil_below(pond_cells, loss) = cumsum([c == 0 ? 0.0 : loss(c) for c in pond_cells])
+
+# `g` with its ponding losses recomputed, for new flows; its shape stays
+_with_losses(g::TrapGeometry, loss) =
+    TrapGeometry(g.trap_ix, g.capacity, g.zmin, g.vknots, g.zknots, g.bottoms, g.pond_cells,
+                 _infil_below(g.pond_cells, loss))
+
 # ----------------------------------------------------------------------------
 """
-    _build_trap_geometry(tstruct, net, infiltration; zvt=nothing) -> Vector{TrapGeometry}
+    _build_trap_geometry(tstruct, net, loss; zvt=nothing) -> Vector{TrapGeometry}
 
 Precompute the geometry the rate function needs for every trap in `net`.
 
 # Arguments
 - `tstruct`: supplies each trap's footprint, topography, volumes and spillpoint.
 - `net`: the network; its `traps` fix the output order.
-- `infiltration`: per-cell rate grid (0 = impermeable).
+- `loss`: what a ponded cell loses, `cell -> rate` ([`_ponding_loss`](@ref)), or a per-cell rate
+  grid (0 = impermeable).
 - `zvt`: cached volume↔level tables ([`_compute_z_vol_tables`](@ref)); computed here if
   `nothing`.
 
@@ -62,9 +83,11 @@ One [`TrapGeometry`](@ref) per trap, in `net.traps` order.  A parent's `bottom` 
 its subtraps' spillpoint and its `capacity` is net of them; footprint cells at or above the
 spillpoint get `infil = 0`, since they never pond.  Nothing is mutated.
 """
-function _build_trap_geometry(tstruct::TrapStructure,
-                              net::DynNetwork,
-                              infiltration::AbstractMatrix{<:Real};
+_build_trap_geometry(tstruct::TrapStructure, net::DynNetwork, infiltration::AbstractMatrix{<:Real};
+                     zvt = nothing) =
+    _build_trap_geometry(tstruct, net, _ponding_loss(infiltration, nothing); zvt = zvt)
+
+function _build_trap_geometry(tstruct::TrapStructure, net::DynNetwork, loss::Function;
                               zvt = nothing)
 
     zvt === nothing && (zvt = _compute_z_vol_tables(tstruct))
@@ -86,20 +109,15 @@ function _build_trap_geometry(tstruct::TrapStructure,
             capacity = Float64(tstruct.trapvolumes[tix])
         end
 
-        infil = Float64.(infiltration[footprint])
-
-        # Cells at/above the spillpoint never pond, so drop their infiltration.  This keeps the
+        # Cells at/above the spillpoint never pond, so they lose nothing.  This keeps the
         # wetted-area loss continuous at V = capacity — else a trap pinned at its spillpoint by a
         # balancing through-flow chatters full<->not-full.  Test the actual terrain, not raised
         # `bottom` (same rule as `_ponding_infiltration` / `fill_trap_until`).
-        _sp = Float64(tstruct.spillpoints[tix].elevation)   # concrete: Spillpoint.elevation is ::Real
-        @inbounds for k in eachindex(infil)
-            tstruct.topography[footprint[k]] >= _sp && (infil[k] = 0.0)
-        end
-
-        order   = sortperm(bottom)
+        sp    = Float64(tstruct.spillpoints[tix].elevation)
+        order = sortperm(bottom)
+        cells = [tstruct.topography[c] >= sp ? 0 : c for c in footprint[order]]
         geom[i] = TrapGeometry(tix, capacity, minimum(bottom), zvt[tix][2], zvt[tix][1],
-                               bottom[order], cumsum(infil[order]))
+                               bottom[order], cells, _infil_below(cells, loss))
     end
     return geom
 end
@@ -904,7 +922,7 @@ function _build_rate_params(tstruct::TrapStructure,
                             runoff::Union{AbstractMatrix{<:Real},Nothing} = nothing,
                             precipitation::Union{AbstractMatrix{<:Real},Real,Nothing} = nothing,
                             zvt = nothing)
-    tgeom = _build_trap_geometry(tstruct, net, infiltration; zvt=zvt)
+    tgeom = _build_trap_geometry(tstruct, net, _ponding_loss(infiltration, runoff); zvt = zvt)
     structure = DynNetworkRateParams(net, tgeom, Float64[], _footprint_infiltration(tgeom),
                                      Vector{NTuple{2,Float64}}[], first(_network_order(net)),
                                      _merge_targets(net),
@@ -916,9 +934,9 @@ function _build_rate_params(tstruct::TrapStructure,
                        runoff = runoff, precipitation = precipitation)
 end
 
-# `p` with its flow-dependent parts recomputed: external inflow, path residuals and NBS plan.  The
-# rest depends only on the network and the period's infiltration, so a context whose network did
-# not change keeps it across a touch.
+# `p` with its flow-dependent parts recomputed: external inflow, path residuals, the traps'
+# ponding losses and the NBS plan.  The rest depends only on the network, so a context whose
+# network did not change keeps it across a touch.
 function _with_flows(p::DynNetworkRateParams, tstruct, infiltration, external_inflow;
                      runoff = nothing, precipitation = nothing)
     net = p.net
@@ -937,7 +955,9 @@ function _with_flows(p::DynNetworkRateParams, tstruct, infiltration, external_in
                   "(needed for each placement's throughput: rain on the footprint + inflow)")
     end
     nbsplan = isempty(net.nbs) ? nothing : _build_nbs_plan(net, tstruct, runoff, precipitation)
-    return DynNetworkRateParams(net, p.geom, Float64.(external_inflow), p.footprint_infil,
+    loss    = _ponding_loss(infiltration, runoff)
+    geom    = [_with_losses(g, loss) for g in p.geom]
+    return DynNetworkRateParams(net, geom, Float64.(external_inflow), _footprint_infiltration(geom),
                                 _segment_maps.(path_runoff, p.path_events), p.order,
                                 p.merge_target, p.cvplan, p.path_events, nbsplan,
                                 p.spilling, p.buffers)
@@ -1011,10 +1031,11 @@ function dynNetworkRateFunction!(dV, V, p::DynNetworkRateParams, t = 0.0)
 
     @assert length(dV) == length(V) == nt + _nbs_state_count(p)
     @inbounds for i in 1:nt
-        # full: whole footprint wetted and the surplus spills, so only a deficit drains it;
-        # accumulating: infiltrates only through the wetted footprint
-        dV[i] = spilling[i] ?
-            min(_net_rate(inflow[i] - p.footprint_infil[i], geom[i]), 0.0) :
+        # full: pinned at capacity, the surplus spills and a deficit is the :unspill event, which
+        # ends the solve.  Its rate is identically 0, so the stiff solver's finite-difference
+        # Jacobian has no row to couple other states into it (with `min(rate, 0)` it drifted
+        # above capacity on vakaas).  Accumulating: infiltrates only through the wetted footprint.
+        dV[i] = spilling[i] ? 0.0 :
             _net_rate(inflow[i] - wetted_infiltration(geom[i], V[i]), geom[i])
         # Physical floor: volume cannot go below zero.  When an EMPTY trap has negative
         # computed dV (e.g. a culvert trying to draw from it), clamp to zero rather than
@@ -1335,13 +1356,12 @@ function _validate_network(tstruct::TrapStructure,
 end
 
 """
-    _t0_fast_path(V0, du0, p, nreg) -> (; time, trap, kind) or nothing
+    _t0_fast_path(V0, p, nreg) -> (; time, trap, kind) or nothing
 
 Catch an entry state that cannot be held, so the caller can skip integration entirely.
 
 # Arguments
 - `V0`: the entry state.
-- `du0`: the rate at `V0`, from one rate-function evaluation.
 - `p`: the [`DynNetworkRateParams`](@ref) for this solve.
 - `nreg`: region count, distinguishing a parent from a leaf.
 
@@ -1349,20 +1369,20 @@ Catch an entry state that cannot be held, so the caller can skip integration ent
 `(; time = 0.0, trap, kind)` with `trap` a **global** index, or `nothing` when the state is
 viable and the ODE should run.  Nothing is mutated.
 
-A FULL trap already draining (`du0 < 0`) unspills at once; a parent at its floor (`V == 0`) with
-negative net inflow must expose its children now.  A zero-capacity trap (a parent whose subtraps
-all spill at its own level) has no volume between full and empty, so it is decided at once too:
-it fills if its net inflow is positive, and a parent empties otherwise.  A zero-capacity leaf
-with no net inflow just sits empty.  These checks recompute the *unclamped* net rate, since
-`du0`'s physical floor guard has already zeroed it at the floor.
+A FULL trap whose net inflow is already a deficit unspills at once; a parent at its floor
+(`V == 0`) with negative net inflow must expose its children now.  A zero-capacity trap (a parent
+whose subtraps all spill at its own level) has no volume between full and empty, so it is decided
+at once too: it fills if its net inflow is positive, and a parent empties otherwise.  A
+zero-capacity leaf with no net inflow just sits empty.  These checks compute the net rate from the
+routed inflow, since the rate function holds a full trap at 0 and floors an empty one.
 """
-function _t0_fast_path(V0, du0, p::DynNetworkRateParams, nreg::Int)
+function _t0_fast_path(V0, p::DynNetworkRateParams, nreg::Int)
     nt = length(p.geom)
+    inflow0, _ = _routed_inflow(V0, p)
     for i in 1:nt
-        p.spilling[i] && du0[i] < 0.0 || continue
+        p.spilling[i] && _net_rate(inflow0[i] - p.footprint_infil[i], p.geom[i]) < 0.0 || continue
         return (time = 0.0, trap = p.net.traps[i].trap_ix, kind = :unspill)
     end
-    inflow0, _ = _routed_inflow(V0, p)
     for i in 1:nt
         g, parent = p.geom[i], p.net.traps[i].trap_ix > nreg
         zerocap = g.capacity == 0.0
@@ -1500,7 +1520,7 @@ function solveDynNetwork!(state::AbstractVector{Float64},
     nreg = numregions(tstruct)
 
     # return an immediate event if the entry state cannot be held (state left for the caller)
-    ev0 = _t0_fast_path(V0, du0, p, nreg)
+    ev0 = _t0_fast_path(V0, p, nreg)
     ev0 === nothing || return ev0
 
     # empty window: nothing to advance

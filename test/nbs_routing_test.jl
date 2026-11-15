@@ -208,26 +208,33 @@ end
 end
 
 # A context whose network did not change keeps the structural part of its rate params at a touch
-# and recomputes only the flow-dependent part (_with_flows); that must equal a full rebuild.
+# and recomputes only the flow-dependent part (_with_flows); that must equal a full rebuild.  The
+# infiltration exceeds the lighter rain, so the traps' ponding losses differ between the two.
 @testset "NBS: reused rate params equal a full rebuild" begin
     ts = _plane_with_pit()
     pl = SWIM.DynNBSPlacement(SWIM.puddle(60.0; kOUT = 0.005), _upstream_footprint(ts),
                               CartesianIndex{2}[])
     SWIM._prepare_nbs!([pl], ts)
     net = only(SWIM.setup_network(ts, Int[]; nbs = [pl]))
-    infil = zeros(size(ts.topography))
-    params(rain, inflow) = SWIM._build_rate_params(ts, net, infil, inflow;
-        runoff = first(watercourses(ts, fill(false, numtraps(ts)); precipitation = rain)),
-        precipitation = rain)
+    infil = SWIM._nbs_zero_infiltration!(fill(2e-3, size(ts.topography)), [pl])
+    runoff(rain) = first(watercourses(ts, fill(false, numtraps(ts)); precipitation = rain,
+                                      infiltration = infil))
+    params(rain, inflow) = SWIM._build_rate_params(ts, net, infil, inflow; runoff = runoff(rain),
+                                                   precipitation = rain)
     nt = length(net.traps)
     old, new = params(1e-3, fill(0.1, nt)), params(3e-3, fill(0.4, nt))
-    R = first(watercourses(ts, fill(false, numtraps(ts)); precipitation = 3e-3))
-    reused = SWIM._with_flows(old, ts, infil, fill(0.4, nt); runoff = R, precipitation = 3e-3)
+    reused = SWIM._with_flows(old, ts, infil, fill(0.4, nt); runoff = runoff(3e-3),
+                              precipitation = 3e-3)
     for f in fieldnames(SWIM.DynNetworkRateParams)
         f in (:geom, :nbsplan, :buffers) && continue
         @test getfield(reused, f) == getfield(new, f)
     end
-    @test reused.geom === old.geom && reused.buffers === old.buffers   # shared, not rebuilt
+    @test old.footprint_infil != new.footprint_infil                  # the losses did change
+    for (a, b) in zip(reused.geom, new.geom), f in fieldnames(SWIM.TrapGeometry)
+        @test getfield(a, f) == getfield(b, f)
+    end
+    @test all(a.bottoms === o.bottoms for (a, o) in zip(reused.geom, old.geom))   # shape shared
+    @test reused.buffers === old.buffers
     for (a, b) in zip(reused.nbsplan.elems, new.nbsplan.elems), f in fieldnames(SWIM.NBSElement)
         @test getfield(a, f) == getfield(b, f)
     end
