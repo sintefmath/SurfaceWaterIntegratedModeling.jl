@@ -153,3 +153,9 @@ Fixed, each with bit-identical event histories (`event_record.jl` / `event_recor
 | `bc33c16` | cell graph sorted once per `fill_sequence` (`cell_order`) | 12.7 s | 25.9 s |
 
 The last one gains little with 3 weather periods; it grows with the number of periods.
+
+`spillanalysis` (2026-11-15): `c051041` builds the spill regions with union-find and the flow graph
+directly from each cell's flow target, instead of a cell-sized edge set and
+`connected_components`.  vakaas: 12.6 → 7.4 s bare, 15.2 → 8.8 s with the webapp setup.  The
+trap structure is identical field by field on 17 cases, including the six flattened SUrbArea grids
+bare and with the webapp setup (`tstruct_record.jl` / `tstruct_record_compare.jl`).
