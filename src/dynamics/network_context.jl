@@ -28,9 +28,9 @@ Fields:
   event's new flows (e.g. a just-filled trap's spill crossing an NBS) and lose water.
 - `next_event`: cached prediction `(; time, trap, kind)` of the network's next
   event, with `time` an ABSOLUTE timestamp and `trap` a global trap index.
-- `prediction`: that prediction's solver solution, a function of the time elapsed since
-  `last_solve_time` (or `nothing`).  A commit or a sample reads the state from it instead of
-  integrating the same trajectory again.
+- `prediction`: that prediction's solver solution, its saved steps in time elapsed since
+  `last_solve_time` (or `nothing`).  A commit or a sample starts from its last step before the
+  time it needs, instead of integrating the same trajectory again.
 """
 mutable struct DynNetworkContext
     net             ::DynNetwork
@@ -134,19 +134,27 @@ end
 # how far (relative to the absolute time) a commit may lie past the predicted event: rounding only
 const _COMMIT_EVENT_RTOL = 1e-9
 
-# The state of `ctx` at absolute time `t` (not before its committed time).  Read from the stored
-# prediction where it covers `t`: that is the trajectory a solve would compute again.  Beyond it
-# (the prediction stopped at a steady state, or there is none), integrated on from where it ends;
-# an event there is one the prediction did not see, which is an error.
+# The state of `ctx` at absolute time `t` (not before its committed time): the stored prediction's
+# last saved step at or before `t`, which is on the trajectory a solve would compute again,
+# integrated on to `t`.  Not interpolated: the solver's dense output is unreliable over a step
+# that crosses a rate jump (a trap reaching empty, a wetted-area step) or that an event cut short,
+# and was seen 1 % of a trap's capacity off, below zero (vakaas with infiltration).  In the
+# prediction's last step the short solve may meet the predicted event a little early (solver
+# tolerance), and the state is then the event's; any other event, e.g. beyond a prediction that
+# stopped at a steady state, is one the prediction did not see, which is an error.
 function _state_at(ctx::DynNetworkContext, tstruct, t)
     sol, dt = ctx.prediction, t - ctx.last_solve_time
-    covered = sol === nothing ? 0.0 : sol.t[end]
+    ts = sol === nothing ? [0.0] : sol.t
     # an absolute time converted back to elapsed (e.g. the predicted event's) rounds
-    dt <= covered + 4eps(max(abs(t), 1.0)) &&
-        return sol === nothing ? copy(ctx.state) : sol(min(dt, covered))
-    state = sol === nothing ? copy(ctx.state) : sol(covered)
-    res = solveDynNetwork!(state, tstruct, ctx.params; tmax = dt - covered, stop_at_steady = false)
-    @assert res.kind == :none "network state at $t: a $(res.kind) event the prediction did not see"
+    rounding = 4eps(max(abs(t), 1.0))
+    dt <= ts[end] + rounding && (dt = min(dt, ts[end]))
+    k = searchsortedlast(ts, dt)
+    state = sol === nothing ? copy(ctx.state) : copy(sol.u[k])
+    dt - ts[k] <= rounding && return state
+    res = solveDynNetwork!(state, tstruct, ctx.params; tmax = dt - ts[k], stop_at_steady = false)
+    last_step = k < length(ts) && ts[k + 1] == ts[end]
+    @assert(res.kind == :none || last_step && ctx.next_event.kind != :none,
+            "network state at $t: a $(res.kind) event the prediction did not see")
     return state
 end
 
@@ -155,8 +163,8 @@ end
 
 Advance `ctx`'s committed state to absolute time `T_commit`, under the frozen `ctx.params`
 (the rates valid since the last touch — so this is order-independent of any intervening
-spillgraph/flow update).  The state is read from the stored prediction ([`_state_at`](@ref)),
-so a commit normally costs no solve.
+spillgraph/flow update).  The state is taken from the stored prediction ([`_state_at`](@ref)),
+so a commit costs at most a step or two of solving.
 
 Every event before `T_commit` has been handled by the caller, so `T_commit` must not lie past
 this context's predicted event (it is that event's time when the event triggered the commit).

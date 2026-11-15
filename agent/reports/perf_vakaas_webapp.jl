@@ -55,6 +55,13 @@ ts = phase("spillanalysis (webapp setup)", () -> EC._compute_tstruct(ws, selecti
 flush(stdout)
 
 infil = get(cache, "infiltration_rate_grid", zeros(ws["resolution"]))
+# vakaas has no vegetation layer (hidden in the model data); SWIM_INFIL_MMH=r stands in for it
+# with a uniform rate r (mm/h) on every cell that is neither building nor water
+if haskey(ENV, "SWIM_INFIL_MMH")
+    sealed = something(get(cache, "building_grid", nothing), falses(ws["resolution"])) .|
+             something(get(cache, "water_grid", nothing), falses(ws["resolution"]))
+    infil = ifelse.(sealed, 0.0, parse(Float64, ENV["SWIM_INFIL_MMH"]) / (1000 * 60))
+end
 @printf("infiltrating cells: %d\n", count(>(0), infil))
 rain = 120.0 / (1000 * 60)                             # 120 mm/h, in m/min as the app uses
 w = [SWIM.WeatherEvent(0.0, rain), SWIM.WeatherEvent(30.0, 0.0), SWIM.WeatherEvent(120.0, 0.0)]

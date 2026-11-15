@@ -165,8 +165,11 @@ the older NBS design notes in `agent/archive/` are obsolete).  Introductions for
 new to the NBS code: `agent/NBS_INTRO_OVERVIEW.md`, `agent/NBS_INTRO_DETAILED.md`.
 
 Invariants: a **full** trap has `spill_path != 0` (`> 0` downstream, `-1` out of
-domain); a **transitory** frontier has `spill_path == 0` and must hold
-`V < capacity` (the driver clamps a non-full seed to `prevfloat(C)`). A
+domain) and holds exactly its capacity; a **transitory** frontier has `spill_path == 0` and
+must hold `0 <= V < capacity` (the driver clamps a non-full seed to `prevfloat(C)`: an event
+condition starting at exactly 0 never fires). A zero-capacity trap therefore enters at
+`prevfloat(0.0)` and is filled or emptied at once (`_t0_fast_path`). Asserted in
+`_validate_network`. A
 terrain-re-emit NBS (`n_terrain ≥ 1`) needs a footprint with a downhill terrain
 exit; a closed-basin footprint needs piped outlets.
 

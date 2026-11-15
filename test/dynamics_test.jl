@@ -441,6 +441,8 @@ end
 
         @test  any(c -> c.trap == li && c.kind == :fill,  conds)
         @test !any(c -> c.trap == li && c.kind == :empty, conds)  # leaf: no :empty
+        @test  any(c -> c.trap == li && c.kind == :floor, conds)  # only set exactly empty
+        @test !any(c -> c.trap == pi && c.kind == :floor, conds)
 
         @test  any(c -> c.trap == pi && c.kind == :fill,  conds)
         @test  any(c -> c.trap == pi && c.kind == :empty, conds)  # parent: has :empty
@@ -554,9 +556,9 @@ end
         @test isapprox(res3.time, t_e; rtol=1e-3) && isapprox(s3[1], C; rtol=1e-3)
 
         # tmax == 0: nothing advances, state unchanged, no event.
-        s0  = [0.3]
+        s0  = [C / 2]
         res0 = solveDynNetwork!(s0, ts, net, infil, [1.0]; tmax = 0.0)
-        @test res0.kind == :none && res0.time == 0.0 && s0 == [0.3]
+        @test res0.kind == :none && res0.time == 0.0 && s0 == [C / 2]
 
         # Steady state below a finite tmax must still report Inf (not tmax): trap 57
         # settles at a sub-capacity equilibrium (inflow 0.3 < max infiltration 1.1).
@@ -759,12 +761,11 @@ end
     ti_in = findfirst(t -> t.culvert_inlets == [1], net.traps)
     @test ti_in !== nothing
 
-    # Upstream FULL traps + culvert draining one of them, leaf EMPTY.
+    # All traps FULL (built with every trap in full_traps), a culvert draining one of them.
     # The culvert makes the inlet trap the only one with a negative net inflow -> unspill.
     zer   = zeros(size(ts.topography))
     p     = SWIM._build_rate_params(ts, net, zer, zeros(nt))
     state = [g.capacity for g in p.geom]
-    state[end] = 0.0   # leaf must be TRANSITORY/EMPTY per contract
     res = solveDynNetwork!(state, ts, net, zer, zeros(nt))
     @test res.kind == :unspill
     @test res.trap == net.traps[ti_in].trap_ix
@@ -978,6 +979,44 @@ end
     # (c) a parent at its floor with positive inflow fills instead
     s3 = [0.0]
     @test solveDynNetwork!(s3, ts, net, zeros(size(ts.topography)), [1.0]).kind == :fill
+end
+
+# A leaf draining to empty has no event there, but its rate jumps to zero at V = 0.  The solve
+# sets it to exactly 0 when it gets there, instead of stepping across the jump at abstol-sized
+# steps (a million steps per solve on vakaas, leaving traps at negative volumes).
+@testset "solveDynNetwork!: a leaf draining to empty stops at exactly 0" begin
+    grid  = loadgrid(joinpath(artifact"swim_testdata", "data", "small", "mini.txt"))
+    ts    = spillanalysis(grid, usediags=true)
+    net   = DynNetwork([srcpath(0)], [DynTrap(57, 0)], DynCulvert[])
+    infil = zeros(size(ts.topography)); infil[ts.footprints[57]] .= 0.1
+    cap   = SWIM._build_trap_geometry(ts, net, infil)[1].capacity
+    s     = [prevfloat(cap)]
+    res   = solveDynNetwork!(s, ts, net, infil, [0.0]; keep_solution = true)
+    @test res.kind == :none && res.time == Inf     # settled empty
+    @test s[1] == 0.0
+    @test res.solution.stats.naccept < 100
+end
+
+# A zero-capacity trap (a parent whose subtraps all spill at its own level, common on flattened
+# terrain) has no volume between full and empty.  Not full, it enters just below 0 and is
+# decided at once: it fills with a positive net inflow and empties (exposing its subtraps)
+# otherwise.  Left transitory below 0, it could never empty and its subtraps never drained.
+@testset "solveDynNetwork!: a zero-capacity parent fills or empties at once" begin
+    grid = loadgrid(joinpath(artifact"swim_testdata", "data", "small", "mini.txt"))
+    ts   = spillanalysis(grid, usediags=false)
+    CI   = CartesianIndices(size(ts.topography))
+    net  = mk_network(ts, [CI[ts.footprints[1051][1]]], [150, 158])[1]   # subsumes 150, 158
+    @test [t.trap_ix for t in net.traps] == [1051]
+    dry  = zeros(size(ts.topography))
+    @test SWIM._build_trap_geometry(ts, net, dry)[1].capacity == 0.0
+    infil = zeros(size(ts.topography)); infil[ts.footprints[1051]] .= 0.1
+
+    drains = solveDynNetwork!([prevfloat(0.0)], ts, net, infil, [0.0])
+    @test drains.kind == :empty && drains.trap == 1051 && drains.time == 0.0
+    fills = solveDynNetwork!([prevfloat(0.0)], ts, net, infil, [10.0])
+    @test fills.kind == :fill && fills.trap == 1051 && fills.time == 0.0
+    idle = solveDynNetwork!([prevfloat(0.0)], ts, net, dry, [0.0])      # no flow: not held
+    @test idle.kind == :empty && idle.time == 0.0
 end
 
 # A slow but nonzero flow must not be dropped: a solve to a fixed time (commit, sampling) runs

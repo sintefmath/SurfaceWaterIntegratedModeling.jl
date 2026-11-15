@@ -159,3 +159,27 @@ directly from each cell's flow target, instead of a cell-sized edge set and
 `connected_components`.  vakaas: 12.6 → 7.4 s bare, 15.2 → 8.8 s with the webapp setup.  The
 trap structure is identical field by field on 17 cases, including the six flattened SUrbArea grids
 bare and with the webapp setup (`tstruct_record.jl` / `tstruct_record_compare.jl`).
+
+## 7. Update (2026-11-15): with infiltration
+
+A uniform 20 mm/h on every cell that is neither building nor water (`SWIM_INFIL_MMH=20` in
+`perf_vakaas_webapp.jl`; the real vegetation layer is hidden in the model data) exposed three
+network defects, all in the dry period:
+
+- A leaf draining to empty met the rate's jump to zero at V = 0 with no event there: the solver
+  stepped across it at abstol-sized steps until `maxiters` (two solves of 340 s, a million steps
+  each), leaving traps at negative volumes; and a solve stopped by `maxiters` was read as a steady
+  state.  Fixed: a non-terminating `:floor` condition sets the leaf to exactly 0; any other stop
+  than an event, steady state or `tmax` is an error (S11).
+- A zero-capacity parent (subtraps all spilling at its own level; 7 on vakaas) exposed by its
+  parent's `:empty` entered at `prevfloat(0.0)`, below its floor, so it never emptied and its
+  subtraps' 13 m³ never infiltrated.  Fixed: the t = 0 fast path fills or empties it at once (S10).
+- Commits read the prediction by interpolation, which was up to 1 % of a trap's capacity off
+  across rate jumps (below zero).  Fixed: a commit starts from the prediction's last saved step
+  and integrates on (S8).
+
+| `fill_sequence` | no infiltration | 20 mm/h |
+|---|---|---|
+| no NBS | 15.9 s | 24.4 s |
+| 1 roof | 19.1 s | 22.5 s |
+| 10 roofs | 28.0 s (25.3 s before the commit change) | **67.7 s** (720 s before) |

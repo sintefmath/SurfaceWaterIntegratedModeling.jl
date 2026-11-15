@@ -1043,11 +1043,14 @@ _layer_range(el::NBSElement, nt::Int) = (nt + el.state_base + 1):(nt + el.state_
 # 1. cb_topo (VectorContinuousCallback, LeftRootFind): topology events on downward
 #    zero-crossings —
 #      :fill    capacity - V   trap fills, starts spilling
-#      :empty   V              trap empties, exposes its subtraps
+#      :empty   V              parent empties, exposes its subtraps
 #      :unspill inflow - loss  a full trap's net inflow goes negative
-#    Evolving traps get :fill (parents also :empty); full traps get :unspill.  LeftRootFind lets
-#    conditions starting at 0 (full traps, zero initial net inflow) wait for a genuine crossing
-#    rather than firing degenerately.
+#    plus :floor (V) for a leaf reaching empty, which does not stop the solve: it sets V to
+#    exactly 0, so the rate's jump to zero there is not stepped across at abstol-sized steps.
+#    Evolving traps get :fill and :empty (parents) or :floor (leaves); full traps get :unspill.
+#    LeftRootFind lets conditions starting at 0 (full traps, zero initial net inflow) wait for
+#    a genuine crossing rather than firing degenerately.  A condition that starts at exactly 0
+#    never fires, which is why a non-full trap is kept strictly below its capacity.
 #
 # 2. cb_ss (DiscreteCallback): steady state, checked at accepted steps — every evolving trap at
 #    rate exactly 0 or past a sign change (stalled at a wetted-area step), every NBS layer below a
@@ -1064,7 +1067,7 @@ One topology event the solve watches for.  The `VectorContinuousCallback` monito
 condition per entry.
 
 # Fields
-- `kind`: `:fill`, `:empty` or `:unspill`.
+- `kind`: `:fill`, `:empty`, `:unspill`, or `:floor` (a leaf reaching empty; not an event).
 - `trap`: the network-local trap index it concerns.
 """
 struct EventCondition
@@ -1101,11 +1104,12 @@ The topology events to monitor for this solve.
 - `nreg`: region count — a trap index above it is a parent, at or below it a leaf.
 
 # Returns
-A `Vector{EventCondition}`: `:fill` per evolving trap, `:empty` per evolving *parent*, and
-`:unspill` per full trap.  The order fixes the callback's condition indices.
+A `Vector{EventCondition}`: `:fill` per evolving trap, `:empty` per evolving *parent*, `:floor`
+per evolving leaf, and `:unspill` per full trap.  The order fixes the callback's condition
+indices.
 
-A leaf reaching `V = 0` is just sitting at its floor rather than changing topology, so only
-parents get `:empty`.  Nothing is mutated.
+A leaf reaching `V = 0` is just sitting at its floor rather than changing topology, so it gets
+`:floor`, which only sets it exactly empty, instead of `:empty`.  Nothing is mutated.
 """
 function _event_conditions(p::DynNetworkRateParams,
                            evolving::AbstractVector{<:Integer},
@@ -1113,8 +1117,7 @@ function _event_conditions(p::DynNetworkRateParams,
     conds = EventCondition[]
     for e in evolving
         push!(conds, EventCondition(:fill,  e))
-        p.net.traps[e].trap_ix > nreg &&
-            push!(conds, EventCondition(:empty, e))
+        push!(conds, EventCondition(p.net.traps[e].trap_ix > nreg ? :empty : :floor, e))
     end
     evolving_set = Set(evolving)
     for i in eachindex(p.net.traps)
@@ -1233,7 +1236,8 @@ The callback that halts integration at the first topology-changing event.
 # Returns
 `(callback, event)` — a `VectorContinuousCallback` (LeftRootFind), and the
 [`DynNetworkEvent`](@ref) it writes the hit into.  The caller reads `event` after `solve`
-returns; it stays `:none` if nothing fired.
+returns; it stays `:none` if nothing fired.  A `:floor` hit sets its leaf to exactly 0 and lets
+the solve go on.
 
 LeftRootFind lets a condition that starts *at* zero — a full trap with zero net inflow — wait
 for a genuine crossing instead of firing degenerately.
@@ -1253,7 +1257,7 @@ function _build_event_callback(p::DynNetworkRateParams,
         @inbounds for (k, ec) in enumerate(conds)
             if ec.kind == :fill
                 out[k] = p.geom[ec.trap].capacity - V[ec.trap]
-            elseif ec.kind == :empty
+            elseif ec.kind == :empty || ec.kind == :floor
                 out[k] = V[ec.trap]
             else   # :unspill: fire when the full trap's net inflow drops below its losses, by
                    # more than rounding noise (as the rate function counts it)
@@ -1263,10 +1267,14 @@ function _build_event_callback(p::DynNetworkRateParams,
     end
 
     function affect!(integrator, ix)
-        k  = isa(ix, AbstractVector) ? findfirst(!iszero, ix) : ix
-        ec = conds[k]
-        event.kind = ec.kind
-        event.trap = ec.trap
+        hits = isa(ix, AbstractVector) ? findall(!iszero, ix) : [ix]
+        k = findfirst(h -> conds[h].kind != :floor, hits)
+        if k === nothing                  # only leaves reaching empty: set them there, go on
+            foreach(h -> integrator.u[conds[h].trap] = 0.0, hits)
+            return
+        end
+        event.kind = conds[hits[k]].kind
+        event.trap = conds[hits[k]].trap
         terminate!(integrator)
     end
 
@@ -1290,48 +1298,38 @@ Enforce the three-state caller contract (FULL / TRANSITORY / EMPTY — see
 # Returns
 `nothing`, or throws an informative error on the first violation.  Nothing is mutated.
 
-Checks that a FULL trap has a spill path and that a FULL parent's in-network children are FULL
-too, and that a TRANSITORY trap has *no* spill path.  A parent at `V == 0` is TRANSITORY, not
-EMPTY: it subsumes its full children, so zero is its own-volume floor with them submerged.
+A trap is FULL when it has a spill path (`spill_path != 0`), as the router reads it; its volume
+must then be exactly its capacity, and a FULL parent's in-network children must be FULL too.
+Any other trap must hold `V < C`, strictly: its `:fill` condition `C - V` would otherwise start
+at zero, and a condition that starts at zero never fires.  `V` is also at least 0, except for a
+zero-capacity trap, whose "just below capacity" is `prevfloat(0.0)`: [`_t0_fast_path`](@ref)
+fills or empties it at once, or, a leaf without net inflow, leaves it there, empty.
 """
 function _validate_network(tstruct::TrapStructure,
                            net::DynNetwork,
                            state::AbstractVector{<:Real},
                            geom::Vector{TrapGeometry})
     nreg     = numregions(tstruct)
-    nt       = length(net.traps)
-    trap_map = Dict(net.traps[i].trap_ix => i for i in 1:nt)
-    for i in 1:nt
-        trap = net.traps[i]
-        V    = state[i]
-        C    = geom[i].capacity
-        if V == C                                     # FULL
-            trap.spill_path != 0 ||
-                error("solveDynNetwork!: FULL trap $(trap.trap_ix) has spill_path == 0. " *
-                      "Rebuild the network (via setup_network) with this trap in full_traps " *
-                      "before the next call so it obtains a downstream spill path " *
-                      "(spill_path > 0), or the out-of-domain sentinel (spill_path == -1) " *
-                      "if it spills straight out of the domain.")
-            if trap.trap_ix > nreg                    # parent: in-network children must be FULL
-                for child in subtrapsof(tstruct, trap.trap_ix)
-                    ci = get(trap_map, child, 0)
-                    ci == 0 && continue               # child not in network; assumed FULL externally
-                    state[ci] == geom[ci].capacity ||
-                        error("solveDynNetwork!: FULL parent trap $(trap.trap_ix) has " *
-                              "in-network child $child with V < C. " *
-                              "A parent trap can only hold water above both children's spillpoints, " *
-                              "so both children must be FULL whenever the parent is FULL.")
-                end
+    trap_map = Dict(net.traps[i].trap_ix => i for i in eachindex(net.traps))
+    for (i, trap) in enumerate(net.traps)
+        V, C = state[i], geom[i].capacity
+        if trap.spill_path != 0                       # FULL
+            V == C || error("solveDynNetwork!: FULL trap $(trap.trap_ix) (spill_path " *
+                            "$(trap.spill_path)) holds V = $V, not its capacity $C.")
+            trap.trap_ix > nreg || continue
+            for child in subtrapsof(tstruct, trap.trap_ix)
+                ci = get(trap_map, child, 0)          # a child not in network is FULL externally
+                ci == 0 || net.traps[ci].spill_path != 0 ||
+                    error("solveDynNetwork!: FULL parent trap $(trap.trap_ix) has in-network " *
+                          "child $child that is not FULL.  A parent trap can only hold water " *
+                          "above its children's spillpoints, so they are FULL whenever it is.")
             end
-        elseif V == 0.0 && trap.trap_ix <= nreg       # EMPTY (leaf trap at its floor)
-            # a lowest-level trap may legitimately sit empty; nothing to check.
-        else                                          # TRANSITORY
-            # also covers a parent at its floor (V==0): it subsumes its full children, so V==0 is
-            # the parent's own-volume floor with children submerged — TRANSITORY, not EMPTY.
-            trap.spill_path == 0 ||
-                error("solveDynNetwork!: TRANSITORY trap $(trap.trap_ix) has spill_path > 0. " *
-                      "A trap that is not yet full should not have a downstream spill path. " *
-                      "Rebuild the network without this trap in full_traps.")
+        else                                          # TRANSITORY, or EMPTY at V == 0
+            V < C && (V >= 0.0 || C == 0.0) ||
+                error("solveDynNetwork!: trap $(trap.trap_ix) without a spill path holds " *
+                      "V = $V with capacity $C; a trap that is not FULL needs 0 <= V < C " *
+                      "(prevfloat(C) just below full).  If it is full, rebuild the network " *
+                      "with it in full_traps so it gets a spill path.")
         end
     end
 end
@@ -1352,20 +1350,27 @@ Catch an entry state that cannot be held, so the caller can skip integration ent
 viable and the ODE should run.  Nothing is mutated.
 
 A FULL trap already draining (`du0 < 0`) unspills at once; a parent at its floor (`V == 0`) with
-negative net inflow must expose its children now.  The parent check recomputes the *unclamped*
-net rate, since `du0`'s physical floor guard has already zeroed it at `V == 0`.
+negative net inflow must expose its children now.  A zero-capacity trap (a parent whose subtraps
+all spill at its own level) has no volume between full and empty, so it is decided at once too:
+it fills if its net inflow is positive, and a parent empties otherwise.  A zero-capacity leaf
+with no net inflow just sits empty.  These checks recompute the *unclamped* net rate, since
+`du0`'s physical floor guard has already zeroed it at the floor.
 """
 function _t0_fast_path(V0, du0, p::DynNetworkRateParams, nreg::Int)
     nt = length(p.geom)
     for i in 1:nt
-        V0[i] == p.geom[i].capacity && du0[i] < 0.0 || continue
+        p.spilling[i] && du0[i] < 0.0 || continue
         return (time = 0.0, trap = p.net.traps[i].trap_ix, kind = :unspill)
     end
     inflow0, _ = _routed_inflow(V0, p)
     for i in 1:nt
-        (V0[i] == 0.0 && p.net.traps[i].trap_ix > nreg) || continue
-        _net_rate(inflow0[i] - wetted_infiltration(p.geom[i], 0.0), p.geom[i]) < 0.0 || continue
-        return (time = 0.0, trap = p.net.traps[i].trap_ix, kind = :empty)
+        g, parent = p.geom[i], p.net.traps[i].trap_ix > nreg
+        zerocap = g.capacity == 0.0
+        !p.spilling[i] && (zerocap || parent && V0[i] == 0.0) || continue
+        rate = _net_rate(inflow0[i] - wetted_infiltration(g, 0.0), g)
+        kind = zerocap && rate > 0.0             ? :fill  :
+               parent && (zerocap || rate < 0.0) ? :empty : :none
+        kind == :none || return (time = 0.0, trap = p.net.traps[i].trap_ix, kind = kind)
     end
     return nothing
 end
@@ -1412,9 +1417,9 @@ event, steady state, or `tmax`.  `state` is updated in place.
 - `stop_at_steady`: stop early at steady state, returning `time = Inf` (default `true`, for
   predicting the next event).  Pass `false` when the state at `tmax` is needed (a commit, a
   timepoint sample): the solve then always runs to `tmax`, so slow flow is not dropped.
-- `keep_solution`: also return the solver's solution (`res.solution`, a function of elapsed
-  time), so a prediction can be read at any time it covers instead of integrated again.  Only
-  when the solve integrates; the immediate returns carry none.  Default `false`.
+- `keep_solution`: also return the solver's solution (`res.solution`, its saved steps in elapsed
+  time), so a prediction's trajectory can be reused instead of integrated again.  Only when the
+  solve integrates; the immediate returns carry none.  Default `false`.
 
 # Returns
 `(; time, trap, kind)` (state is in place): `time` the event time (`Inf` = steady state,
@@ -1422,10 +1427,13 @@ event, steady state, or `tmax`.  `state` is updated in place.
 `:unspill`, `:none` (`:none` covers steady state and a `tmax` cutoff — tell apart by `time`).
 
 # Three-state contract (validated at entry)
-- **FULL** (V == C): `spill_path != 0` (`> 0` into an in-network path, `-1` out of domain); a
-  parent's in-network children are all FULL too.
-- **TRANSITORY** (0 < V < C): `spill_path == 0`.
-- **EMPTY** (V == 0): a leaf trap (`trap_ix <= numregions(tstruct)`).
+- **FULL**: `spill_path != 0` (`> 0` into an in-network path, `-1` out of domain), and V == C;
+  a parent's in-network children are all FULL too.
+- **TRANSITORY** (0 <= V < C): `spill_path == 0`.  A parent at V == 0 is transitory: zero is its
+  own-volume floor, with its children full and submerged.
+- **EMPTY** (V == 0): a leaf trap (`trap_ix <= numregions(tstruct)`), `spill_path == 0`.
+A zero-capacity trap that is not FULL enters at `prevfloat(0.0)` and is decided at once (see
+[`_t0_fast_path`](@ref)).
 
 # Caller protocol after each event
 
@@ -1500,7 +1508,7 @@ function solveDynNetwork!(state::AbstractVector{Float64},
 
     # evolving = every non-FULL trap.  Empty/zero-inflow traps are included: their inflow can
     # start mid-integration (culverts, NBS) and without a :fill callback V could exceed capacity.
-    evolving = [i for i in 1:nt if V0[i] != p.geom[i].capacity]
+    evolving = [i for i in 1:nt if !p.spilling[i]]
 
     # NBS layer states evolve but never fire a topology event, so they join the steady test only
     ss_indices = p.nbsplan === nothing ? evolving :
@@ -1539,10 +1547,14 @@ function solveDynNetwork!(state::AbstractVector{Float64},
     sol = solve(ODEProblem(dynNetworkRateFunction!, V0, (0.0, tmax_ode), p),
                 AutoTsit5(Rodas5P(autodiff = AutoFiniteDiff()));
                 callback = callback, abstol = abstol, reltol = reltol,
-                # keep the trajectory only when the caller reads it later
-                save_everystep = keep_solution, save_start = keep_solution,
-                dense = keep_solution)
+                # keep the steps only when the caller reads them later; never the dense output,
+                # which is unreliable across the rate jumps (see `_state_at`)
+                save_everystep = keep_solution, save_start = keep_solution, dense = false)
 
+    # anything else (e.g. maxiters) stopped short of an event, steady state and tmax alike
+    SciMLBase.successful_retcode(sol) ||
+        error("solveDynNetwork!: the ODE solve stopped early ($(sol.retcode)) at elapsed " *
+              "t = $(sol.t[end]) of $tmax, without an event or steady state")
     state .= sol.u[end]        # write ODE result back in place
 
     # no topology event: tmax cutoff (stopped at tmax_ode) vs genuine steady state (earlier)
