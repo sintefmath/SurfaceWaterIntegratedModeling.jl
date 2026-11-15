@@ -137,3 +137,19 @@ With that fix and the D2 steps 1–3, step 6 and commit-from-prediction (pinned,
 The profile shares of section 3 measured mostly that loop; a profile of the finished 10-roof run is
 still to be taken.  Remaining items: `agent/D2_TOUCH_PROPOSAL.md` (step 4, bounded predictions,
 the stiff solver's finite-difference Jacobian).
+
+## 6. Update (2026-11-15): base SWIM
+
+A profile of the finished 10-roof run showed base SWIM dominating: the candidate scan in
+`_identify_next_status_change!` (≈ 32 %, mostly `all_subtraps_filled`) and `compute_flow` →
+`watercourses` (≈ 28 %, topological sort and untyped graph lookups); network touches ≈ 25 %.
+Fixed, each with bit-identical event histories (`event_record.jl` / `event_record_compare.jl`):
+
+| Commit | Change | vakaas no NBS | vakaas 10 roofs |
+|---|---|---|---|
+| (before) | | 34.3 s | 51.5 s |
+| `2ee7df3` | candidate scan tests the time bound first; `agglomerations::SimpleDiGraph{Int}` | 21.1 s | 38.6 s |
+| `5e0b9f7` | `flowgraph::SimpleDiGraph{Int}` | 12.4 s | 29.3 s |
+| `bc33c16` | cell graph sorted once per `fill_sequence` (`cell_order`) | 12.7 s | 25.9 s |
+
+The last one gains little with 3 weather periods; it grows with the number of periods.
