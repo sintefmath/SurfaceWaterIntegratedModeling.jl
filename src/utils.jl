@@ -256,6 +256,9 @@ function network_states_at_timepoints(tstruct::TrapStructure{<:Real},
     runoff  = zeros(Float64, size(tstruct.topography))
     precip  = 0.0
 
+    # each period's end, as `fill_sequence` predicts to it: the next period's start (or Inf)
+    starts  = [e.timestamp for e in seq if e.rain_rate !== nothing]
+    period_end(t) = (k = findfirst(>(t), starts); k === nothing ? Inf : starts[k])
     driver  = nothing                     # built at the first (weather-boundary) event
     result  = Vector{@NamedTuple{trap_volumes::Dict{Int,Float64},
                                  nbs_layers::Dict{Int,Vector{Float64}}}}()
@@ -279,7 +282,7 @@ function network_states_at_timepoints(tstruct::TrapStructure{<:Real},
             nbs_state = driver === nothing ? Dict{Int,Vector{Float64}}() : driver.nbs_state
             driver = _rebuild_replay_driver(driver, tstruct, seeds, culverts, nbs, filled,
                                             amounts, inflow, runoff, precip, infil,
-                                            z_vol_tables, t_i, nbs_state)
+                                            z_vol_tables, t_i, period_end(t_i), nbs_state)
         else
             # incremental event: advance the running state, then rebuild the network only if it
             # is actually touched (a member trap fired or an inflow region changed)
@@ -308,7 +311,8 @@ function network_states_at_timepoints(tstruct::TrapStructure{<:Real},
             if touched
                 driver = _rebuild_replay_driver(driver, tstruct, seeds, culverts, nbs, filled,
                                                 amounts, inflow, runoff, precip, infil,
-                                                z_vol_tables, t_i, driver.nbs_state)
+                                                z_vol_tables, t_i, period_end(t_i),
+                                                driver.nbs_state)
             end
         end
 
@@ -434,13 +438,15 @@ end
 
 # build a driver whose topology is `setup_network(filled)` and whose committed trap volumes are
 # `amounts` (both taken from `seq`, so they reproduce the original run's committed state) and
-# whose NBS layers come from `nbs_state`.
+# whose NBS layers come from `nbs_state`.  It predicts up to `endtime`, the period's end, as
+# `fill_sequence` does: a different span gives different solver steps, hence event times that
+# differ from the recorded ones by solver tolerance.
 function _rebuild_replay_driver(driver, tstruct, seeds, culverts, nbs, filled, amounts, inflow,
-                                runoff, precip, infil, z_vol_tables, t, nbs_state)
+                                runoff, precip, infil, z_vol_tables, t, endtime, nbs_state)
     rateinfo = RateInfo(copy(runoff), zeros(numtraps(tstruct)),
                         zeros(numtraps(tstruct)), copy(inflow))
     return build_network_driver(tstruct, seeds, culverts, findall(filled), amounts,
-                                rateinfo, infil, z_vol_tables, t, Inf;
+                                rateinfo, infil, z_vol_tables, t, endtime;
                                 nbs_placements = nbs, precipitation = precip,
                                 nbs_state = nbs_state)
 end

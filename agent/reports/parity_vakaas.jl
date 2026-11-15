@@ -53,7 +53,6 @@ for (d, t) in early
     @printf("  %5d | %9.4f | %9.4f | %6.3f | %s %s %s\n", t, fb[t], fn[t], d, t in dynset, covered(t),
             t > SWIM.numregions(ts))
 end
-if get(ENV, "PARITY_SAMPLE", "0") == "1"
 # volumes at sampled times
 tps = collect(0.0:10.0:300.0)
 sb  = SWIM.all_states_at_timepoints(ts, base, tps; infiltration = infil, verbose = false)
@@ -68,5 +67,4 @@ for (k, t) in enumerate(tps)
     @printf("%4.0f | %11.2f  %11.2f  %8.1e | %8.1e (%5d)            | %5d         | %d\n",
             t, sum(a), sum(b), abs(sum(a) - sum(b)) / max(sum(a), eps()), rel[i], i,
             count(sb[k].filled .!= sn[k].filled), count(<(0), b))
-end
 end
