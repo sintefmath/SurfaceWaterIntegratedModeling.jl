@@ -144,6 +144,7 @@ Each invariant names where it is enforced.
 
 **Flow field (`network_watercourses`)**
 - **F1.** The field splits each placement's terrain outflow `O_t` over its exits with the solver's shares, i.e. from the baseline without covered traps' spills. At each exit it removes exactly what its own field's footprint delivers there (`_exit_throughput` on that field), so the correction never takes away more than the field carries. *Test "network_watercourses: NBS exit split matches the solver".*
+- **F2.** A change the field propagates through a full trap passes on `max(D + d, 0) - max(D, 0)`, where `D` is the trap's net output (what reaches its bottoms less the infiltration room on its submerged footprint), as the solver's full trap spills `inflow - footprint loss` only when positive. A trap short of water takes added flow first; `D` accumulates over the changes through it. Passing the change through unchanged overstated the flow below such traps (vakaas, roof water just after the rain: ~44 m3 too much outflow over 20 min). *`_through_trap!`, `_trap_net_output` in `network_watercourses.jl`; test "network_watercourses: a full trap short of water absorbs added flow first".*
 
 ## Known simplifications (marked `# @@@` in code)
 
@@ -167,4 +168,4 @@ Each invariant names where it is enforced.
    - `setup.jl`, `run1.jl`, `run2.jl`: the SUrbArea synthetic case, run outside the webapp, with a mass-balance check;
    - `zero_vol.jl`: the zero-volume trap count behind S6.
    - The case's inputs are in `<SUrbArea>/debug/` (`synthetic_dtm*`, `synthetic_userdefined*.geojson`), which is not in git.
-6. **A removal through a full trap in the field (not verified).** `_propagate_field_delta!` skips a full trap's footprint cells and continues from its spill point. That is exact for an added flow `d` (the trap's outflow rises by `d`). For a removal larger than the trap's current outflow, the outflow should drop to 0 (and the trap would stop being full), but the per-cell rule at the first cell past the spill point would also remove that cell's own runoff.
+6. **A change through a full trap in the field: resolved 2026-11-16 (F2).** `_propagate_field_delta!` used to pass a change through a full trap unchanged. That was wrong both for an added flow reaching a trap short of water (it should fill the deficit first) and for a removal larger than the trap's outflow. Both now follow the per-cell rule with the trap's net output as its value.

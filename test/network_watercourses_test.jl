@@ -112,6 +112,35 @@ end
     @test sum(abs.(rn[westpit] .- ro[westpit])) > 0.0  # the delivered flow reached past the pit
 end
 
+# A full trap short of water (its footprint infiltrates more than reaches it) takes added flow first
+# and passes on only the rest, as the solver's full trap spills `inflow - footprint loss` only when
+# positive.  The field used to pass all of it on (vakaas: roof water just after the rain overstated
+# the outflow by ~44 m3 over 20 min).  The pit spills west off the edge; a culvert takes the flow
+# of row 3 (which also leaves at the west edge) and delivers it into the pit.
+@testset "network_watercourses: a full trap short of water absorbs added flow first" begin
+    N    = 20
+    grid = Float64[j for i in 1:N, j in 1:N]
+    for i in 9:11, j in 6:8; grid[i, j] -= 5.0; end
+    ts   = spillanalysis(grid, usediags = true)
+    li   = LinearIndices(size(grid))
+    pit  = ts.regions[li[10, 7]]
+    prec = 1.0e-3
+    infil = zeros(size(grid)); infil[ts.footprints[pit]] .= 10prec   # the pit loses more than it gets
+
+    full_traps = Vector{Bool}(falses(numtraps(ts))); full_traps[pit] = true
+    trap_volumes = Dict{Int,Float64}(pit => SWIM._own_capacity(ts, pit))
+    cv = DynCulvert(ts, CartesianIndex(3, 16), CartesianIndex(10, 11); r = 0.5)
+    ro, = SWIM.watercourses(ts, full_traps; precipitation = prec, infiltration = infil)
+    rn  = network_watercourses(ts, full_traps, trap_volumes, Dict{Int,Vector{Float64}}();
+                               culverts = [cv], precipitation = prec, infiltration = infil)
+    q = ro[li[3, 16]] - rn[li[3, 16]]                 # what the culvert moves
+    D = SWIM._trap_net_output(ro, ts, pit)            # the pit's own net output
+    @test q > 0 && D < 0 && D + q < 0                 # it all goes into the pit's deficit
+    edge = [li[i, 1] for i in 1:N]
+    # row 3 loses q at the edge; the pit, short of water, passes none of it on
+    @test sum(max.(rn[edge], 0.0)) - sum(max.(ro[edge], 0.0)) ≈ -q
+end
+
 # ---------------------------------------------------------------------------
 # NBS exit split: the field must split an NBS's outflow over its exits as the solver does.  In the
 # solver's baseline a full network trap does not spill over the terrain (its spill reaches the NBS

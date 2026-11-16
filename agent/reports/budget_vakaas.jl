@@ -104,4 +104,5 @@ function budget(K)
     end
 end
 
-foreach(budget, isempty(ARGS) ? [0, 10] : parse.(Int, ARGS))
+# a script that defines BUDGET_LIBRARY first includes this one for its helpers only
+isdefined(Main, :BUDGET_LIBRARY) || foreach(budget, isempty(ARGS) ? [0, 10] : parse.(Int, ARGS))

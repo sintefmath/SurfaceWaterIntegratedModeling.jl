@@ -90,8 +90,11 @@ function network_watercourses(tstruct::TrapStructure{<:Real},
     comps = setup_network(tstruct, findall(full_traps);
                           dyn_coords = seeds, culverts = culverts, nbs = nbs)
 
-    footprint_set  = Set{Int}(vcat([n.footprint for n in nbs]...))
-    full_traps_int = findall(full_traps)
+    footprint_set = Set{Int}(vcat([n.footprint for n in nbs]...))
+    # what every flow change propagates through: the live field, the unchanged one (a full
+    # trap's own output is read from it), each crossed full trap's net output so far
+    fc = (; field = runoff_live, field0 = runoff_orig, trap_out = Dict{Int,Float64}(), footprint_set,
+          tstruct, full = findall(full_traps))
 
     # the solver's baseline, which sets how an NBS splits its outflow over its exits: there,
     # network-covered full traps do not spill over the terrain (their spill reaches an NBS as draw)
@@ -117,8 +120,8 @@ function network_watercourses(tstruct::TrapStructure{<:Real},
                 # than is available (mass conservation), including any upstream network corrections
                 q = min(_culvert_flow(cvplan, net, ci, trap_level), max(runoff_live[inlet], 0.0))
                 q <= 0.0 && continue
-                _propagate_field_delta!(runoff_live, footprint_set, tstruct, full_traps_int, inlet,  -q)
-                _propagate_field_delta!(runoff_live, footprint_set, tstruct, full_traps_int, outlet,  q)
+                _propagate_field_delta!(fc, inlet,  -q)
+                _propagate_field_delta!(fc, outlet,  q)
             end
         end
 
@@ -133,14 +136,12 @@ function network_watercourses(tstruct::TrapStructure{<:Real},
             _, exit_shares, _ = _nbs_baseline(nb, tstruct, runoff_solver, precip)
             delivered = _exit_throughput(nb.link, runoff_orig)
             for (c, sh, w) in zip(nb.link.exits, exit_shares, delivered)
-                _propagate_field_delta!(runoff_live, footprint_set, tstruct, full_traps_int,
-                                        LI[c], O_t * sh - w)
+                _propagate_field_delta!(fc, LI[c], O_t * sh - w)
             end
             # @@@ pond shares stay in the trap under the footprint (field undefined there); if
             #     that trap is full they should continue along its spill path
             for (o, l) in zip(nb.outlets, _piped_layers(nb.system, nb.n_terrain))
-                _propagate_field_delta!(runoff_live, footprint_set, tstruct, full_traps_int,
-                                        LI[o], first(_layer_fluxes(nb.system.layers[l], layers[l], A)))
+                _propagate_field_delta!(fc, LI[o], first(_layer_fluxes(nb.system.layers[l], layers[l], A)))
             end
         end
     end
@@ -155,18 +156,49 @@ end
 # Carry a flow change `amount` downstream from `start_lin` with the solver's per-cell rule (as
 # `_track_flow!`): each cell's value changes by what arrives, and what passes on is
 # `max(V+d,0) - max(V,0)` — spare infiltration absorbs added water, a removal stops at zero flow.
-# Stops at an NBS footprint (it intercepts surface flow), when nothing is left, or where the
-# route ends.  The route (`flow_path_from`) passes through full traps via their spill paths.
-function _propagate_field_delta!(field, footprint_set, tstruct, full_traps_int::Vector{Int},
-                                 start_lin::Int, amount::Float64)
+# The route (`flow_path_from`) jumps each full trap it meets to its spill point; the trap passes
+# on change by the same rule, with its net output as V (`_through_trap!`).  Stops at an NBS
+# footprint (it intercepts surface flow), when nothing is left, or where the route ends.  `fc`
+# holds the field and what the propagation needs (see `network_watercourses`).
+function _propagate_field_delta!(fc, start_lin::Int, amount::Float64)
     amount == 0.0 && return
-    paths, _ = flow_path_from(tstruct, start_lin; full_traps = full_traps_int)
-    for seg in paths, c in seg
-        (c in footprint_set) && return
-        V = field[c]
-        field[c] = V + amount
-        amount = max(V + amount, 0.0) - max(V, 0.0)
-        amount == 0.0 && return
+    paths, fulls = flow_path_from(fc.tstruct, start_lin; full_traps = fc.full)
+    traps = Iterators.Stateful(fulls)
+    # a start inside the first full trap has no leading segment: that trap comes first
+    if !isempty(fulls) && start_lin in fc.tstruct.footprints[fulls[1]]
+        amount = _through_trap!(fc, popfirst!(traps), amount)
+    end
+    for seg in paths
+        for c in seg
+            (amount == 0.0 || c in fc.footprint_set) && return
+            V = fc.field[c]
+            fc.field[c] = V + amount
+            amount = max(V + amount, 0.0) - max(V, 0.0)
+        end
+        isempty(traps) || (amount = _through_trap!(fc, popfirst!(traps), amount))
     end
     return
+end
+
+# Pass change `d` through full trap `t`, which acts as one cell whose value is its net output D:
+# it passes on `max(D+d,0) - max(D,0)`, as the solver's full trap spills `inflow - footprint loss`
+# only when positive.  A trap short of water (D < 0, e.g. just after the rain) takes added water
+# first.  D starts from the unchanged field and accumulates over the changes through `t`.
+function _through_trap!(fc, t, d)
+    D = get!(() -> _trap_net_output(fc.field0, fc.tstruct, t), fc.trap_out, t)
+    fc.trap_out[t] = D + d
+    return max(D + d, 0.0) - max(D, 0.0)
+end
+
+# Full trap `t`'s net output in `field`: what reaches its bottom cells less the infiltration room
+# left on its submerged footprint, as base SWIM's `_compute_trap_output`, but not clamped at 0.
+function _trap_net_output(field, tstruct, t)
+    sp, leaves = tstruct.spillpoints[t].elevation, tstruct.lowest_subtraps_for[t]
+    net = 0.0
+    for c in tstruct.footprints[t]
+        tstruct.topography[c] < sp && (net += min(field[c], 0.0))
+        isempty(Graphs.outneighbors(tstruct.flowgraph, c)) && tstruct.regions[c] in leaves &&
+            (net += max(field[c], 0.0))
+    end
+    return net
 end
