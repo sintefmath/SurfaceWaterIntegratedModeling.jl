@@ -392,6 +392,11 @@ end
 # ----------------------------------------------------------------------------
 # helpers for network_states_at_timepoints
 
+# how far (relative) a replayed network event may precede the recorded one: solver-tolerance drift,
+# which the NBS layers carry along (up to 2e-3 seen on vakaas with 10 green roofs); more is a replay
+# that went wrong
+const _REPLAY_RTOL = 1e-2
+
 # apply one SpillEvent field onto a running full vector: a full snapshot replaces it, a vector
 # of IncrementalUpdate patches the changed entries.
 function _apply_field!(dst::Vector, src)
@@ -426,11 +431,17 @@ function _event_touches_network(driver, ev)
 end
 
 # commit every context to `t` under its frozen rates and harvest the advanced NBS layers into
-# the persistent store, so they survive the driver rebuild that follows.
+# the persistent store, so they survive the driver rebuild that follows.  A context that predicts
+# its event a little before the recorded one at `t` is committed at its own event: the replay
+# re-solves the networks, and the NBS layers, which `seq` does not record, carry its rounding
+# along, so its event times differ from the recorded ones within the solver's tolerance.
 function _carry_nbs!(driver, tstruct, t)
     for ctx in driver.contexts
-        ctx.last_solve_time < t &&
-            _commit_network!(ctx, tstruct, t)
+        T = min(t, ctx.next_event.time)
+        @assert(t - T <= _REPLAY_RTOL * max(abs(t), 1.0),
+                "replay predicts a $(ctx.next_event.kind) of trap $(ctx.next_event.trap) at $T, " *
+                "well before the recorded event at $t")
+        ctx.last_solve_time < T && _commit_network!(ctx, tstruct, T)
     end
     _harvest!(driver)
     return driver
@@ -452,14 +463,15 @@ function _rebuild_replay_driver(driver, tstruct, seeds, culverts, nbs, filled, a
 end
 
 # sample the network state at absolute time `tp`: for each component, read its state at `tp`
-# (from its stored prediction where that covers `tp`; no topology event can fall before the next
-# seq event, which is > tp), then the trap volumes and per-placement NBS layer volumes.
+# (from its stored prediction where that covers `tp`), then the trap volumes and per-placement NBS
+# layer volumes.  A component whose replay predicts its event a little before the recorded one is
+# read at that event, as `_carry_nbs!` commits it there.
 function _sample_network(driver, tstruct, tp::Float64)
     trap_volumes = Dict{Int,Float64}()
     nbs_layers   = Dict{Int,Vector{Float64}}()
     driver === nothing && return (; trap_volumes, nbs_layers)
     for ctx in driver.contexts
-        s = _state_at(ctx, tstruct, tp)
+        s = _state_at(ctx, tstruct, min(tp, ctx.next_event.time))
         for (i, g) in enumerate(ctx.global_ix)
             trap_volumes[g] = s[i]
         end

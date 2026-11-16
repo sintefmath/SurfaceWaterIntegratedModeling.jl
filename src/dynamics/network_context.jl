@@ -131,7 +131,8 @@ function _predict_network!(ctx::DynNetworkContext, tstruct, endtime)
     return ctx.next_event
 end
 
-# how far (relative to the absolute time) a commit may lie past the predicted event: rounding only
+# how close (relative to the absolute time) two times count as the same instant: a commit at the
+# predicted event, rounded
 const _COMMIT_EVENT_RTOL = 1e-9
 
 # The state of `ctx` at absolute time `t` (not before its committed time): the stored prediction's
@@ -145,16 +146,19 @@ const _COMMIT_EVENT_RTOL = 1e-9
 function _state_at(ctx::DynNetworkContext, tstruct, t)
     sol, dt = ctx.prediction, t - ctx.last_solve_time
     ts = sol === nothing ? [0.0] : sol.t
-    # an absolute time converted back to elapsed (e.g. the predicted event's) rounds
-    rounding = 4eps(max(abs(t), 1.0))
-    dt <= ts[end] + rounding && (dt = min(dt, ts[end]))
+    # the same instant, to the commit's tolerance (an absolute time converted back to elapsed
+    # rounds)
+    same = _COMMIT_EVENT_RTOL * max(abs(t), 1.0)
+    dt <= ts[end] + same && (dt = min(dt, ts[end]))
     k = searchsortedlast(ts, dt)
     state = sol === nothing ? copy(ctx.state) : copy(sol.u[k])
-    dt - ts[k] <= rounding && return state
+    dt - ts[k] <= same && return state
     res = solveDynNetwork!(state, tstruct, ctx.params; tmax = dt - ts[k], stop_at_steady = false)
     last_step = k < length(ts) && ts[k + 1] == ts[end]
     @assert(res.kind == :none || last_step && ctx.next_event.kind != :none,
-            "network state at $t: a $(res.kind) event the prediction did not see")
+            "network state at $t: a $(res.kind) event of trap $(res.trap) at elapsed " *
+            "$(ts[k] + res.time) the prediction did not see (saved step $k of $(length(ts)), " *
+            "commit at $dt, covered $(ts[end]), predicted $(ctx.next_event))")
     return state
 end
 
